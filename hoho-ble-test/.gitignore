@@ -1,0 +1,21 @@
+# ── PlatformIO ───────────────────────────────────────────────────────────
+firmware/.pio/
+firmware/.vscode/
+firmware/.cache/
+firmware/compile_commands.json
+firmware/tools/sim_test
+
+# ── Xcode ────────────────────────────────────────────────────────────────
+# .xcodeproj 는 project.yml 에서 생성하므로 커밋하지 않는다
+app/*.xcodeproj/
+app/*.xcworkspace/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+build/
+
+# ── 검증 산출물 ──────────────────────────────────────────────────────────
+.verify/
+
+# ── macOS ────────────────────────────────────────────────────────────────
+.DS_Store

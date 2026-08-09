@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleDisplayName</key>
+	<string>HOHO BLE</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+
+	<!-- 단일 타깃 watchOS 앱 (WatchKit Extension 없음) -->
+	<key>WKApplication</key>
+	<true/>
+	<key>WKCompanionAppBundleIdentifier</key>
+	<string>com.hoho.bletest</string>
+	<!-- 아이폰 앱 없이도 워치 단독으로 설치·실행 가능 -->
+	<key>WKRunsIndependentlyOfCompanionApp</key>
+	<true/>
+
+	<!-- 워크아웃 세션으로 백그라운드 실행 -->
+	<key>WKBackgroundModes</key>
+	<array>
+		<string>workout-processing</string>
+	</array>
+
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>요트 텔레메트리 모듈(HOHO-01)에 연결해 속도·침로·힐 각을 실시간으로 받기 위해 블루투스를 사용합니다.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>세일링 훈련 세션 중 심박수 등의 운동 데이터를 읽어 표시합니다.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>세일링 훈련 기록을 건강 앱에 저장합니다. 훈련 세션이 실행 중이어야 손목을 내려도 BLE 연결이 유지됩니다.</string>
+</dict>
+</plist>

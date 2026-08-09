@@ -1,0 +1,93 @@
+# XcodeGen 프로젝트 정의.
+#   생성:  cd app && xcodegen generate
+# .xcodeproj 는 이 파일에서 만들어지므로 직접 편집하지 말고 여기를 고칠 것.
+
+name: HohoBLE
+
+options:
+  bundleIdPrefix: com.hoho.bletest
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+    watchOS: "10.0"
+  groupSortPosition: top
+  generateEmptyDirectories: true
+
+# 서명 팀은 여기 한 곳만 채우면 두 타깃 모두에 적용된다.
+# 예)  DEVELOPMENT_TEAM: ABCDE12345
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_EMIT_LOC_STRINGS: YES
+    GENERATE_INFOPLIST_FILE: NO
+    ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+targets:
+
+  # ── iPhone 앱 ───────────────────────────────────────────────────────────
+  HohoBLE:
+    type: application
+    platform: iOS
+    sources:
+      - path: Shared
+      - path: iOS
+    settings:
+      base:
+        PRODUCT_NAME: HohoBLE
+        PRODUCT_BUNDLE_IDENTIFIER: com.hoho.bletest
+        INFOPLIST_FILE: iOS/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+    dependencies:
+      # 워치 앱을 아이폰 앱 번들 안에 넣어 함께 설치되도록 한다.
+      - target: HohoBLE Watch App
+        embed: true
+        codeSign: true
+        copy:
+          destination: productsDirectory
+          subpath: "$(CONTENTS_FOLDER_PATH)/Watch"
+    scheme:
+      testTargets: []
+
+  # ── Apple Watch 앱 (단일 타깃, 독립 실행) ───────────────────────────────
+  HohoBLE Watch App:
+    type: application
+    platform: watchOS
+    sources:
+      - path: Shared
+      - path: Watch
+    settings:
+      base:
+        PRODUCT_NAME: HohoBLE Watch App
+        PRODUCT_BUNDLE_IDENTIFIER: com.hoho.bletest.watchkitapp
+        INFOPLIST_FILE: Watch/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Watch/HohoBLEWatch.entitlements
+        TARGETED_DEVICE_FAMILY: "4"
+        # 아이폰 앱 없이 워치 단독 설치 지원
+        WATCHOS_DEPLOYMENT_TARGET: "10.0"
+    scheme:
+      testTargets: []
+
+schemes:
+  HohoBLE:
+    build:
+      targets:
+        HohoBLE: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
+  HohoBLE Watch App:
+    build:
+      targets:
+        HohoBLE Watch App: all
+    run:
+      config: Debug
+    archive:
+      config: Release

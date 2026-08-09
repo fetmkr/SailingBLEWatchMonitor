@@ -1,0 +1,4 @@
+# Claude Code 로컬 설정 (머신별 퍼미션 — 공유하지 않음)
+.claude/settings.local.json
+
+.DS_Store
