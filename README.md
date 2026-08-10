@@ -1,4 +1,4 @@
-# hoho-ble-test
+# SailingBLEWatchMonitor
 
 요트 텔레메트리 BLE 테스트 모노레포.
 
@@ -6,7 +6,7 @@ ESP32-S3 개발보드가 가상 GPS 속도 데이터를 만들어 BLE 로 뿌리
 아이폰과 애플워치 네이티브 앱이 이를 받아 실시간으로 표시한다.
 
 ```
-hoho-ble-test/
+.
 ├── PROTOCOL.md     ← 패킷 규격 (단일 진실 공급원)
 ├── firmware/       ← ESP32-S3 펌웨어  (PlatformIO + Arduino + NimBLE)
 ├── app/            ← Xcode 프로젝트   (SwiftUI, iOS 앱 + 독립 실행 watchOS 앱)
