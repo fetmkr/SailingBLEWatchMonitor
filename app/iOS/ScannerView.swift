@@ -23,7 +23,7 @@ struct ScannerView: View {
                     ContentUnavailableView {
                         Label("광고를 찾는 중", systemImage: "dot.radiowaves.left.and.right")
                     } description: {
-                        Text("\(HohoProtocol.deviceName) 의 광고 패킷을 기다리는 중입니다.\n연결은 하지 않습니다.")
+                        Text("\(HohoProtocol.namePrefix)* 모듈의 광고 패킷을 기다리는 중입니다.\n연결은 하지 않습니다.")
                     }
                 } else {
                     List {

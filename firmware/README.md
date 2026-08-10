@@ -1,4 +1,4 @@
-# firmware — HOHO-01 (ESP32-S3)
+# firmware — HOHO 텔레메트리 모듈 (ESP32-S3)
 
 가상 요트 텔레메트리를 만들어 BLE 로 뿌리는 테스트 펌웨어.
 프로토콜은 [`../PROTOCOL.md`](../PROTOCOL.md) 를 따른다.
@@ -69,19 +69,47 @@ pio device monitor
 
 ```
 ═══════════════════════════════════════════
-  HOHO-01 — 요트 텔레메트리 BLE 테스트
+  HOHO-hojun — 요트 텔레메트리 BLE 테스트
+  module_id 1 (0x01)
   service   b0a70001-0000-4000-8000-000000000001
   telemetry b0a70002-0000-4000-8000-000000000001
   notify 4.0Hz / adv refresh 1.0Hz
+  이름을 바꾸려면:  name <이름>   (help 로 전체 명령)
 ═══════════════════════════════════════════
-[BLE] advertising 시작 — ADV_IND / connectable (interval 200ms)
-[    1.0s] SOG  5.61 kn | COG  45.0° | HEEL  +12.3° | BATT 100% | seq   1 | ADVERTISING
-[    2.0s] SOG  5.74 kn | COG  45.0° | HEEL  +12.9° | BATT 100% | seq   2 | ADVERTISING
+[BLE] advertising 시작 — HOHO-hojun (ADV_IND / connectable, interval 200ms)
+[    1.0s] HOHO-hojun | SOG  5.61 kn | COG  45.0° | HEEL  +12.3° | BATT 100% | seq   1 | ADVERTISING
+[    2.0s] HOHO-hojun | SOG  5.74 kn | COG  45.0° | HEEL  +12.9° | BATT 100% | seq   2 | ADVERTISING
 [BLE] 연결됨 ← 5f:2a:... (conn=1)
-[BLE] advertising 시작 — ADV_SCAN_IND / non-connectable (interval 200ms)
+[BLE] advertising 시작 — HOHO-hojun (ADV_SCAN_IND / non-connectable, interval 200ms)
 [BLE] notify 구독 ON
-[    3.0s] SOG  5.88 kn | COG  45.0° | HEEL  +13.5° | BATT 100% | seq   3 | CONNECTED (notify ON)
+[    3.0s] HOHO-hojun | SOG  5.88 kn | COG  45.0° | HEEL  +13.5° | BATT 100% | seq   3 | CONNECTED (notify ON)
 ```
+
+### 보드 이름 붙이기
+
+시리얼 모니터에서 바로 설정한다. NVS 에 저장되므로 재부팅해도 유지되고,
+다시 플래시해도 남는다 (`pio run -t erase` 하면 지워짐).
+
+```
+name hojun
+```
+
+```
+[ID ] 이름 HOHO-hojun | module_id 1 (0x01) | service b0a70001-...
+[BLE] advertising 시작 — HOHO-hojun (ADV_IND / connectable, interval 200ms)
+[ID ] 저장 완료 — 앱에서 모듈을 다시 선택해야 합니다.
+```
+
+| 명령 | 설명 |
+|---|---|
+| `name <이름>` | 보드 이름 설정. 최대 11자, 영숫자/`-`/`_` |
+| `info` | 현재 이름과 `module_id` 출력 |
+| `help` | 도움말 |
+
+설정하지 않으면 MAC 뒷 2바이트로 자동 생성된다 (`HOHO-A3F2`).
+따라서 **아무 설정 없이 여러 장을 구워도 이름이 겹치지 않는다.**
+
+이름을 바꾸면 `module_id` 도 바뀌므로 앱에서 모듈을 다시 골라야 한다.
 
 ### USB CDC 보드에서 로그가 안 보일 때
 

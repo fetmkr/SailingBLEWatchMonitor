@@ -18,6 +18,10 @@ struct LiveView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
+                    if !ble.hasPinnedModule {
+                        NoModuleBanner()
+                    }
+
                     StatusBadge(state: ble.state, isLive: ble.isLive,
                                 disconnectedFor: ble.disconnectedFor)
 
@@ -71,7 +75,7 @@ struct LiveView: View {
                 }
                 .padding()
             }
-            .navigationTitle(HohoProtocol.deviceName)
+            .navigationTitle(ble.pinnedModule?.displayName ?? "모듈 미선택")
             .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $showLog) { LogSheet(ble: ble) }
         }
@@ -94,6 +98,27 @@ struct LiveView: View {
     }
 }
 
+// MARK: - 모듈 미선택 안내
+
+struct NoModuleBanner: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sailboat")
+                .font(.title3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("연결할 모듈을 고르세요")
+                    .font(.subheadline.weight(.semibold))
+                Text("설정 탭에서 내 모듈을 선택하면 자동으로 연결됩니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .background(.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
 // MARK: - 연결 상태 배지
 
 struct StatusBadge: View {
@@ -107,6 +132,7 @@ struct StatusBadge: View {
         case .connecting:   return .orange
         case .reconnecting: return .orange
         case .scanning:     return .blue
+        case .choosing:     return .orange
         case .idle:         return .gray
         }
     }

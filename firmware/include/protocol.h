@@ -1,4 +1,4 @@
-// HOHO-01 BLE 텔레메트리 프로토콜 v1
+// HOHO BLE 텔레메트리 프로토콜 v1
 // 규격 원문: ../../PROTOCOL.md  — 이 파일과 app/Shared/Protocol.swift 는 항상 함께 수정할 것.
 #pragma once
 
@@ -9,13 +9,20 @@
 namespace hoho {
 
 // ── 식별자 ───────────────────────────────────────────────────────────────
-static constexpr const char* kDeviceName    = "HOHO-01";
 static constexpr const char* kServiceUUID   = "b0a70001-0000-4000-8000-000000000001";
 static constexpr const char* kTelemetryUUID = "b0a70002-0000-4000-8000-000000000001";
 
+// 광고 이름은 "HOHO-" + 사용자 지정 이름. 앱은 이 접두사로 우리 모듈을 골라낸다.
+//   예) HOHO-hojun
+static constexpr const char* kNamePrefix = "HOHO-";
+
+// Scan response 예산: 31 = Manufacturer Data(13) + [len][type] + 이름
+//   → 접두사 포함 전체 이름 최대 16바이트
+static constexpr size_t kMaxFullNameLen = 16;
+static constexpr size_t kMaxUserNameLen = kMaxFullNameLen - 5; // "HOHO-" 제외 → 11
+
 static constexpr uint16_t kCompanyID = 0xFFFF;  // 미할당(테스트용) Company ID
 static constexpr uint8_t  kVersion   = 0x01;
-static constexpr uint8_t  kModuleID  = 0x01;
 
 // ── 타이밍 ───────────────────────────────────────────────────────────────
 static constexpr uint32_t kNotifyPeriodMs = 250;  // 4 Hz
@@ -28,6 +35,24 @@ static constexpr uint16_t kAdvIntervalUnits = (uint16_t)(kAdvIntervalMs / 0.625f
 // ── 페이로드 크기 ────────────────────────────────────────────────────────
 static constexpr size_t kTelemetryLen = 12; // GATT characteristic
 static constexpr size_t kMfgLen       = 9;  // Company ID 를 제외한 manufacturer 페이로드
+
+// ── module_id ────────────────────────────────────────────────────────────
+//
+// 이름은 광고(scan response)에만 실리고 GATT 패킷에는 없다.
+// 연결한 뒤 "내가 맞는 모듈에 붙었나" 를 매 패킷마다 확인하려면
+// 패킷 안에 들어가는 짧은 식별자가 필요하다. 그게 module_id 다.
+//
+// 이름에서 결정적으로 유도하므로 재부팅해도, 다시 구워도 같은 값이 나온다.
+// 0 은 "미지정" 으로 예약.
+inline uint8_t moduleIDFromName(const char* name) {
+    uint32_t h = 2166136261u; // FNV-1a
+    for (const char* p = name; *p; ++p) {
+        h ^= (uint8_t)(*p);
+        h *= 16777619u;
+    }
+    uint8_t v = (uint8_t)((h ^ (h >> 8) ^ (h >> 16) ^ (h >> 24)) & 0xFF);
+    return v == 0 ? 1 : v;
+}
 
 // ── 물리량 → 원시값 인코딩 ───────────────────────────────────────────────
 inline uint16_t encodeSog(float knots) {
@@ -74,6 +99,7 @@ inline void putU32LE(uint8_t* p, uint32_t v) {
 
 // ── 텔레메트리 스냅샷 ────────────────────────────────────────────────────
 struct Telemetry {
+    uint8_t  moduleID = 1;
     uint32_t uptimeMs = 0;
     float    sogKn    = 0.0f;
     float    cogDeg   = 0.0f;
@@ -84,7 +110,7 @@ struct Telemetry {
 // GATT characteristic 12바이트 인코딩. PROTOCOL.md §3
 inline void encodeTelemetryPacket(const Telemetry& t, uint8_t out[kTelemetryLen]) {
     out[0] = kVersion;
-    out[1] = kModuleID;
+    out[1] = t.moduleID;
     putU32LE(&out[2], t.uptimeMs);
     putU16LE(&out[6], encodeSog(t.sogKn));
     putU16LE(&out[8], encodeCog(t.cogDeg));
@@ -96,7 +122,7 @@ inline void encodeTelemetryPacket(const Telemetry& t, uint8_t out[kTelemetryLen]
 inline void encodeManufacturerData(const Telemetry& t, uint8_t seq, uint8_t out[2 + kMfgLen]) {
     putU16LE(&out[0], kCompanyID);
     out[2] = kVersion;
-    out[3] = kModuleID;
+    out[3] = t.moduleID;
     putU16LE(&out[4], encodeSog(t.sogKn));
     putU16LE(&out[6], encodeCog(t.cogDeg));
     out[8]  = (uint8_t)encodeHeel(t.heelDeg);

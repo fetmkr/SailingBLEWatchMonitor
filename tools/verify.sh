@@ -54,13 +54,24 @@ bar "4/4  iOS / watchOS 앱 빌드"
 IOS_DEST='platform=iOS Simulator,name=iPhone 17'
 WATCH_DEST='platform=watchOS Simulator,name=Apple Watch Series 11 (46mm)'
 
-xcodebuild -project "$ROOT/app/HohoBLE.xcodeproj" -scheme "HohoBLE" \
-    -destination "$IOS_DEST" -configuration Debug \
-    CODE_SIGNING_ALLOWED=NO build 2>&1 | grep -E "error:|BUILD" | grep -v "Metadata" || true
+# xcodebuild 결과를 파이프로 넘기면 종료 코드가 grep 것으로 바뀌어 실패가 묻힌다.
+# 로그를 파일로 받고 xcodebuild 자체의 종료 코드로 판정한다.
+build_target() {
+    local scheme="$1" dest="$2" logfile="$3"
+    if xcodebuild -project "$ROOT/app/HohoBLE.xcodeproj" -scheme "$scheme" \
+        -destination "$dest" -configuration Debug \
+        CODE_SIGNING_ALLOWED=NO build > "$logfile" 2>&1; then
+        printf '   %s — OK\n' "$scheme"
+    else
+        printf '\033[31m   %s — 빌드 실패\033[0m\n' "$scheme"
+        grep -E "error:" "$logfile" | sort -u | head -20
+        printf '   전체 로그: %s\n' "$logfile"
+        return 1
+    fi
+}
 
-xcodebuild -project "$ROOT/app/HohoBLE.xcodeproj" -scheme "HohoBLE Watch App" \
-    -destination "$WATCH_DEST" -configuration Debug \
-    CODE_SIGNING_ALLOWED=NO build 2>&1 | grep -E "error:|BUILD" | grep -v "Metadata" || true
+build_target "HohoBLE"           "$IOS_DEST"   "$BUILD/ios-build.log"
+build_target "HohoBLE Watch App" "$WATCH_DEST" "$BUILD/watch-build.log"
 
 ok "앱 빌드"
 

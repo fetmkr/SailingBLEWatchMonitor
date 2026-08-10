@@ -24,6 +24,8 @@ struct HohoBLEApp: App {
 }
 
 struct RootView: View {
+    @EnvironmentObject private var ble: BLEManager
+
     var body: some View {
         TabView {
             LiveView()
@@ -31,6 +33,11 @@ struct RootView: View {
 
             ScannerView()
                 .tabItem { Label("스캐너", systemImage: "dot.radiowaves.left.and.right") }
+
+            SettingsView()
+                .tabItem { Label("설정", systemImage: "gearshape") }
+                // 아직 모듈을 안 골랐으면 설정 탭에 배지를 띄워 유도한다.
+                .badge(ble.hasPinnedModule ? 0 : 1)
         }
     }
 }

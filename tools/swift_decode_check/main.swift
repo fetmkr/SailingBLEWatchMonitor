@@ -51,8 +51,8 @@ for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: true).enu
     if raw.hasPrefix("#") { continue }
 
     let cols = raw.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-    guard cols.count == 8 else {
-        fail(lineNo, "컬럼 수가 8이 아님 (\(cols.count))")
+    guard cols.count == 9 else {
+        fail(lineNo, "컬럼 수가 9가 아님 (\(cols.count))")
         continue
     }
 
@@ -63,7 +63,8 @@ for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: true).enu
     }
     guard let sogRaw = Int(cols[2]), let cogRaw = Int(cols[3]),
           let heelRaw = Int(cols[4]), let battRaw = Int(cols[5]),
-          let seqRaw = Int(cols[6]), let uptimeRaw = Int(cols[7]) else {
+          let seqRaw = Int(cols[6]), let uptimeRaw = Int(cols[7]),
+          let moduleRaw = Int(cols[8]) else {
         fail(lineNo, "기대값 파싱 실패")
         continue
     }
@@ -103,7 +104,7 @@ for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: true).enu
     if s.heelDegrees != heelRaw { fail(lineNo, "heel \(s.heelDegrees) ≠ \(heelRaw)") }
     if s.batteryPercent != battRaw { fail(lineNo, "batt \(s.batteryPercent) ≠ \(battRaw)") }
     if s.version != HohoProtocol.version { fail(lineNo, "ver \(s.version)") }
-    if s.moduleID != 1 { fail(lineNo, "module_id \(s.moduleID)") }
+    if s.moduleID != UInt8(moduleRaw) { fail(lineNo, "module_id \(s.moduleID) ≠ \(moduleRaw)") }
 
     if kind == "gatt" {
         if s.uptimeMs != UInt32(uptimeRaw) {
@@ -157,6 +158,39 @@ let compassCases: [(Double, String)] = [(0, "N"), (45, "NE"), (90, "E"), (180, "
                                         (315, "NW"), (359, "N"), (-10, "N")]
 for (deg, expect) in compassCases where compassPoint(deg) != expect {
     failures.append("  compassPoint(\(deg)) = \(compassPoint(deg)), 기대 \(expect)")
+}
+
+// 모듈 이름 규칙 — 펌웨어의 kNamePrefix / kMaxFullNameLen 과 맞아야 한다
+print("\n── 모듈 이름 규칙 ──")
+if HohoProtocol.namePrefix != "HOHO-" {
+    failures.append("  namePrefix 가 \"HOHO-\" 가 아님: \(HohoProtocol.namePrefix)")
+}
+if HohoProtocol.maxFullNameLength != 16 {
+    failures.append("  maxFullNameLength 가 16 이 아님: \(HohoProtocol.maxFullNameLength)")
+}
+let nameCases: [(String, Bool, String)] = [
+    ("HOHO-hojun", true,  "hojun"),
+    ("HOHO-A3F2",  true,  "A3F2"),
+    ("HOHO-",      true,  ""),
+    ("AirPods Pro", false, "AirPods Pro"),
+    ("hoho-lower", false, "hoho-lower"),   // 대소문자 구분
+]
+for (name, expectMatch, expectUser) in nameCases {
+    if HohoProtocol.isHohoName(name) != expectMatch {
+        failures.append("  isHohoName(\(name)) = \(HohoProtocol.isHohoName(name)), 기대 \(expectMatch)")
+    }
+    if HohoProtocol.userName(from: name) != expectUser {
+        failures.append("  userName(\(name)) = \(HohoProtocol.userName(from: name)), 기대 \(expectUser)")
+    }
+}
+// 최대 길이 이름이 scan response 예산(31) 안에 들어가는지
+let maxNameAD = 2 + HohoProtocol.maxFullNameLength           // [len][type][name]
+let mfgAD     = 2 + 2 + HohoProtocol.manufacturerPayloadLength // [len][type][company][payload]
+print("  최대 이름 시 scan response = \(mfgAD + maxNameAD) 바이트 (한도 31)")
+if mfgAD + maxNameAD > 31 {
+    failures.append("  최대 길이 이름에서 scan response 가 31바이트를 넘음")
+} else {
+    print("  [ OK ] scan response 예산 통과")
 }
 
 // MARK: - 결과

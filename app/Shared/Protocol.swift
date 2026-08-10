@@ -13,7 +13,12 @@ import Foundation
 // MARK: - 식별자 / 상수
 
 enum HohoProtocol {
-    static let deviceName = "HOHO-01"
+    /// 모든 모듈의 광고 이름은 이 접두사로 시작한다. 예) `HOHO-hojun`
+    /// 앱은 이 접두사로 "우리 모듈"을 골라낸다.
+    static let namePrefix = "HOHO-"
+
+    /// 광고에 들어갈 수 있는 전체 이름의 최대 길이 (scan response 예산에서 나온 값)
+    static let maxFullNameLength = 16
 
     static let serviceUUID   = CBUUID(string: "B0A70001-0000-4000-8000-000000000001")
     static let telemetryUUID = CBUUID(string: "B0A70002-0000-4000-8000-000000000001")
@@ -32,6 +37,17 @@ enum HohoProtocol {
     static let notifyInterval: TimeInterval = 0.25
     /// 펌웨어가 약속한 광고 데이터 갱신 주기 (1 Hz)
     static let advertisingRefreshInterval: TimeInterval = 1.0
+
+    /// 광고 이름이 우리 모듈의 것인지
+    static func isHohoName(_ name: String) -> Bool {
+        name.hasPrefix(namePrefix)
+    }
+
+    /// `HOHO-hojun` → `hojun`. 접두사가 없으면 원문 그대로.
+    static func userName(from fullName: String) -> String {
+        guard fullName.hasPrefix(namePrefix) else { return fullName }
+        return String(fullName.dropFirst(namePrefix.count))
+    }
 }
 
 // MARK: - 리틀엔디언 리더

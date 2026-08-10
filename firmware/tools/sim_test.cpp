@@ -77,6 +77,7 @@ static void testManufacturerEncoding() {
     std::printf("\n── 2. Manufacturer Specific Data (Company ID 포함 11바이트) ──\n");
 
     Telemetry t;
+    t.moduleID = 1;
     t.sogKn   = 6.02f;
     t.cogDeg  = 45.0f;
     t.heelDeg = 14.0f;
@@ -106,6 +107,51 @@ static void testManufacturerEncoding() {
     const size_t advBytes = 3 /*flags*/ + (1 + 1 + 16) /*128-bit UUID*/;
     std::printf("  ADV 총 %zu 바이트 (한도 31)\n", advBytes);
     check(advBytes <= 31, "ADV 패킷이 31바이트 한도 이내");
+}
+
+// ── 2.5 모듈 신원 (이름 → module_id) ─────────────────────────────────────
+static void testModuleIdentity() {
+    std::printf("\n── 2.5 모듈 신원: 이름 → module_id ──\n");
+
+    const char* names[] = {"HOHO-hojun", "HOHO-KOR1234", "HOHO-A3F2", "HOHO-x", "HOHO-boat2"};
+    uint8_t ids[5];
+    for (int i = 0; i < 5; i++) {
+        ids[i] = hoho::moduleIDFromName(names[i]);
+        std::printf("   %-14s → module_id %3u (0x%02X)\n", names[i], ids[i], ids[i]);
+    }
+
+    // 결정적: 같은 이름은 항상 같은 값 (재부팅/재플래시해도 동일해야 함)
+    check(hoho::moduleIDFromName("HOHO-hojun") == ids[0], "같은 이름은 항상 같은 module_id");
+
+    // 0 은 "미지정" 예약값이라 절대 나오면 안 된다
+    bool anyZero = false;
+    for (int i = 0; i < 5; i++) if (ids[i] == 0) anyZero = true;
+    check(!anyZero, "module_id 가 0 이 아님 (0 은 미지정 예약)");
+
+    // 서로 다른 이름은 (충돌 가능하지만) 이 샘플에서는 달라야 한다
+    bool allDistinct = true;
+    for (int i = 0; i < 5; i++)
+        for (int j = i + 1; j < 5; j++)
+            if (ids[i] == ids[j]) allDistinct = false;
+    check(allDistinct, "샘플 이름 5개의 module_id 가 모두 다름");
+
+    // 이름 길이 예산: scan response 31 = mfg(13) + [len][type] + 이름
+    const size_t maxName = hoho::kMaxFullNameLen;
+    const size_t scanRsp = 13 + 2 + maxName;
+    std::printf("   최대 이름 %zu자 → scan response %zu 바이트\n", maxName, scanRsp);
+    check(scanRsp <= 31, "최대 길이 이름에서도 scan response 가 31바이트 이내");
+    check(hoho::kMaxUserNameLen == hoho::kMaxFullNameLen - 5, "사용자 이름 한도 = 전체 − 접두사(5)");
+
+    // 실제로 쓸 이름으로 패킷을 만들어 module_id 가 실려 나가는지 확인
+    Telemetry t;
+    t.moduleID = hoho::moduleIDFromName("HOHO-hojun");
+    uint8_t gatt[hoho::kTelemetryLen];
+    hoho::encodeTelemetryPacket(t, gatt);
+    check(gatt[1] == t.moduleID, "GATT 패킷 [1] 에 module_id 가 실림");
+
+    uint8_t mfg[2 + hoho::kMfgLen];
+    hoho::encodeManufacturerData(t, 0, mfg);
+    check(mfg[3] == t.moduleID, "Manufacturer Data [3] 에 module_id 가 실림");
 }
 
 // ── 3. 궤적 (노이즈 OFF) ─────────────────────────────────────────────────
@@ -236,12 +282,16 @@ static void emitVectors(const char* path) {
         return;
     }
 
-    std::fprintf(f, "# kind\thex\tsog_x100\tcog_x10\theel\tbatt\tseq\tuptime_ms\n");
+    std::fprintf(f, "# kind\thex\tsog_x100\tcog_x10\theel\tbatt\tseq\tuptime_ms\tmodule_id\n");
+
+    // 실제로 쓸 법한 이름에서 나온 module_id 로 벡터를 만든다.
+    const uint8_t moduleID = hoho::moduleIDFromName("HOHO-hojun");
 
     int count = 0;
     g_lcg = 999; // 고정 시드
     for (uint32_t ms = 0; ms <= 300'000; ms += 3137) { // 소수 간격으로 택 구간까지 골고루
         Telemetry t = hoho::sim::simulate(ms, seededRand01);
+        t.moduleID  = moduleID;
 
         const uint16_t sogRaw  = hoho::encodeSog(t.sogKn);
         const uint16_t cogRaw  = hoho::encodeCog(t.cogDeg);
@@ -253,13 +303,15 @@ static void emitVectors(const char* path) {
         hoho::encodeTelemetryPacket(t, gatt);
         std::fprintf(f, "gatt\t");
         for (size_t i = 0; i < sizeof(gatt); i++) std::fprintf(f, "%02X", gatt[i]);
-        std::fprintf(f, "\t%u\t%u\t%d\t%d\t-1\t%u\n", sogRaw, cogRaw, heelRaw, battRaw, ms);
+        std::fprintf(f, "\t%u\t%u\t%d\t%d\t-1\t%u\t%u\n",
+                     sogRaw, cogRaw, heelRaw, battRaw, ms, moduleID);
 
         uint8_t mfg[2 + hoho::kMfgLen];
         hoho::encodeManufacturerData(t, seq, mfg);
         std::fprintf(f, "mfg\t");
         for (size_t i = 0; i < sizeof(mfg); i++) std::fprintf(f, "%02X", mfg[i]);
-        std::fprintf(f, "\t%u\t%u\t%d\t%d\t%u\t-1\n", sogRaw, cogRaw, heelRaw, battRaw, seq);
+        std::fprintf(f, "\t%u\t%u\t%d\t%d\t%u\t-1\t%u\n",
+                     sogRaw, cogRaw, heelRaw, battRaw, seq, moduleID);
 
         count++;
     }
@@ -275,6 +327,7 @@ int main(int argc, char** argv) {
 
     testTelemetryEncoding();
     testManufacturerEncoding();
+    testModuleIdentity();
     testTrajectoryNoNoise();
     testTackPath();
     testWithNoise();

@@ -1,4 +1,4 @@
-# app — HOHO-01 수신 앱 (iOS + watchOS)
+# app — HOHO 텔레메트리 수신 앱 (iOS + watchOS)
 
 CoreBluetooth 만 쓰는 SwiftUI 앱. 서드파티 의존성 없음.
 프로토콜은 [`../PROTOCOL.md`](../PROTOCOL.md) 를 따른다.
@@ -18,12 +18,14 @@ app/
 ├── project.yml              ← 프로젝트 정의. .xcodeproj 는 여기서 생성된다
 ├── Shared/                  ← 두 타깃이 함께 컴파일
 │   ├── Protocol.swift       ← 패킷 디코딩. firmware/include/protocol.h 와 쌍
-│   └── BLEManager.swift     ← 스캔 / 연결 / notify / 재연결 상태머신
+│   ├── ModulePin.swift      ← "내 모듈" 고정 저장 + 발견 목록 모델
+│   └── BLEManager.swift     ← 탐색/연결 모드, notify, 재연결, 모듈 검증
 ├── iOS/
-│   ├── HohoBLEApp.swift     ← @main, 탭 2개
+│   ├── HohoBLEApp.swift     ← @main, 탭 3개
 │   ├── LiveView.swift       ← 라이브 탭
 │   ├── ScannerView.swift    ← 스캐너 탭
 │   ├── ScannerManager.swift ← 광고 전용 별도 CBCentralManager
+│   ├── SettingsView.swift   ← 설정 탭 (모듈 선택/해제)
 │   └── Info.plist
 └── Watch/
     ├── WatchApp.swift
@@ -105,6 +107,25 @@ UI 레이아웃 확인용으로만 쓰고, BLE 테스트는 반드시 실기기�
 
 ## 4. 화면
 
+### 공통 — 설정 (모듈 선택)
+
+첫 실행 시에는 고정된 모듈이 없어 **탐색 모드**로 뜬다. 라이브 화면 대신
+"연결할 모듈을 고르세요" 안내가 나오고, 설정에서 주변 모듈 목록을 보여준다.
+
+```
+발견된 모듈          RSSI
+─────────────────────────
+hojun               −45 dBm  · 5.53 kn   ← 탭
+KOR1234             −78 dBm  · 4.10 kn
+```
+
+- 가까운 순(RSSI 내림차순) 정렬. 연결 없이 광고만으로 속도까지 미리 보인다
+- 하나를 고르면 `{ 이름, module_id, 주변장치 식별자 }` 를 저장하고 즉시 연결
+- 다음 실행부터는 목록 없이 바로 그 모듈에 붙는다
+- "다른 모듈 선택" 으로 해제하면 목록이 다시 나온다
+
+아이폰과 워치는 각각 한 번씩 골라야 한다 (주변장치 식별자가 기기마다 다르므로).
+
 ### iOS — 라이브 탭
 
 연결해서 4 Hz notify 를 받는다.
@@ -132,13 +153,14 @@ UI 레이아웃 확인용으로만 쓰고, BLE 테스트는 반드시 실기기�
 ### watchOS — 세로 2페이지
 
 - **1페이지**: 속도 큰 숫자, COG/HEEL, 연결 상태, **훈련 시작/종료** 버튼
-- **2페이지**: 진단값 + 강제 재연결
+- **2페이지**: 설정 — 모듈 선택/해제 + 진단값 + 강제 재연결
 
 ---
 
 ## 5. 재연결 설계
 
-`BLEManager` 의 핵심. 상태 머신은 `idle / scanning / connecting / connected / reconnecting`.
+`BLEManager` 의 핵심. 상태 머신은
+`idle / choosing / scanning / connecting / connected / reconnecting`.
 
 ```
 didDisconnectPeripheral
@@ -157,6 +179,9 @@ didDisconnectPeripheral
 - **이미 연결된 경우**: `retrieveConnectedPeripherals(withServices:)` 로 먼저 확인
 - **정체 감지**: 연결은 살아있는데 2초간 값이 안 오면 `isLive = false` 로 내려
   화면이 낡은 값을 라이브인 척 보여주지 않게 한다
+- **오접속 차단**: 저장된 주변장치 식별자로 바로 붙는 지름길은 광고 이름 검사를
+  건너뛴다. 그래서 연결 후 **매 패킷**의 `module_id` 를 확인하고, 다르면 즉시 끊고
+  저장된 식별자를 버린 뒤 다시 찾는다 (`rejectWrongModule`)
 
 ## 6. 워치 백그라운드 유지
 

@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────
-//  HOHO-01 — 요트 텔레메트리 BLE 테스트 펌웨어 (ESP32-S3 / NimBLE-Arduino 2.x)
+//  HOHO — 요트 텔레메트리 BLE 테스트 펌웨어 (ESP32-S3 / NimBLE-Arduino 2.x)
 //
 //  하는 일
 //    1. 가상 GPS/자세 데이터를 4 Hz 로 생성
@@ -7,28 +7,99 @@
 //    3. Advertising 의 Manufacturer Data 를 1 Hz 로 갱신 (연결 없이도 관측 가능)
 //    4. 연결 중에는 non-connectable + scannable(ADV_SCAN_IND) 로 광고 유지
 //       연결이 끊기면 즉시 connectable(ADV_IND) 로 복귀
+//    5. 보드마다 고유한 이름을 갖고 그 이름을 광고에 실어 보낸다
+//       → 앱이 여러 모듈 중 "내 것" 을 골라 붙을 수 있다
+//
+//  시리얼 명령 (115200)
+//    name <이름>   보드 이름 설정 (최대 11자). 예) name hojun
+//    info          현재 설정 출력
+//    help          도움말
 //
 //  규격: ../../PROTOCOL.md
 // ─────────────────────────────────────────────────────────────────────────
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 
 #include "protocol.h"
 #include "simulator.h"
 
 using hoho::Telemetry;
 
+// ── 모듈 신원 ────────────────────────────────────────────────────────────
+static Preferences gPrefs;
+static char        gUserName[hoho::kMaxUserNameLen + 1] = {0}; // "hojun"
+static char        gFullName[hoho::kMaxFullNameLen + 1] = {0}; // "HOHO-hojun"
+static uint8_t     gModuleID = 1;
+
 // ── BLE 전역 상태 ────────────────────────────────────────────────────────
-static NimBLEServer*         gServer   = nullptr;
+static NimBLEServer*         gServer       = nullptr;
 static NimBLECharacteristic* gTelemetryChr = nullptr;
 
 static volatile bool gConnected     = false; // 중앙장치 연결 여부
 static volatile bool gAdvNeedsApply = true;  // 광고 모드 재적용 필요
 static volatile bool gSubscribed    = false; // notify 구독 여부(로그용)
 
-static uint8_t   gSeq = 0;      // manufacturer data 시퀀스
-static Telemetry gLatest;       // 마지막으로 생성한 값
+static uint8_t   gSeq = 0; // manufacturer data 시퀀스
+static Telemetry gLatest;  // 마지막으로 생성한 값
+
+// ── 이름 관리 ────────────────────────────────────────────────────────────
+
+// 설정된 이름이 없을 때의 기본값. MAC 뒷 2바이트를 써서 보드마다 다르게 만든다.
+// 아무 설정 없이 여러 장을 구워도 이름이 겹치지 않는다.
+static void defaultUserName(char* out, size_t cap) {
+    uint64_t mac = ESP.getEfuseMac();
+    snprintf(out, cap, "%02X%02X", (uint8_t)((mac >> 8) & 0xFF), (uint8_t)(mac & 0xFF));
+}
+
+// 광고에 실을 수 있는 문자만 남긴다 (영숫자, '-', '_').
+static void sanitizeName(const char* in, char* out, size_t cap) {
+    size_t j = 0;
+    for (size_t i = 0; in[i] != '\0' && j + 1 < cap; i++) {
+        char c = in[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (ok) out[j++] = c;
+    }
+    out[j] = '\0';
+}
+
+static void applyIdentity(const char* userName) {
+    sanitizeName(userName, gUserName, sizeof(gUserName));
+    if (gUserName[0] == '\0') {
+        defaultUserName(gUserName, sizeof(gUserName));
+    }
+    snprintf(gFullName, sizeof(gFullName), "%s%s", hoho::kNamePrefix, gUserName);
+    gModuleID        = hoho::moduleIDFromName(gFullName);
+    gLatest.moduleID = gModuleID;
+}
+
+static void loadIdentity() {
+    gPrefs.begin("hoho", /*readOnly=*/true);
+    String saved = gPrefs.getString("name", "");
+    gPrefs.end();
+
+    if (saved.length() > 0) {
+        applyIdentity(saved.c_str());
+    } else {
+        char fallback[hoho::kMaxUserNameLen + 1];
+        defaultUserName(fallback, sizeof(fallback));
+        applyIdentity(fallback);
+    }
+}
+
+static void saveIdentity(const char* userName) {
+    applyIdentity(userName);
+    gPrefs.begin("hoho", /*readOnly=*/false);
+    gPrefs.putString("name", gUserName);
+    gPrefs.end();
+}
+
+static void printIdentity() {
+    Serial.printf("[ID ] 이름 %s | module_id %u (0x%02X) | service %s\n",
+                  gFullName, gModuleID, gModuleID, hoho::kServiceUUID);
+}
 
 // ── 가상 데이터 생성 ─────────────────────────────────────────────────────
 // 생성 로직 본체는 include/simulator.h (호스트에서도 검증 가능한 순수 C++).
@@ -38,7 +109,9 @@ static float arduinoRand01() {
 }
 
 static Telemetry simulate(uint32_t nowMs) {
-    return hoho::sim::simulate(nowMs, &arduinoRand01);
+    Telemetry t = hoho::sim::simulate(nowMs, &arduinoRand01);
+    t.moduleID  = gModuleID;
+    return t;
 }
 
 // ── 광고 데이터 구성 ─────────────────────────────────────────────────────
@@ -51,14 +124,14 @@ static NimBLEAdvertisementData buildAdvData() {
     return d;
 }
 
-// Scan Response: Manufacturer Data + Complete Local Name  (13 + 9 = 22 바이트)
+// Scan Response: Manufacturer Data + Complete Local Name  (13 + 2+N 바이트)
 static NimBLEAdvertisementData buildScanData(const Telemetry& tm, uint8_t seq) {
     uint8_t mfg[2 + hoho::kMfgLen];
     hoho::encodeManufacturerData(tm, seq, mfg);
 
     NimBLEAdvertisementData d;
     d.setManufacturerData(mfg, sizeof(mfg));
-    d.setName(hoho::kDeviceName, /*isComplete=*/true);
+    d.setName(gFullName, /*isComplete=*/true);
     return d;
 }
 
@@ -84,7 +157,8 @@ static void applyAdvertising() {
         Serial.println("[BLE] !! advertising start 실패");
         return;
     }
-    Serial.printf("[BLE] advertising 시작 — %s (interval %ums)\n",
+    Serial.printf("[BLE] advertising 시작 — %s (%s, interval %ums)\n",
+                  gFullName,
                   gConnected ? "ADV_SCAN_IND / non-connectable"
                              : "ADV_IND / connectable",
                   hoho::kAdvIntervalMs);
@@ -133,23 +207,87 @@ class TelemetryCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+// ── 시리얼 명령 ──────────────────────────────────────────────────────────
+static void printHelp() {
+    Serial.println("──────────────────────────────────────────");
+    Serial.println("  name <이름>   보드 이름 설정 (최대 11자, 영숫자/-/_)");
+    Serial.println("                예) name hojun  →  HOHO-hojun");
+    Serial.println("  info          현재 설정 출력");
+    Serial.println("  help          이 도움말");
+    Serial.println("──────────────────────────────────────────");
+}
+
+static void handleCommand(String line) {
+    line.trim();
+    if (line.length() == 0) return;
+
+    if (line == "help" || line == "?") {
+        printHelp();
+        return;
+    }
+    if (line == "info") {
+        printIdentity();
+        return;
+    }
+    if (line.startsWith("name ")) {
+        String arg = line.substring(5);
+        arg.trim();
+        if (arg.length() == 0) {
+            Serial.println("[ID ] 이름이 비어 있습니다. 예) name hojun");
+            return;
+        }
+        if (arg.length() > hoho::kMaxUserNameLen) {
+            Serial.printf("[ID ] 이름이 너무 깁니다 (최대 %u자). 잘라서 저장합니다.\n",
+                          (unsigned)hoho::kMaxUserNameLen);
+        }
+        saveIdentity(arg.c_str());
+        printIdentity();
+        // 광고 이름이 바뀌었으니 광고를 다시 올린다.
+        gAdvNeedsApply = true;
+        Serial.println("[ID ] 저장 완료 — 앱에서 모듈을 다시 선택해야 합니다.");
+        return;
+    }
+
+    Serial.printf("[ID ] 알 수 없는 명령: %s   (help 입력)\n", line.c_str());
+}
+
+static void pollSerial() {
+    static String buf;
+    while (Serial.available() > 0) {
+        char c = (char)Serial.read();
+        if (c == '\n' || c == '\r') {
+            if (buf.length() > 0) {
+                handleCommand(buf);
+                buf = "";
+            }
+        } else if (buf.length() < 64) {
+            buf += c;
+        }
+    }
+}
+
 // ── setup / loop ─────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     delay(300);
+
+    loadIdentity();
+
     Serial.println();
     Serial.println("═══════════════════════════════════════════");
-    Serial.printf("  %s — 요트 텔레메트리 BLE 테스트\n", hoho::kDeviceName);
+    Serial.printf("  %s — 요트 텔레메트리 BLE 테스트\n", gFullName);
+    Serial.printf("  module_id %u (0x%02X)\n", gModuleID, gModuleID);
     Serial.printf("  service   %s\n", hoho::kServiceUUID);
     Serial.printf("  telemetry %s\n", hoho::kTelemetryUUID);
     Serial.printf("  notify %.1fHz / adv refresh %.1fHz\n",
                   1000.0f / hoho::kNotifyPeriodMs, 1000.0f / hoho::kAdvRefreshMs);
+    Serial.println("  이름을 바꾸려면:  name <이름>   (help 로 전체 명령)");
     Serial.println("═══════════════════════════════════════════");
 
     randomSeed(esp_random());
     gLatest = simulate(millis());
 
-    NimBLEDevice::init(hoho::kDeviceName);
+    NimBLEDevice::init(gFullName);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9); // 최대 송신 출력
 
     gServer = NimBLEDevice::createServer();
@@ -181,6 +319,8 @@ void loop() {
     static uint32_t lastAdv    = 0;
     static uint32_t lastLog    = 0;
 
+    pollSerial();
+
     // 1) 4 Hz — 데이터 생성 + characteristic 갱신 + notify
     if (now - lastNotify >= hoho::kNotifyPeriodMs) {
         lastNotify = now;
@@ -194,7 +334,7 @@ void loop() {
         }
     }
 
-    // 2) 광고 모드 전환 (연결/해제 직후 한 번)
+    // 2) 광고 모드 전환 (연결/해제 직후, 또는 이름 변경 직후 한 번)
     if (gAdvNeedsApply) {
         gAdvNeedsApply = false;
         applyAdvertising();
@@ -210,8 +350,9 @@ void loop() {
     if (now - lastLog >= hoho::kLogPeriodMs) {
         lastLog = now;
         Serial.printf(
-            "[%7.1fs] SOG %5.2f kn | COG %5.1f° | HEEL %+6.1f° | BATT %3d%% | seq %3u | %s%s\n",
+            "[%7.1fs] %s | SOG %5.2f kn | COG %5.1f° | HEEL %+6.1f° | BATT %3d%% | seq %3u | %s%s\n",
             now / 1000.0f,
+            gFullName,
             gLatest.sogKn,
             gLatest.cogDeg,
             gLatest.heelDeg,
