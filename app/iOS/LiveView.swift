@@ -9,11 +9,20 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct LiveView: View {
     @EnvironmentObject private var ble: BLEManager
+    @Environment(\.scenePhase) private var scenePhase
 
     private var dimmed: Bool { !ble.isLive }
+
+    // 항해 중에는 화면이 저절로 꺼지면 안 된다.
+    // iOS 에는 watchOS 의 Always On 같은 게 없으므로 자동 잠금을 막는 것이 전부다.
+    // 값을 실제로 받고 있을 때만 막는다 — 연결도 안 된 화면을 켜둘 이유는 없다.
+    private func updateIdleTimer(active: Bool) {
+        UIApplication.shared.isIdleTimerDisabled = active && ble.isLive
+    }
 
     var body: some View {
         NavigationStack {
@@ -56,6 +65,15 @@ struct LiveView: View {
             }
             .navigationTitle(ble.pinnedModule?.displayName ?? "모듈 미선택")
             .navigationBarTitleDisplayMode(.inline)
+        }
+        .onAppear { updateIdleTimer(active: true) }
+        .onDisappear { updateIdleTimer(active: false) }
+        .onChange(of: ble.isLive) { _, _ in
+            updateIdleTimer(active: scenePhase == .active)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // 백그라운드로 나가면 반드시 되돌린다. 안 그러면 다른 앱에서도 화면이 안 꺼진다.
+            updateIdleTimer(active: phase == .active)
         }
     }
 

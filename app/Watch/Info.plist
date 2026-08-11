@@ -30,6 +30,16 @@
 	<key>WKRunsIndependentlyOfCompanionApp</key>
 	<true/>
 
+	<!-- 항해 중 계기판처럼 동작하려면 런타임 세션이 필요하다.
+	     Always On 갱신이 분당 1회 → 초당 1회가 되고, 화면이 꺼져도 BLE 가 유지된다. -->
+	<key>WKBackgroundModes</key>
+	<array>
+		<string>workout-processing</string>
+	</array>
+	<key>NSHealthShareUsageDescription</key>
+	<string>세일링 세션을 실행해 손목을 내려도 화면과 연결이 유지되게 합니다. 건강 데이터를 읽거나 저장하지는 않습니다.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>세일링 세션을 실행해 손목을 내려도 화면과 연결이 유지되게 합니다. 운동 기록을 건강 앱에 저장하지는 않습니다.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>요트 텔레메트리 모듈에 연결해 속도·침로·힐 각을 실시간으로 받기 위해 블루투스를 사용합니다.</string>
 </dict>

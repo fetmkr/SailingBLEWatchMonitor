@@ -2,10 +2,16 @@
 //  WatchLiveView.swift
 //  세로 2페이지 (watchOS verticalPage)
 //    1페이지 — 항해 중 보는 화면. 속도 · COG · 힐 세 개만, 최대한 크게.
-//    2페이지 — 설정: 모듈 선택 / 진단
+//    2페이지 — 설정: 모듈 선택 / 세션 / 진단
 //
 //  1페이지에는 숫자 전환 애니메이션을 쓰지 않는다.
 //  10 Hz 로 갱신되는 값에 애니메이션을 걸면 글자가 계속 꿈틀거려 못 읽는다.
+//
+//  Always On (손목을 내려 화면이 어두워진 상태)
+//   · isLuminanceReduced 가 true 가 된다.
+//   · 이때는 갱신 한도가 초당 1회다(세션이 있을 때. 없으면 분당 1회).
+//   · 그래서 어두워지면 속도만 남기고 나머지를 지운다. 정보를 줄이는 게 아니라
+//     초당 1회로 갱신되는 값만 남기는 것이다. 애니메이션도 전부 끈다.
 //
 
 import SwiftUI
@@ -24,8 +30,10 @@ struct WatchLiveView: View {
 
 private struct MainPage: View {
     @EnvironmentObject private var ble: BLEManager
+    /// 손목을 내려 화면이 어두워진 상태 (Always On)
+    @Environment(\.isLuminanceReduced) private var isDim
 
-    private var dimmed: Bool { !ble.isLive }
+    private var stale: Bool { !ble.isLive }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,7 +58,7 @@ private struct MainPage: View {
 
                 // 속도 — 화면에서 제일 큰 것
                 Text(ble.sample?.sogText ?? "—.—")
-                    .font(.system(size: 68, weight: .semibold, design: .rounded))
+                    .font(.system(size: isDim ? 84 : 68, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .minimumScaleFactor(0.4)
                     .lineLimit(1)
@@ -60,16 +68,17 @@ private struct MainPage: View {
 
                 Spacer(minLength: 0)
 
-                // COG · 힐
-                HStack(spacing: 0) {
-                    bigPair(ble.sample.map { $0.cogText } ?? "—", "COG")
-                    bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL")
+                // Always On 에서는 속도만 남긴다.
+                if !isDim {
+                    HStack(spacing: 0) {
+                        bigPair(ble.sample.map { $0.cogText } ?? "—", "COG")
+                        bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL")
+                    }
+                    Spacer(minLength: 0)
                 }
-
-                Spacer(minLength: 0)
             }
         }
-        .opacity(dimmed ? 0.45 : 1)
+        .opacity(stale ? 0.45 : 1)
         .padding(.horizontal, 2)
     }
 
@@ -91,11 +100,13 @@ private struct MainPage: View {
     private var statusLine: some View {
         HStack(spacing: 4) {
             Circle().fill(statusColor).frame(width: 6, height: 6)
-            Text(statusLabel)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+            if !isDim {
+                Text(statusLabel)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
         }
     }
 
@@ -124,6 +135,7 @@ private struct MainPage: View {
 
 private struct SettingsPage: View {
     @EnvironmentObject private var ble: BLEManager
+    @EnvironmentObject private var session: SessionManager
     @State private var showUnpinConfirm = false
 
     var body: some View {
@@ -150,6 +162,43 @@ private struct SettingsPage: View {
                     .confirmationDialog("고정을 해제할까요?", isPresented: $showUnpinConfirm) {
                         Button("해제", role: .destructive) { ble.unpinModule() }
                         Button("취소", role: .cancel) {}
+                    }
+
+                    Divider()
+
+                    // ── 세션 (앱 켜면 자동 시작)
+                    HStack(spacing: 5) {
+                        Image(systemName: session.isRunning ? "figure.sailing" : "moon.zzz")
+                            .foregroundStyle(session.isRunning ? .green : .secondary)
+                        Text(session.isRunning ? "항해 중 \(session.elapsedText)" : "세션 없음")
+                            .font(.caption)
+                        Spacer()
+                    }
+                    Text(session.isRunning
+                         ? "손목을 내려도 화면과 연결이 유지됩니다"
+                         : "손목을 내리면 화면이 꺼지고 연결이 끊깁니다")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+
+                    if let err = session.errorMessage {
+                        Text(err).font(.system(size: 9)).foregroundStyle(.red).lineLimit(3)
+                    }
+
+                    Button {
+                        session.enableWaterLock()
+                    } label: {
+                        Label("물 잠금", systemImage: "drop.fill")
+                            .font(.caption2)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    if session.isRunning {
+                        Button(role: .destructive) {
+                            session.stop()
+                        } label: {
+                            Text("세션 종료").font(.caption2).frame(maxWidth: .infinity)
+                        }
                     }
 
                     Divider()

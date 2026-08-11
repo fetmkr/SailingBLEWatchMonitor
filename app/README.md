@@ -237,10 +237,47 @@ KOR1234             −78 dBm  · 4.10 kn
 광고 인터벌이 200 ms 라 콜백은 초당 ~5회 오지만 페이로드는 1 Hz 로만 바뀐다.
 그래서 `seq` 가 실제로 바뀐 것만 새 패킷으로 센다.
 
+### watchOS — 항해용 계기판으로 동작시키기
+
+`HKWorkoutSession(.sailing)` 을 **앱 진입 시 버튼 없이 자동 시작**한다.
+버튼을 없앤 이유는 화면을 최소로 두기 위해서고, 세션을 유지하는 이유는 이것이다.
+
+| | 손목 내렸을 때 화면 갱신 |
+|---|---|
+| 세션 있음 | **초당 1회** |
+| 세션 없음 | **분당 1회** (사실상 멈춘 숫자) |
+
+세션이 있어야 시계 화면으로 넘어가지 않고 내 앱이 어둡게 남으며, 화면이 꺼져도
+앱이 suspend 되지 않아 BLE 가 유지된다.
+
+**건강 앱에 기록은 남기지 않는다.** `HKLiveWorkoutBuilder`(데이터 수집기)를 쓰지 않기
+때문이다. Always On·백그라운드 권한은 세션 자체가 주고, 저장은 빌더가 하는 일이다.
+앱을 열 때마다 "세일링 운동" 이 쌓이면 지저분하다.
+
+**Always On 레이아웃** — `@Environment(\.isLuminanceReduced)` 로 감지해서
+어두워지면 COG·힐을 숨기고 속도만 84pt 로 키운다. 정보를 줄이는 게 아니라
+초당 1회로만 갱신되는 상황에 맞게 읽을 것만 남기는 것이다.
+
+**물 잠금** — `WKInterfaceDevice.enableWaterLock()`. 설정 페이지에 버튼.
+크라운을 돌려 해제하면 스피커로 물을 빼낸다.
+
+### iOS — 화면 꺼짐 방지
+
+iOS 에는 Always On 같은 개념이 없다. `HKWorkoutSession` 을 켜도 화면이
+안 꺼지게 되지 않으므로 **아이폰은 운동 앱으로 만들지 않았다.**
+대신 자동 잠금만 막는다.
+
+```swift
+UIApplication.shared.isIdleTimerDisabled = active && ble.isLive
+```
+
+세 조건을 모두 만족할 때만 켠다 — 라이브 탭에 있고, 값을 받고 있고, 앱이 foreground 일 때.
+백그라운드로 나가면 반드시 되돌린다. 안 그러면 다른 앱을 쓸 때도 화면이 안 꺼진다.
+
 ### watchOS — 세로 2페이지
 
 - **1페이지**: 속도(제일 크게) · COG · 힐. 상단에 점 + 모듈 이름뿐. 그 외 아무것도 없음
-- **2페이지**: 설정 — 모듈 선택/해제 + 진단값(경로·연결 Hz·광고 Hz·RSSI·배터리) + 강제 재연결
+- **2페이지**: 설정 — 모듈 선택/해제 + 세션 상태 + 물 잠금 + 진단값 + 강제 재연결
 
 ---
 
@@ -270,19 +307,19 @@ didDisconnectPeripheral
   건너뛴다. 그래서 연결 후 **매 패킷**의 `module_id` 를 확인하고, 다르면 즉시 끊고
   저장된 식별자를 버린 뒤 다시 찾는다 (`rejectWrongModule`)
 
-## 6. 워치 백그라운드 — 쓰지 않음
+## 6. 워치 백그라운드
 
-`HKWorkoutSession(.sailing)` 으로 손목을 내려도 앱을 살려두는 구조를 넣었다가
-**제거했다.** 화면을 최소로 유지하기 위해 훈련 버튼을 없앴고, 버튼이 없으면
-세션을 시작할 수 없으므로 HealthKit 관련 코드·entitlement·Info.plist 키를
-전부 걷어냈다.
+§4 의 "항해용 계기판으로 동작시키기" 참고. 세션은 자동 시작되며 사용자가
+설정 페이지에서 종료할 수 있다.
 
-결과: **손목을 내려 화면이 꺼지면 몇 초 뒤 BLE 가 끊긴다.** 손목을 들면
-`scenePhase == .active` 에서 재연결이 걸려 곧 복구된다.
+필요한 설정:
 
-다시 필요해지면 되돌릴 것: `WorkoutManager.swift`, watch entitlements 의
-`com.apple.developer.healthkit`, Info.plist 의 `WKBackgroundModes` 와
-`NSHealthShare/UpdateUsageDescription`, 그리고 세션을 시작할 UI.
+- `Watch/SailingMonitorWatch.entitlements` → `com.apple.developer.healthkit`
+- `Watch/Info.plist` → `WKBackgroundModes = [workout-processing]`
+- `Watch/Info.plist` → `NSHealthShare/UpdateUsageDescription`
+
+권한 문구에 "건강 데이터를 읽거나 저장하지 않는다" 고 적어뒀다. 실제로 그렇다 —
+세션만 쓰고 빌더를 쓰지 않으므로 읽지도 쓰지도 않는다.
 
 ## 7. 권한 키 정리
 
@@ -290,6 +327,7 @@ didDisconnectPeripheral
 |---|:---:|:---:|
 | `NSBluetoothAlwaysUsageDescription` | ✅ | ✅ |
 | `UIBackgroundModes = [bluetooth-central]` | ✅ | — |
-
-
-워치 앱이 요구하는 권한은 **블루투스 하나**뿐이다.
+| `WKBackgroundModes = [workout-processing]` | — | ✅ |
+| `NSHealthShareUsageDescription` | — | ✅ |
+| `NSHealthUpdateUsageDescription` | — | ✅ |
+| HealthKit capability (entitlement) | — | ✅ |
