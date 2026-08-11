@@ -295,7 +295,7 @@ static void testTackPath() {
 
 // ── 5. 노이즈 ON 범위 + 배터리 ───────────────────────────────────────────
 static void testWithNoise() {
-    std::printf("\n── 5. 노이즈 ON, 10분(4Hz 24000샘플) 범위 검사 ──\n");
+    std::printf("\n── 5. 노이즈 ON, 10분(250ms 간격 2400샘플) 범위 검사 ──\n");
 
     float sogMin = 1e9f, sogMax = -1e9f;
     float heelMin = 1e9f, heelMax = -1e9f;

@@ -42,7 +42,7 @@ void displayBootMessage(const char* line1, const char* line2);
 // 정규 화면의 정적 요소(바, 고정 라벨)를 그린다. BLE 준비가 끝난 뒤 한 번.
 void displayBeginMainScreen();
 
-// 바뀐 부분만 다시 그린다. loop() 에서 주기적으로 호출(4 Hz 권장).
+// 바뀐 부분만 다시 그린다. loop() 에서 주기적으로 호출(4 Hz 로 충분).
 void displayUpdate(const DisplayState& s);
 
 } // namespace sail

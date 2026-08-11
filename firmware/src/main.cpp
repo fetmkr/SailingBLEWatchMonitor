@@ -2,8 +2,8 @@
 //  Sailing Monitor — 요트 텔레메트리 BLE 테스트 펌웨어 (ESP32-S3 / NimBLE-Arduino 2.x)
 //
 //  하는 일
-//    1. 가상 GPS/자세 데이터를 4 Hz 로 생성
-//    2. GATT characteristic 으로 12바이트 패킷 Notify (4 Hz)
+//    1. 가상 GPS/자세 데이터를 10 Hz 로 생성
+//    2. GATT characteristic 으로 12바이트 패킷 Notify (기본 10 Hz, `hz` 명령으로 조절)
 //    3. Advertising 의 Manufacturer Data 를 1 Hz 로 갱신 (연결 없이도 관측 가능)
 //    4. 연결 중에는 non-connectable + scannable(ADV_SCAN_IND) 로 광고 유지
 //       연결이 끊기면 즉시 connectable(ADV_IND) 로 복귀
@@ -44,6 +44,10 @@ static volatile bool gAdvNeedsApply = true;  // 광고 모드 재적용 필요
 static volatile bool gSubscribed    = false; // notify 구독 여부(로그용)
 
 static uint8_t   gSeq = 0; // manufacturer data 시퀀스
+
+// Notify 주기는 런타임에 바꿀 수 있다. 실제로 몇 Hz 까지 나오는지
+// 앱의 실측 수신율로 확인하기 위해서다. (기본값은 프로토콜 규정치)
+static uint32_t gNotifyPeriodMs = sail::kNotifyPeriodMs;
 static Telemetry gLatest;  // 마지막으로 생성한 값
 
 // ── 이름 관리 ────────────────────────────────────────────────────────────
@@ -98,7 +102,11 @@ static void applyIdentity(const char* userName) {
 static void loadIdentity() {
     gPrefs.begin("sail", /*readOnly=*/true);
     String saved = gPrefs.getString("name", "");
+    gNotifyPeriodMs = gPrefs.getUInt("notify_ms", sail::kNotifyPeriodMs);
     gPrefs.end();
+    if (gNotifyPeriodMs < 10 || gNotifyPeriodMs > 2000) {
+        gNotifyPeriodMs = sail::kNotifyPeriodMs;
+    }
 
     if (saved.length() > 0) {
         applyIdentity(saved.c_str());
@@ -121,6 +129,9 @@ static void printIdentity() {
     formatMac(mac, sizeof(mac));
     Serial.printf("[ID ] 이름 %s | module_id %u (0x%02X) | MAC %s\n",
                   gFullName, gModuleID, gModuleID, mac);
+    Serial.printf("[ID ] notify %.1f Hz (%ums) | adv %.1f Hz\n",
+                  1000.0f / gNotifyPeriodMs, (unsigned)gNotifyPeriodMs,
+                  1000.0f / sail::kAdvRefreshMs);
 }
 
 // ── 가상 데이터 생성 ─────────────────────────────────────────────────────
@@ -200,7 +211,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         Serial.printf("[BLE] 연결됨 ← %s (conn=%u)\n",
                       info.getAddress().toString().c_str(),
                       server->getConnectedCount());
-        // 4 Hz notify 를 여유있게 소화할 수 있도록 연결 파라미터를 조인다.
+        // 높은 notify 주기를 소화할 수 있도록 연결 파라미터를 조인다.
         // 15ms~30ms interval, latency 0, supervision timeout 4s
         server->updateConnParams(info.getConnHandle(), 12, 24, 0, 400);
     }
@@ -234,6 +245,7 @@ static void printHelp() {
     Serial.println("──────────────────────────────────────────");
     Serial.println("  name <이름>   보드 이름 설정 (최대 11자, 영숫자/-/_)");
     Serial.println("                예) name hojun  →  SAIL-hojun");
+    Serial.println("  hz <1~100>    notify 주기 설정. 예) hz 20  (기본 4)");
     Serial.println("  info          현재 설정 출력");
     Serial.println("  help          이 도움말");
     Serial.println("──────────────────────────────────────────");
@@ -251,6 +263,22 @@ static void handleCommand(String line) {
         printIdentity();
         return;
     }
+    if (line.startsWith("hz ")) {
+        long hz = line.substring(3).toInt();
+        if (hz < 1 || hz > 100) {
+            Serial.println("[ID ] 1~100 Hz 범위로 입력하세요. 예) hz 20");
+            return;
+        }
+        gNotifyPeriodMs = (uint32_t)(1000.0f / hz + 0.5f);
+        gPrefs.begin("sail", false);
+        gPrefs.putUInt("notify_ms", gNotifyPeriodMs);
+        gPrefs.end();
+        Serial.printf("[ID ] notify 주기 → %.1f Hz (%ums)\n",
+                      1000.0f / gNotifyPeriodMs, (unsigned)gNotifyPeriodMs);
+        Serial.println("[ID ] 앱의 실측 수신율과 비교해 보세요.");
+        return;
+    }
+
     if (line.startsWith("name ")) {
         String arg = line.substring(5);
         arg.trim();
@@ -309,7 +337,7 @@ void setup() {
     Serial.printf("  service   %s\n", sail::kServiceUUID);
     Serial.printf("  telemetry %s\n", sail::kTelemetryUUID);
     Serial.printf("  notify %.1fHz / adv refresh %.1fHz\n",
-                  1000.0f / sail::kNotifyPeriodMs, 1000.0f / sail::kAdvRefreshMs);
+                  1000.0f / gNotifyPeriodMs, 1000.0f / sail::kAdvRefreshMs);
     Serial.println("  이름을 바꾸려면:  name <이름>   (help 로 전체 명령)");
     Serial.println("═══════════════════════════════════════════");
 
@@ -354,8 +382,8 @@ void loop() {
 
     pollSerial();
 
-    // 1) 4 Hz — 데이터 생성 + characteristic 갱신 + notify
-    if (now - lastNotify >= sail::kNotifyPeriodMs) {
+    // 1) gNotifyPeriodMs 주기 — 데이터 생성 + characteristic 갱신 + notify
+    if (now - lastNotify >= gNotifyPeriodMs) {
         lastNotify = now;
         gLatest    = simulate(now);
 
@@ -380,9 +408,9 @@ void loop() {
     }
 
 #if SAIL_HAS_TFT
-    // 3.5) 4 Hz — 내장 TFT 갱신. 바뀐 문자열만 다시 그리므로 SPI 부담이 적다.
+    // 3.5) 4 Hz — 내장 TFT 갱신. 사람 눈에는 이걸로 충분하고, 더 빨리 그려도 의미 없다.
     static uint32_t lastDraw = 0;
-    if (now - lastDraw >= sail::kNotifyPeriodMs) {
+    if (now - lastDraw >= 250) { // 화면은 4 Hz 로 충분하다
         lastDraw = now;
         sail::DisplayState ds;
         ds.name      = gUserName;

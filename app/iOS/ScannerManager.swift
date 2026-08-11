@@ -29,6 +29,8 @@ struct ScannedModule: Identifiable {
     var lostPackets: Int
     /// allowDuplicates 로 들어온 전체 콜백 수 (중복 포함)
     var advertisementCallbacks: Int
+    /// 실제로 스캔을 듣고 있던 시간(초). 일시정지·백그라운드 구간은 빠진다.
+    var listeningSeconds: Double = 0
 
     /// 수신율 (%)
     var receptionRate: Double {
@@ -38,17 +40,17 @@ struct ScannedModule: Identifiable {
     }
 
     /// 실측 광고 갱신율 (Hz). 펌웨어 기대치 1 Hz.
+    /// 분모는 벽시계 시간이 아니라 "실제로 듣고 있던 시간" 이다.
+    /// 백그라운드로 나가 있던 시간을 넣으면 갱신율이 실제보다 낮게 나온다.
     var updateRateHz: Double {
-        let span = lastSeen.timeIntervalSince(firstSeen)
-        guard span > 0.5, receivedPackets > 1 else { return 0 }
-        return Double(receivedPackets - 1) / span
+        guard listeningSeconds > 0.5, receivedPackets > 1 else { return 0 }
+        return Double(receivedPackets - 1) / listeningSeconds
     }
 
     /// 콜백 자체가 들어오는 비율 (Hz). 광고 인터벌 200ms → 이론상 5 Hz.
     var callbackRateHz: Double {
-        let span = lastSeen.timeIntervalSince(firstSeen)
-        guard span > 0.5 else { return 0 }
-        return Double(advertisementCallbacks) / span
+        guard listeningSeconds > 0.5 else { return 0 }
+        return Double(advertisementCallbacks) / listeningSeconds
     }
 
     var isStale: Bool { Date().timeIntervalSince(lastSeen) > 3.0 }
@@ -61,8 +63,12 @@ final class ScannerManager: NSObject, ObservableObject {
     @Published private(set) var modules: [ScannedModule] = []
     @Published private(set) var isScanning = false
     @Published private(set) var bluetoothPoweredOn = false
-    /// 우리 서비스 UUID 를 광고하지만 manufacturer data 를 못 읽은 횟수(진단용)
+    /// 우리 서비스 UUID 를 광고하지만 manufacturer data 를 못 읽은 횟수.
+    /// 텔레메트리가 scan response 에 실려 있으므로, 이 값이 크면
+    /// SCAN_REQ/RSP 왕복이 실패하고 있다는 뜻이다.
     @Published private(set) var undecodableCount = 0
+    /// 스캔을 멈췄다 재개해서 기준점을 다시 잡은 횟수 (유실 통계에서 제외된 구간)
+    @Published private(set) var pausedResyncs = 0
 
     private var central: CBCentralManager!
     private var lastSeq: [UInt8: UInt8] = [:]
@@ -93,6 +99,14 @@ final class ScannerManager: NSObject, ObservableObject {
         isScanning = false
         refreshTimer?.invalidate()
         refreshTimer = nil
+
+        // ★ 기준점을 버린다.
+        //   보드의 seq 는 1초마다 계속 올라간다. 스캔을 멈춘 동안 벌어진 간격을
+        //   그대로 두면, 재개했을 때 그 공백이 전부 "유실" 로 계산된다.
+        //   (앱을 1분 백그라운드에 뒀다 오면 유실 60개가 찍힌다)
+        //   우리가 안 듣고 있던 시간은 패킷 유실이 아니므로 다음 관측에서 재기준을 잡는다.
+        lastSeq.removeAll()
+        pausedResyncs += 1
     }
 
     func reset() {
@@ -100,6 +114,7 @@ final class ScannerManager: NSObject, ObservableObject {
         lastSeq.removeAll()
         modules.removeAll()
         undecodableCount = 0
+        pausedResyncs = 0
     }
 
     // MARK: 내부
@@ -153,8 +168,16 @@ extension ScannerManager: CBCentralManagerDelegate {
             lastSeen: now,
             receivedPackets: 0,
             lostPackets: 0,
-            advertisementCallbacks: 0
+            advertisementCallbacks: 0,
+            listeningSeconds: 0
         )
+
+        // 듣고 있던 시간만 누적한다. 콜백은 광고 인터벌(200ms)마다 오므로
+        // 간격이 1초를 넘으면 그건 스캔이 멈춰 있었다는 뜻이라 빼야 한다.
+        let gap = now.timeIntervalSince(entry.lastSeen)
+        if entry.advertisementCallbacks > 0 && gap > 0 && gap < 1.0 {
+            entry.listeningSeconds += gap
+        }
 
         entry.advertisementCallbacks += 1
         entry.rssi = RSSI.intValue

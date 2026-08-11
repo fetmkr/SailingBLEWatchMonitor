@@ -44,6 +44,44 @@ enum BLEConnectionState: String {
     }
 }
 
+// MARK: - 지금 값을 어느 경로로 받고 있나
+//
+// 보드는 연결 여부와 무관하게 광고를 계속 쏜다(연결 중엔 ADV_SCAN_IND).
+// 그래서 연결이 끊겨도 광고에서 값을 계속 뽑아 쓸 수 있다.
+// 4 Hz → 1 Hz 로 품질만 떨어질 뿐 화면이 죽지 않는다.
+
+enum TelemetrySource: String {
+    case none          // 아직 아무것도 못 받음
+    case connection    // GATT notify — 4 Hz, 신뢰성 있음
+    case advertising   // 광고 — 1 Hz, 유실 가능
+
+    var displayText: String {
+        switch self {
+        case .none:        return "—"
+        case .connection:  return "연결"
+        case .advertising: return "광고"
+        }
+    }
+
+    /// 실측 Hz 를 붙인 표시. 보드에서 주기를 바꿀 수 있으므로 기대치를 박지 않는다.
+    func displayText(rateHz: Double) -> String {
+        switch self {
+        case .none:        return "—"
+        case .connection:  return String(format: "연결 %.1fHz", rateHz)
+        case .advertising: return String(format: "광고 %.1fHz", rateHz)
+        }
+    }
+
+    /// 이 경로에서 값이 이 시간 이상 안 오면 "살아있지 않음" 으로 본다.
+    var stallTimeout: TimeInterval {
+        switch self {
+        case .connection:  return 2.0  // 4 Hz 기대 → 8배 여유
+        case .advertising: return 4.0  // 1 Hz 기대 + 유실 감안
+        case .none:        return 2.0
+        }
+    }
+}
+
 // MARK: - 디버그 로그 한 줄
 
 struct BLELogLine: Identifiable {
@@ -75,6 +113,18 @@ final class BLEManager: NSObject, ObservableObject {
     /// 실측 notify 수신율 (Hz). 펌웨어 기대치는 4 Hz.
     @Published private(set) var packetRateHz: Double = 0
     @Published private(set) var lastPacketAt: Date?
+    /// 지금 화면에 쓰는 값이 어느 경로에서 왔는지 (연결 4Hz / 광고 1Hz)
+    @Published private(set) var source: TelemetrySource = .none
+
+    // ── 경로별 원본 ────────────────────────────────────────────────────
+    // 연결과 광고를 나란히 보여주려고 각각 따로 들고 있는다.
+    // 같은 보드에서 온 같은 값이지만 주기·유실·지연이 다르다.
+    @Published private(set) var connSample: TelemetrySample?
+    @Published private(set) var connRateHz: Double = 0
+    @Published private(set) var connLastAt: Date?
+    @Published private(set) var advSample: TelemetrySample?
+    @Published private(set) var advRateHz: Double = 0
+    @Published private(set) var advLastAt: Date?
     @Published private(set) var bluetoothPoweredOn = false
     @Published private(set) var log: [BLELogLine] = []
 
@@ -96,13 +146,16 @@ final class BLEManager: NSObject, ObservableObject {
     private var telemetryChar: CBCharacteristic?
     private var housekeeping: Timer?
     private var disconnectedAt: Date?
-    private var emaInterval: TimeInterval = 0
+    private var connEma: TimeInterval = 0
+    private var advEma: TimeInterval = 0
+    /// 마지막으로 처리한 광고의 seq. 같은 seq 는 같은 페이로드의 재방송이다.
+    private var lastAdvSeq: UInt8?
+    /// seq 가 바뀐 시각. 광고 갱신율(Hz) 은 이 간격으로 잰다.
+    private var advNewPayloadAt: Date?
     private var tickCount = 0
     private var mode: Mode = .discovering
     private var discovered: [UUID: DiscoveredModule] = [:]
 
-    /// 값이 이 시간 이상 안 들어오면 "살아있지 않음"으로 본다. (4 Hz 기대 → 여유 8배)
-    private let stallTimeout: TimeInterval = 2.0
 
     private override init() {
         super.init()
@@ -176,7 +229,12 @@ final class BLEManager: NSObject, ObservableObject {
         isLive = false
         rssi = nil
         packetRateHz = 0
-        emaInterval = 0
+        connEma = 0; advEma = 0
+        connSample = nil; advSample = nil
+        connLastAt = nil; advLastAt = nil
+        connRateHz = 0; advRateHz = 0
+        lastAdvSeq = nil; advNewPayloadAt = nil
+        source = .none
         lastPacketAt = nil
         disconnectedAt = nil
         disconnectedFor = 0
@@ -335,12 +393,8 @@ final class BLEManager: NSObject, ObservableObject {
             p.readRSSI()
         }
 
-        // 값이 멈췄으면 라이브 해제
-        if isLive, let last = lastPacketAt, Date().timeIntervalSince(last) > stallTimeout {
-            isLive = false
-            packetRateHz = 0
-            appendLog("데이터 정체 — \(String(format: "%.1f", stallTimeout))초 동안 수신 없음")
-        }
+        // 경로별 신선도를 다시 판정한다 (연결 2초 / 광고 4초).
+        chooseDisplaySource()
 
         if let since = disconnectedAt {
             disconnectedFor = Date().timeIntervalSince(since)
@@ -356,6 +410,84 @@ final class BLEManager: NSObject, ObservableObject {
         let cutoff = Date().addingTimeInterval(-10)
         discovered = discovered.filter { $0.value.lastSeen > cutoff }
         discoveredModules = discovered.values.sorted { $0.rssi > $1.rssi } // 가까운 순
+    }
+
+    /// 어느 경로로 왔든 값을 반영하는 공통 지점.
+    /// 경로별 원본을 따로 갱신한 뒤, 화면에 쓸 값을 다시 고른다.
+    private func ingest(_ decoded: TelemetrySample, from newSource: TelemetrySource) {
+        let now = decoded.receivedAt
+
+        switch newSource {
+        case .connection:
+            if let last = connLastAt {
+                let dt = now.timeIntervalSince(last)
+                if dt > 0.001 && dt < 5 {
+                    connEma = connEma == 0 ? dt : (connEma * 0.8 + dt * 0.2)
+                    connRateHz = 1.0 / connEma
+                }
+            }
+            connSample = decoded
+            connLastAt = now
+
+        case .advertising:
+            // ★ 광고 콜백은 광고 인터벌(200ms)마다, 즉 초당 5번 온다.
+            //   그런데 페이로드는 1초에 한 번만 바뀐다(seq 증가).
+            //   콜백마다 세면 "광고 5Hz" 라는 틀린 값이 나온다.
+            //   seq 가 실제로 바뀐 것만 새 데이터로 센다.
+            let seq = decoded.sequence
+            let isNewPayload = (lastAdvSeq == nil) || (seq != lastAdvSeq)
+
+            // 값 자체는 매번 갱신해도 무해하다(같은 값이므로). 신선도 판정에도 쓴다.
+            advSample = decoded
+            advLastAt = now
+
+            if isNewPayload {
+                if let last = advNewPayloadAt {
+                    let dt = now.timeIntervalSince(last)
+                    if dt > 0.001 && dt < 10 {
+                        advEma = advEma == 0 ? dt : (advEma * 0.8 + dt * 0.2)
+                        advRateHz = 1.0 / advEma
+                    }
+                }
+                advNewPayloadAt = now
+                lastAdvSeq = seq
+            }
+
+        case .none:
+            return
+        }
+
+        chooseDisplaySource()
+    }
+
+    /// 화면에 쓸 값을 고른다. 연결이 살아있으면 연결(4Hz), 아니면 광고(1Hz).
+    private func chooseDisplaySource() {
+        let now = Date()
+        let connFresh = connLastAt.map { now.timeIntervalSince($0) <= TelemetrySource.connection.stallTimeout } ?? false
+        let advFresh  = advLastAt.map  { now.timeIntervalSince($0) <= TelemetrySource.advertising.stallTimeout } ?? false
+
+        let picked: TelemetrySource = connFresh ? .connection : (advFresh ? .advertising : .none)
+        if picked != source {
+            appendLog("화면 데이터 경로 → \(picked.displayText)")
+            source = picked
+        }
+
+        switch picked {
+        case .connection:
+            sample = connSample
+            packetRateHz = connRateHz
+            lastPacketAt = connLastAt
+            isLive = true
+        case .advertising:
+            sample = advSample
+            packetRateHz = advRateHz
+            lastPacketAt = advLastAt
+            isLive = true
+        case .none:
+            // 값은 지우지 않는다 — 마지막 값을 회색으로 계속 보여준다.
+            isLive = false
+            packetRateHz = 0
+        }
     }
 
     // MARK: 로그
@@ -444,14 +576,26 @@ extension BLEManager: CBCentralManagerDelegate {
                 break
             }
 
-            appendLog("고정 모듈 발견 — \(advName ?? "?") RSSI \(RSSI.intValue)")
             rssi = RSSI.intValue
             adopt(peripheral)
-            stopScanIfNeeded()
+
+            // ★ 광고 폴백.
+            //   연결이 아직/다시 안 됐어도 광고 안에 속도·침로가 들어 있다.
+            //   버리지 말고 화면에 쓴다. 연결되면 자동으로 4 Hz 로 올라간다.
+            if peripheral.state != .connected, let s = advSample {
+                ingest(s, from: .advertising)
+            }
 
             if peripheral.state != .connected {
+                if state != .reconnecting && state != .connecting {
+                    appendLog("고정 모듈 발견 — \(advName ?? "?") RSSI \(RSSI.intValue)")
+                }
                 state = (disconnectedAt != nil) ? .reconnecting : .connecting
                 central.connect(peripheral, options: nil)
+                // 스캔은 계속 돌린다 — 붙을 때까지 광고로 값을 받기 위해서.
+                // 연결에 성공하면 handleConnected() 가 멈춘다.
+            } else {
+                stopScanIfNeeded()
             }
         }
     }
@@ -478,10 +622,12 @@ extension BLEManager: CBCentralManagerDelegate {
         appendLog("didDisconnect — \(error?.localizedDescription ?? "정상 종료")")
 
         telemetryChar = nil
-        isLive = false
-        packetRateHz = 0
-        emaInterval = 0
-        rssi = nil
+        connRateHz = 0
+        connEma = 0
+        connLastAt = nil   // 연결 경로는 죽었다. 광고가 있으면 그쪽으로 자동 전환된다.
+        // isLive 는 여기서 내리지 않는다.
+        // 광고 폴백이 곧바로 값을 채우면 화면이 살아있는 채로 1 Hz 로 내려앉는다.
+        // 광고도 안 오면 tick() 의 정체 감지가 내려준다.
 
         // 고정 해제로 인한 끊김이면 재연결하지 않는다.
         guard mode == .bound, pinnedModule != nil else { return }
@@ -570,17 +716,7 @@ extension BLEManager: CBPeripheralDelegate {
             appendLog("module_id 확정 — \(decoded.moduleID)")
         }
 
-        let now = decoded.receivedAt
-        if let last = lastPacketAt {
-            let dt = now.timeIntervalSince(last)
-            if dt > 0.001 && dt < 5 {
-                emaInterval = emaInterval == 0 ? dt : (emaInterval * 0.8 + dt * 0.2)
-                packetRateHz = 1.0 / emaInterval
-            }
-        }
-        lastPacketAt = now
-        sample = decoded
-        isLive = true
+        ingest(decoded, from: .connection)
         if state != .connected { state = .connected }
     }
 

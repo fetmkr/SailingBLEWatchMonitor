@@ -23,10 +23,21 @@ struct SettingsView: View {
                     pickerSection
                 }
 
-                Section("진단") {
+                Section {
                     LabeledContent("연결 상태", value: ble.state.displayText)
-                    LabeledContent("수신율", value: String(format: "%.2f Hz", ble.packetRateHz))
+                    LabeledContent("데이터 경로", value: ble.source.displayText)
+                    LabeledContent("연결 수신율",
+                                   value: ble.connLastAt == nil ? "—"
+                                        : String(format: "%.2f Hz", ble.connRateHz))
+                    LabeledContent("광고 수신율",
+                                   value: ble.advLastAt == nil ? "—"
+                                        : String(format: "%.2f Hz", ble.advRateHz))
                     LabeledContent("RSSI", value: ble.rssi.map { "\($0) dBm" } ?? "—")
+                    LabeledContent("배터리", value: ble.sample.map { "\($0.batteryPercent)%" } ?? "—")
+                    LabeledContent("모듈 uptime",
+                                   value: ble.sample?.uptimeSeconds.map { String(format: "%.0f초", $0) } ?? "—")
+                    LabeledContent("마지막 수신",
+                                   value: ble.lastPacketAt.map { String(format: "%.1f초 전", -$0.timeIntervalSinceNow) } ?? "—")
                     Button {
                         showLog = true
                     } label: {
@@ -37,6 +48,11 @@ struct SettingsView: View {
                     } label: {
                         Label("강제 재연결", systemImage: "arrow.clockwise")
                     }
+                } header: {
+                    Text("진단")
+                } footer: {
+                    Text("연결 중이면 GATT notify(보드 설정값, 기본 10 Hz), 끊기면 광고에서 1 Hz 로 "
+                         + "값을 계속 받습니다. 화면이 죽지 않고 품질만 내려앉습니다.")
                 }
             }
             .navigationTitle("설정")

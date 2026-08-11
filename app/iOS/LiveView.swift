@@ -1,100 +1,132 @@
 //
 //  LiveView.swift
-//  연결해서 4 Hz notify 를 받아 실시간 표시하는 탭.
+//  항해 중 보는 화면. 속도 · COG · 힐 세 개만 크게, 스크롤 없이 한 화면.
 //
-//  연결이 끊기면 마지막 값을 회색으로 유지하고 "재연결 중…" 배지를 띄운다.
-//  다시 붙으면 그 순간 라이브 값으로 복귀한다.
+//  진단값(수신율·uptime·RSSI·로그)은 설정 탭으로 뺐다.
+//  10 Hz 로 갱신되는 숫자에 전환 애니메이션을 걸면 글자가 계속 꿈틀거려서
+//  오히려 읽기 어렵다. 값만 바로 바꾼다.
+//  연결이 끊기면 마지막 값을 회색으로 유지하고 "재연결 중…" 을 띄운다.
 //
 
 import SwiftUI
 
 struct LiveView: View {
     @EnvironmentObject private var ble: BLEManager
-    @State private var showLog = false
 
     private var dimmed: Bool { !ble.isLive }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 20) {
-                    if !ble.hasPinnedModule {
-                        NoModuleBanner()
+            VStack(spacing: 0) {
+
+                statusLine
+                    .padding(.top, 4)
+
+                if !ble.hasPinnedModule {
+                    Spacer()
+                    NoModuleBanner()
+                    Spacer()
+                } else {
+                    Spacer(minLength: 8)
+
+                    // 속도
+                    bigValue(ble.sample?.sogText ?? "—.—",
+                             unit: "knots",
+                             size: 96)
+
+                    Spacer(minLength: 8)
+
+                    Divider().padding(.horizontal, 24)
+
+                    Spacer(minLength: 8)
+
+                    // COG · 힐
+                    HStack(alignment: .top, spacing: 0) {
+                        smallerValue("COG",
+                                     ble.sample.map { $0.cogText } ?? "—",
+                                     sub: ble.sample.map { compassPoint($0.cogDegrees) } ?? " ")
+                        Divider().frame(height: 90)
+                        smallerValue("HEEL",
+                                     ble.sample.map { $0.heelText } ?? "—",
+                                     sub: ble.sample.map { $0.heelSideLabel } ?? " ")
                     }
 
-                    StatusBadge(state: ble.state, isLive: ble.isLive,
-                                disconnectedFor: ble.disconnectedFor)
-
-                    SpeedBlock(sample: ble.sample, dimmed: dimmed)
-
-                    HStack(spacing: 12) {
-                        MetricCard(title: "COG",
-                                   value: ble.sample.map { $0.cogText } ?? "—",
-                                   caption: ble.sample.map { compassPoint($0.cogDegrees) } ?? " ",
-                                   systemImage: "safari",
-                                   dimmed: dimmed)
-
-                        MetricCard(title: "HEEL",
-                                   value: ble.sample.map { $0.heelText } ?? "—",
-                                   caption: ble.sample.map { $0.heelSideLabel } ?? " ",
-                                   systemImage: "sailboat",
-                                   dimmed: dimmed)
-                    }
-
-                    HStack(spacing: 12) {
-                        MetricCard(title: "배터리",
-                                   value: ble.sample.map { "\($0.batteryPercent)%" } ?? "—",
-                                   caption: batteryCaption,
-                                   systemImage: batteryIcon,
-                                   dimmed: dimmed)
-
-                        MetricCard(title: "RSSI",
-                                   value: ble.rssi.map { "\($0)" } ?? "—",
-                                   caption: "dBm",
-                                   systemImage: "antenna.radiowaves.left.and.right",
-                                   dimmed: dimmed)
-                    }
-
-                    DiagnosticsPanel(ble: ble)
-
-                    Button {
-                        showLog = true
-                    } label: {
-                        Label("디버그 로그 (\(ble.log.count))", systemImage: "text.alignleft")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button(role: .none) {
-                        ble.forceReconnect()
-                    } label: {
-                        Label("강제 재연결", systemImage: "arrow.clockwise")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
+                    Spacer(minLength: 8)
                 }
-                .padding()
             }
             .navigationTitle(ble.pinnedModule?.displayName ?? "모듈 미선택")
             .navigationBarTitleDisplayMode(.inline)
-            .sheet(isPresented: $showLog) { LogSheet(ble: ble) }
         }
     }
 
-    private var batteryIcon: String {
-        guard let pct = ble.sample?.batteryPercent else { return "battery.0percent" }
-        switch pct {
-        case 76...:  return "battery.100percent"
-        case 51...75: return "battery.75percent"
-        case 26...50: return "battery.50percent"
-        case 1...25:  return "battery.25percent"
-        default:      return "battery.0percent"
+    // MARK: 조각
+
+    private func bigValue(_ text: String, unit: String, size: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            Text(text)
+                .font(.system(size: size, weight: .semibold))
+                .monospacedDigit()
+                .minimumScaleFactor(0.4)
+                .lineLimit(1)
+            Text(unit)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .foregroundStyle(dimmed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+    }
+
+    private func smallerValue(_ title: String, _ value: String, sub: String) -> some View {
+        VStack(spacing: 2) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 54, weight: .semibold))
+                .monospacedDigit()
+                .minimumScaleFactor(0.4)
+                .lineLimit(1)
+            Text(sub)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
+        .foregroundStyle(dimmed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+    }
+
+    // 색은 "무엇을 받고 있나" 기준. 연결 상태보다 이게 더 중요하다.
+    private var statusColor: Color {
+        switch ble.source {
+        case .connection:  return .green
+        case .advertising: return .orange
+        case .none:        return ble.state == .idle ? .gray : .blue
         }
     }
 
-    private var batteryCaption: String {
-        guard let s = ble.sample, let up = s.uptimeSeconds else { return " " }
-        return String(format: "uptime %.0f분", up / 60)
+    private var statusText: String {
+        switch ble.source {
+        case .connection:
+            return ble.source.displayText(rateHz: ble.packetRateHz)
+        case .advertising:
+            // 연결은 끊겼지만 광고로 값을 계속 받고 있는 상태
+            let base = ble.source.displayText(rateHz: ble.packetRateHz)
+            return ble.disconnectedFor > 0.5
+                ? base + String(format: " · 재연결 중 %.0f초", ble.disconnectedFor)
+                : base
+        case .none:
+            if ble.state == .reconnecting && ble.disconnectedFor > 0.5 {
+                return String(format: "재연결 중… %.0f초", ble.disconnectedFor)
+            }
+            return ble.state.displayText
+        }
+    }
+
+    private var statusLine: some View {
+        HStack(spacing: 6) {
+            Circle().fill(statusColor).frame(width: 8, height: 8)
+            Text(statusText)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -102,174 +134,22 @@ struct LiveView: View {
 
 struct NoModuleBanner: View {
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sailboat")
-                .font(.title3)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("연결할 모듈을 고르세요")
-                    .font(.subheadline.weight(.semibold))
-                Text("설정 탭에서 내 모듈을 선택하면 자동으로 연결됩니다.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-        }
-        .padding(14)
-        .background(.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 14))
-    }
-}
-
-// MARK: - 연결 상태 배지
-
-struct StatusBadge: View {
-    let state: BLEConnectionState
-    let isLive: Bool
-    let disconnectedFor: TimeInterval
-
-    private var color: Color {
-        switch state {
-        case .connected:    return isLive ? .green : .yellow
-        case .connecting:   return .orange
-        case .reconnecting: return .orange
-        case .scanning:     return .blue
-        case .choosing:     return .orange
-        case .idle:         return .gray
-        }
-    }
-
-    private var text: String {
-        if state == .connected && !isLive { return "연결됨 (데이터 대기)" }
-        if state == .reconnecting && disconnectedFor > 0.5 {
-            return String(format: "재연결 중… %.0f초", disconnectedFor)
-        }
-        return state.displayText
-    }
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(color)
-                .frame(width: 10, height: 10)
-                .overlay(
-                    Circle().stroke(color.opacity(0.35), lineWidth: 6)
-                        .scaleEffect(state == .connected && isLive ? 1.0 : 1.4)
-                        .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
-                                   value: state)
-                )
-            Text(text)
-                .font(.subheadline.weight(.medium))
-            Spacer()
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(color.opacity(0.12), in: Capsule())
-    }
-}
-
-// MARK: - 속도 블록
-
-struct SpeedBlock: View {
-    let sample: TelemetrySample?
-    let dimmed: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Text(sample?.sogText ?? "—.—")
-                .font(.system(size: 96, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .minimumScaleFactor(0.5)
-                .lineLimit(1)
-                .contentTransition(.numericText())
-                .animation(.linear(duration: 0.2), value: sample?.sogKnots)
-
-            Text("knots")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-                .tracking(2)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 24)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 20))
-        .foregroundStyle(dimmed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-        .opacity(dimmed ? 0.55 : 1.0)
-        .animation(.easeInOut(duration: 0.25), value: dimmed)
-    }
-}
-
-// MARK: - 지표 카드
-
-struct MetricCard: View {
-    let title: String
-    let value: String
-    let caption: String
-    let systemImage: String
-    let dimmed: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(title, systemImage: systemImage)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            Text(value)
-                .font(.system(size: 32, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .minimumScaleFactor(0.6)
-                .lineLimit(1)
-                .contentTransition(.numericText())
-
-            Text(caption)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 16))
-        .opacity(dimmed ? 0.55 : 1.0)
-        .animation(.easeInOut(duration: 0.25), value: dimmed)
-    }
-}
-
-// MARK: - 진단 패널 (실측값 확인용)
-
-struct DiagnosticsPanel: View {
-    @ObservedObject var ble: BLEManager
-
-    var body: some View {
         VStack(spacing: 8) {
-            row("수신율", String(format: "%.2f Hz", ble.packetRateHz),
-                hint: "기대 4.00 Hz")
-            Divider()
-            row("상태 머신", ble.state.rawValue, hint: nil)
-            Divider()
-            row("마지막 수신",
-                ble.lastPacketAt.map { String(format: "%.1f초 전", -$0.timeIntervalSinceNow) } ?? "—",
-                hint: nil)
-            Divider()
-            row("uptime",
-                ble.sample?.uptimeSeconds.map { String(format: "%.1f초", $0) } ?? "—",
-                hint: "ESP32 기준")
+            Image(systemName: "sailboat")
+                .font(.largeTitle)
+                .foregroundStyle(.orange)
+            Text("연결할 모듈을 고르세요")
+                .font(.headline)
+            Text("설정 탭에서 내 모듈을 선택하면\n자동으로 연결됩니다.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private func row(_ label: String, _ value: String, hint: String?) -> some View {
-        HStack {
-            Text(label).font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(value).font(.caption.monospaced().weight(.semibold))
-                if let hint {
-                    Text(hint).font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
-        }
+        .padding()
     }
 }
 
-// MARK: - 로그 시트
+// MARK: - 로그 시트 (설정 탭에서 연다)
 
 struct LogSheet: View {
     @ObservedObject var ble: BLEManager

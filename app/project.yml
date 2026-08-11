@@ -23,7 +23,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # Team ID 는 인증서의 OU 필드 값이다 (CN 괄호 안 값이 아님).
     #   security find-certificate -c "Apple Development: <이름>" -p | openssl x509 -noout -subject
-    DEVELOPMENT_TEAM: 7HGKBV4DT3
+    DEVELOPMENT_TEAM: KC8YM8J64N   # FETM (Company)
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_EMIT_LOC_STRINGS: YES
     GENERATE_INFOPLIST_FILE: NO
@@ -47,6 +47,14 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
     dependencies:
       # 워치 앱을 아이폰 앱 번들 안에 넣어 함께 설치되도록 한다.
+      #
+      # ★ 위치는 `$(CONTENTS_FOLDER_PATH)/Watch` 여야 한다 (dstSubfolderSpec 16).
+      #
+      #   PlugIns/ (dstSubfolderSpec 13) 로 옮겨본 적이 있는데
+      #   (github.com/yonaskolb/XcodeGen/issues/1613 이 그렇게 하라고 한다)
+      #   그러면 아이폰 Watch 앱의 "사용 가능한 앱" 목록에서 **아예 사라진다.**
+      #   실기기(iOS 26.5 / watchOS 26.5)에서 양쪽 다 해보고 확인한 결과다.
+      #   그 이슈는 빌드가 실패하는 경우에 대한 것이고 우리 구성에는 해당하지 않는다.
       - target: SailingMonitor Watch App
         embed: true
         codeSign: true

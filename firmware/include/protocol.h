@@ -25,7 +25,7 @@ static constexpr uint16_t kCompanyID = 0xFFFF;  // 미할당(테스트용) Compa
 static constexpr uint8_t  kVersion   = 0x01;
 
 // ── 타이밍 ───────────────────────────────────────────────────────────────
-static constexpr uint32_t kNotifyPeriodMs = 250;  // 4 Hz
+static constexpr uint32_t kNotifyPeriodMs = 100;  // 10 Hz (런타임에 `hz` 명령으로 변경 가능)
 static constexpr uint32_t kAdvRefreshMs   = 1000; // 1 Hz
 static constexpr uint32_t kLogPeriodMs    = 1000; // 1 Hz 시리얼 로그
 static constexpr uint16_t kAdvIntervalMs  = 200;  // 광고 인터벌

@@ -38,12 +38,19 @@ struct ScannerView: View {
                                  + "페이로드 갱신은 1 Hz 이므로 seq 가 바뀐 것만 새 패킷으로 셉니다.")
                         }
 
-                        if scanner.undecodableCount > 0 {
-                            Section("진단") {
-                                LabeledContent("파싱 실패 광고", value: "\(scanner.undecodableCount)")
-                                    .font(.caption)
-                            }
+                        Section {
+                            LabeledContent("scan response 못 받음",
+                                           value: "\(scanner.undecodableCount)")
+                            LabeledContent("일시정지 재기준", value: "\(scanner.pausedResyncs)")
+                        } header: {
+                            Text("진단")
+                        } footer: {
+                            Text("텔레메트리는 scan response 에 실려 있어 SCAN_REQ/RSP 왕복이 한 번 더 필요합니다. "
+                                 + "첫 항목이 크면 그 왕복이 자주 실패하는 것입니다.\n"
+                                 + "앱이 백그라운드로 가면 스캔이 멈추는데, 그 사이 벌어진 seq 간격은 "
+                                 + "유실로 세지 않고 기준점을 다시 잡습니다.")
                         }
+                        .font(.caption)
                     }
                 }
             }
@@ -109,7 +116,6 @@ struct ModuleRow: View {
                 Text(module.sample.sogText)
                     .font(.system(size: 42, weight: .bold, design: .rounded))
                     .monospacedDigit()
-                    .contentTransition(.numericText())
                 Text("kn")
                     .font(.headline)
                     .foregroundStyle(.secondary)

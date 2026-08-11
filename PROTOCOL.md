@@ -98,7 +98,10 @@ module_id = fold8( FNV-1a(전체 이름) )      // 0 이면 1 로 보정
                  u32 LE          u16 LE   u16 LE   i8   u8
 ```
 
-**Notify 주기: 4 Hz (250 ms)**
+**Notify 주기: 기본 10 Hz (100 ms)**
+
+> 모듈에서 시리얼 `hz <1~100>` 명령으로 바꿀 수 있다. 수신 측은 특정 주기를 가정하지 말고
+> 실제로 도착하는 간격을 측정해서 표시한다.
 
 예시 (ver=1, module_id=1, uptime=123456ms, sog=5.53kn, cog=315.0°, heel=−12°, batt=87%):
 
@@ -192,7 +195,7 @@ AD 구조 전체는 `[len=0x0C][type=0xFF][FF FF][9바이트 페이로드]` = 13
        │                                              │
        ▼                                              │
   [ADV_IND 200ms]  ──central 연결──▶  [Connected]      │
-  connectable                          Notify 4Hz     │
+  connectable                          Notify 10Hz    │
   + scannable                          ADV_SCAN_IND   │
                                        (non-conn)     │
                                           │           │
@@ -200,7 +203,7 @@ AD 구조 전체는 `[len=0x0C][type=0xFF][FF FF][9바이트 페이로드]` = 13
                                             즉시 재개
 ```
 
-- 중앙장치 연결 → 즉시 4 Hz Notify 시작
+- 중앙장치 연결 → 즉시 Notify 시작 (기본 10 Hz)
 - 연결 해제 감지 → **즉시** connectable advertising 재개 (지연 없음)
 - 앱 측 재연결: `didDisconnectPeripheral` 수신 즉시 `connect()` 재요청.
   CoreBluetooth 의 `connect()` 는 타임아웃이 없으므로 pending 상태로 두면

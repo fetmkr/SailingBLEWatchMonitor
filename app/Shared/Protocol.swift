@@ -33,8 +33,9 @@ enum SailProtocol {
     /// Manufacturer Data 중 Company ID(2바이트)를 제외한 페이로드 길이
     static let manufacturerPayloadLength = 9
 
-    /// 펌웨어가 약속한 Notify 주기 (4 Hz)
-    static let notifyInterval: TimeInterval = 0.25
+    /// 펌웨어 기본 Notify 주기 (10 Hz). 보드에서 `hz` 명령으로 바꿀 수 있으므로
+    /// 화면에는 이 기대치가 아니라 **실측값**을 보여준다.
+    static let notifyInterval: TimeInterval = 0.1
     /// 펌웨어가 약속한 광고 데이터 갱신 주기 (1 Hz)
     static let advertisingRefreshInterval: TimeInterval = 1.0
 

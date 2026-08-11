@@ -202,7 +202,9 @@ private struct SettingsPage: View {
     private var diagnostics: some View {
         VStack(alignment: .leading, spacing: 3) {
             row("상태", ble.state.displayText)
-            row("수신율", String(format: "%.2f Hz", ble.packetRateHz))
+            row("경로", ble.source.displayText)
+            row("연결", ble.connLastAt == nil ? "—" : String(format: "%.1f Hz", ble.connRateHz))
+            row("광고", ble.advLastAt == nil ? "—" : String(format: "%.1f Hz", ble.advRateHz))
             row("배터리", ble.sample.map { "\($0.batteryPercent)%" } ?? "—")
             row("RSSI", ble.rssi.map { "\($0) dBm" } ?? "—")
             row("uptime", ble.sample?.uptimeSeconds.map { String(format: "%.0f초", $0) } ?? "—")
@@ -269,23 +271,25 @@ private struct StatusLine: View {
     @EnvironmentObject private var ble: BLEManager
 
     private var color: Color {
-        switch ble.state {
-        case .connected:                 return ble.isLive ? .green : .yellow
-        case .reconnecting, .connecting: return .orange
-        case .scanning:                  return .blue
-        case .choosing:                  return .orange
-        case .idle:                      return .gray
+        switch ble.source {
+        case .connection:  return .green
+        case .advertising: return .orange
+        case .none:        return ble.state == .idle ? .gray : .blue
         }
     }
 
     private var text: String {
-        if ble.state == .reconnecting && ble.disconnectedFor > 0.5 {
-            return String(format: "재연결 중… %.0f초", ble.disconnectedFor)
+        switch ble.source {
+        case .connection:
+            return ble.pinnedModule?.displayName ?? "연결"
+        case .advertising:
+            return ble.source.displayText(rateHz: ble.packetRateHz)
+        case .none:
+            if ble.state == .reconnecting && ble.disconnectedFor > 0.5 {
+                return String(format: "재연결 중… %.0f초", ble.disconnectedFor)
+            }
+            return ble.state.displayText
         }
-        if ble.state == .connected, let pin = ble.pinnedModule {
-            return pin.displayName
-        }
-        return ble.state.displayText
     }
 
     var body: some View {
