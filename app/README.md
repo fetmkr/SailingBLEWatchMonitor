@@ -19,6 +19,7 @@ app/
 ├── Shared/                  ← 두 타깃이 함께 컴파일
 │   ├── Protocol.swift       ← 패킷 디코딩. firmware/include/protocol.h 와 쌍
 │   ├── ModulePin.swift      ← "내 모듈" 고정 저장 + 발견 목록 모델
+│   ├── AppShortcuts.swift   ← App Intents (바로가기 / Siri)
 │   └── BLEManager.swift     ← 탐색/연결 모드, notify, 재연결, 모듈 검증
 ├── iOS/
 │   ├── SailingMonitorApp.swift     ← @main, 탭 3개
@@ -30,6 +31,8 @@ app/
 └── Watch/
     ├── WatchApp.swift
     ├── WatchLiveView.swift
+    ├── SessionManager.swift  ← HKWorkoutSession (Always On + 백그라운드)
+    ├── WorkoutIntents.swift  ← 액션 버튼 "운동" 등록
     ├── Info.plist
 ```
 
@@ -260,6 +263,46 @@ KOR1234             −78 dBm  · 4.10 kn
 
 **물 잠금** — `WKInterfaceDevice.enableWaterLock()`. 설정 페이지에 버튼.
 크라운을 돌려 해제하면 스피커로 물을 빼낸다.
+
+### Apple Watch Ultra 액션 버튼
+
+액션 버튼에 앱을 올리는 경로는 **두 가지이고 조건이 다르다.**
+
+| 경로 | 설정 위치 | 조건 |
+|---|---|---|
+| 바로가기 | 동작 → 바로가기 | App Intent 를 아무거나 하나 노출 |
+| **운동** | 동작 → 운동 → 앱 | `StartWorkoutIntent` + `@Parameter workoutStyle` + `workout-processing` |
+
+Strava 같은 운동 앱이 뜨는 건 두 번째 경로다.
+
+**앱스토어 등록과 무관하다.** Shortcuts 는 설치된 앱의 App Intents 메타데이터를
+읽으므로 개발 설치본도 잡힌다. 목록에 앱이 아예 안 보인다면 Intent 가 하나도
+없다는 뜻이다. 빌드 로그에 이렇게 나온다.
+
+```
+appintentsmetadataprocessor: Metadata extraction skipped.
+                             No AppIntents.framework dependency found.
+```
+
+**결정적인 부분** — `workoutStyle` 을 `@Parameter` 로 선언해야 한다.
+안 하면 설정 앱에 "앱 열기" 동작만 뜨고 **운동 목록에는 안 나온다.**
+
+```swift
+struct BeginSailingIntent: StartWorkoutIntent {
+    @Parameter(title: "종류") var workoutStyle: SailingStyle   // ★ @Parameter 필수
+    static let openAppWhenRun = true
+    static var suggestedWorkouts: [BeginSailingIntent] { [.init(style: .sailing)] }
+}
+```
+
+번들에 실제로 들어갔는지는 이렇게 확인한다.
+
+```bash
+strings "<앱>.app/Metadata.appintents/extract.actionsdata" | grep -oE "[A-Za-z]*Intent" | sort -u
+```
+
+> 액션 버튼 **길게 누르기는 못 쓴다.** watchOS 가 긴급 SOS 로 예약해 뒀다.
+> 새로 설치하면 시스템이 Intent 를 색인하는 데 잠깐 걸린다.
 
 ### iOS — 화면 꺼짐 방지
 
