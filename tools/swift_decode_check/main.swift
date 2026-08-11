@@ -72,13 +72,13 @@ for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: true).enu
     let sample: TelemetrySample?
     switch kind {
     case "gatt":
-        guard data.count == HohoProtocol.telemetryLength else {
-            fail(lineNo, "gatt 길이가 \(HohoProtocol.telemetryLength) 이 아님: \(data.count)")
+        guard data.count == SailProtocol.telemetryLength else {
+            fail(lineNo, "gatt 길이가 \(SailProtocol.telemetryLength) 이 아님: \(data.count)")
             continue
         }
         sample = TelemetrySample.decodeTelemetryPacket(data)
     case "mfg":
-        guard data.count == 2 + HohoProtocol.manufacturerPayloadLength else {
+        guard data.count == 2 + SailProtocol.manufacturerPayloadLength else {
             fail(lineNo, "mfg 길이가 11 이 아님: \(data.count)")
             continue
         }
@@ -103,7 +103,7 @@ for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: true).enu
     if cogBack != cogRaw   { fail(lineNo, "cog \(cogBack) ≠ \(cogRaw)") }
     if s.heelDegrees != heelRaw { fail(lineNo, "heel \(s.heelDegrees) ≠ \(heelRaw)") }
     if s.batteryPercent != battRaw { fail(lineNo, "batt \(s.batteryPercent) ≠ \(battRaw)") }
-    if s.version != HohoProtocol.version { fail(lineNo, "ver \(s.version)") }
+    if s.version != SailProtocol.version { fail(lineNo, "ver \(s.version)") }
     if s.moduleID != UInt8(moduleRaw) { fail(lineNo, "module_id \(s.moduleID) ≠ \(moduleRaw)") }
 
     if kind == "gatt" {
@@ -162,30 +162,30 @@ for (deg, expect) in compassCases where compassPoint(deg) != expect {
 
 // 모듈 이름 규칙 — 펌웨어의 kNamePrefix / kMaxFullNameLen 과 맞아야 한다
 print("\n── 모듈 이름 규칙 ──")
-if HohoProtocol.namePrefix != "HOHO-" {
-    failures.append("  namePrefix 가 \"HOHO-\" 가 아님: \(HohoProtocol.namePrefix)")
+if SailProtocol.namePrefix != "SAIL-" {
+    failures.append("  namePrefix 가 \"SAIL-\" 가 아님: \(SailProtocol.namePrefix)")
 }
-if HohoProtocol.maxFullNameLength != 16 {
-    failures.append("  maxFullNameLength 가 16 이 아님: \(HohoProtocol.maxFullNameLength)")
+if SailProtocol.maxFullNameLength != 16 {
+    failures.append("  maxFullNameLength 가 16 이 아님: \(SailProtocol.maxFullNameLength)")
 }
 let nameCases: [(String, Bool, String)] = [
-    ("HOHO-hojun", true,  "hojun"),
-    ("HOHO-A3F2",  true,  "A3F2"),
-    ("HOHO-",      true,  ""),
+    ("SAIL-hojun", true,  "hojun"),
+    ("SAIL-A3F2",  true,  "A3F2"),
+    ("SAIL-",      true,  ""),
     ("AirPods Pro", false, "AirPods Pro"),
-    ("hoho-lower", false, "hoho-lower"),   // 대소문자 구분
+    ("sail-lower", false, "sail-lower"),   // 대소문자 구분
 ]
 for (name, expectMatch, expectUser) in nameCases {
-    if HohoProtocol.isHohoName(name) != expectMatch {
-        failures.append("  isHohoName(\(name)) = \(HohoProtocol.isHohoName(name)), 기대 \(expectMatch)")
+    if SailProtocol.isSailName(name) != expectMatch {
+        failures.append("  isSailName(\(name)) = \(SailProtocol.isSailName(name)), 기대 \(expectMatch)")
     }
-    if HohoProtocol.userName(from: name) != expectUser {
-        failures.append("  userName(\(name)) = \(HohoProtocol.userName(from: name)), 기대 \(expectUser)")
+    if SailProtocol.userName(from: name) != expectUser {
+        failures.append("  userName(\(name)) = \(SailProtocol.userName(from: name)), 기대 \(expectUser)")
     }
 }
 // 최대 길이 이름이 scan response 예산(31) 안에 들어가는지
-let maxNameAD = 2 + HohoProtocol.maxFullNameLength           // [len][type][name]
-let mfgAD     = 2 + 2 + HohoProtocol.manufacturerPayloadLength // [len][type][company][payload]
+let maxNameAD = 2 + SailProtocol.maxFullNameLength           // [len][type][name]
+let mfgAD     = 2 + 2 + SailProtocol.manufacturerPayloadLength // [len][type][company][payload]
 print("  최대 이름 시 scan response = \(mfgAD + maxNameAD) 바이트 (한도 31)")
 if mfgAD + maxNameAD > 31 {
     failures.append("  최대 길이 이름에서 scan response 가 31바이트를 넘음")

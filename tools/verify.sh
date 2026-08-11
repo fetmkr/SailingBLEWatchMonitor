@@ -59,7 +59,7 @@ WATCH_DEST='platform=watchOS Simulator,name=Apple Watch Series 11 (46mm)'
 # 로그를 파일로 받고 xcodebuild 자체의 종료 코드로 판정한다.
 build_target() {
     local scheme="$1" dest="$2" logfile="$3"
-    if xcodebuild -project "$ROOT/app/HohoBLE.xcodeproj" -scheme "$scheme" \
+    if xcodebuild -project "$ROOT/app/SailingMonitor.xcodeproj" -scheme "$scheme" \
         -destination "$dest" -configuration Debug \
         CODE_SIGNING_ALLOWED=NO build > "$logfile" 2>&1; then
         printf '   %s — OK\n' "$scheme"
@@ -71,8 +71,8 @@ build_target() {
     fi
 }
 
-build_target "HohoBLE"           "$IOS_DEST"   "$BUILD/ios-build.log"
-build_target "HohoBLE Watch App" "$WATCH_DEST" "$BUILD/watch-build.log"
+build_target "SailingMonitor"           "$IOS_DEST"   "$BUILD/ios-build.log"
+build_target "SailingMonitor Watch App" "$WATCH_DEST" "$BUILD/watch-build.log"
 
 ok "앱 빌드"
 

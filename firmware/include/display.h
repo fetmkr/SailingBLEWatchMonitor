@@ -1,4 +1,4 @@
-// HOHO — Adafruit ESP32-S3 TFT Feather 내장 화면 (240x135 ST7789)
+// Sailing Monitor — Adafruit ESP32-S3 TFT Feather 내장 화면 (240x135 ST7789)
 //
 // 보드가 지금 만들어 내보내고 있는 값을 그대로 보여준다.
 // (모듈이 송신 측이므로 화면에는 "수신" 개념이 없다 — 광고/연결 상태만 표시)
@@ -19,9 +19,9 @@
 
 #include "protocol.h"
 
-#if HOHO_HAS_TFT
+#if SAIL_HAS_TFT
 
-namespace hoho {
+namespace sail {
 
 // 화면에 그릴 상태 묶음
 struct DisplayState {
@@ -45,6 +45,6 @@ void displayBeginMainScreen();
 // 바뀐 부분만 다시 그린다. loop() 에서 주기적으로 호출(4 Hz 권장).
 void displayUpdate(const DisplayState& s);
 
-} // namespace hoho
+} // namespace sail
 
-#endif // HOHO_HAS_TFT
+#endif // SAIL_HAS_TFT

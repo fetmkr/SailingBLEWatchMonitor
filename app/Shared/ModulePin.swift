@@ -12,7 +12,7 @@ import Foundation
 // MARK: - 고정된 모듈
 
 struct ModulePin: Codable, Equatable {
-    /// 광고 이름 전체. 예) `HOHO-hojun`
+    /// 광고 이름 전체. 예) `SAIL-hojun`
     var fullName: String
     /// 패킷마다 실려오는 1바이트 식별자. 연결 후 검증에 쓴다.
     var moduleID: UInt8
@@ -21,8 +21,8 @@ struct ModulePin: Codable, Equatable {
     var peripheralID: UUID?
     var pinnedAt: Date
 
-    /// 화면에 보여줄 짧은 이름. `HOHO-hojun` → `hojun`
-    var displayName: String { HohoProtocol.userName(from: fullName) }
+    /// 화면에 보여줄 짧은 이름. `SAIL-hojun` → `hojun`
+    var displayName: String { SailProtocol.userName(from: fullName) }
 }
 
 // MARK: - 발견된 모듈 (선택 화면용)
@@ -38,7 +38,7 @@ struct DiscoveredModule: Identifiable, Equatable {
     var sample: TelemetrySample?
 
     var id: UUID { peripheralID }
-    var displayName: String { HohoProtocol.userName(from: fullName) }
+    var displayName: String { SailProtocol.userName(from: fullName) }
     var isStale: Bool { Date().timeIntervalSince(lastSeen) > 5.0 }
 
     /// 신호 세기 막대 (0…4)
@@ -56,7 +56,7 @@ struct DiscoveredModule: Identifiable, Equatable {
 // MARK: - 저장소
 
 enum ModulePinStore {
-    private static let key = "hoho.pinnedModule"
+    private static let key = "sail.pinnedModule"
 
     static func load() -> ModulePin? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }

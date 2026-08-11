@@ -1,6 +1,6 @@
 //
 //  Protocol.swift
-//  HOHO-01 BLE 텔레메트리 프로토콜 v1 — iOS / watchOS 공용
+//  SAIL-01 BLE 텔레메트리 프로토콜 v1 — iOS / watchOS 공용
 //
 //  규격 원문: ../../PROTOCOL.md
 //  펌웨어 대응 파일: ../../firmware/include/protocol.h
@@ -12,10 +12,10 @@ import Foundation
 
 // MARK: - 식별자 / 상수
 
-enum HohoProtocol {
-    /// 모든 모듈의 광고 이름은 이 접두사로 시작한다. 예) `HOHO-hojun`
+enum SailProtocol {
+    /// 모든 모듈의 광고 이름은 이 접두사로 시작한다. 예) `SAIL-hojun`
     /// 앱은 이 접두사로 "우리 모듈"을 골라낸다.
-    static let namePrefix = "HOHO-"
+    static let namePrefix = "SAIL-"
 
     /// 광고에 들어갈 수 있는 전체 이름의 최대 길이 (scan response 예산에서 나온 값)
     static let maxFullNameLength = 16
@@ -39,11 +39,11 @@ enum HohoProtocol {
     static let advertisingRefreshInterval: TimeInterval = 1.0
 
     /// 광고 이름이 우리 모듈의 것인지
-    static func isHohoName(_ name: String) -> Bool {
+    static func isSailName(_ name: String) -> Bool {
         name.hasPrefix(namePrefix)
     }
 
-    /// `HOHO-hojun` → `hojun`. 접두사가 없으면 원문 그대로.
+    /// `SAIL-hojun` → `hojun`. 접두사가 없으면 원문 그대로.
     static func userName(from fullName: String) -> String {
         guard fullName.hasPrefix(namePrefix) else { return fullName }
         return String(fullName.dropFirst(namePrefix.count))
@@ -124,11 +124,11 @@ extension TelemetrySample {
     /// - `ver` 이 지원 버전이 아니면 nil
     /// - 12 초과는 앞 12바이트만 사용(전방 호환)
     static func decodeTelemetryPacket(_ data: Data, at date: Date = Date()) -> TelemetrySample? {
-        guard data.count >= HohoProtocol.telemetryLength else { return nil }
+        guard data.count >= SailProtocol.telemetryLength else { return nil }
 
         var r = LEReader(data)
         let ver = r.u8()
-        guard ver == HohoProtocol.version else { return nil }
+        guard ver == SailProtocol.version else { return nil }
 
         let moduleID = r.u8()
         let uptime   = r.u32()
@@ -155,15 +155,15 @@ extension TelemetrySample {
     /// CoreBluetooth 가 주는 `CBAdvertisementDataManufacturerDataKey` 는
     /// **Company ID 2바이트를 포함한** 전체 바이트열이다. 따라서 총 11바이트를 기대한다.
     static func decodeManufacturerData(_ data: Data, at date: Date = Date()) -> TelemetrySample? {
-        let expected = 2 + HohoProtocol.manufacturerPayloadLength
+        let expected = 2 + SailProtocol.manufacturerPayloadLength
         guard data.count >= expected else { return nil }
 
         var r = LEReader(data)
         let company = r.u16()
-        guard company == HohoProtocol.companyID else { return nil }
+        guard company == SailProtocol.companyID else { return nil }
 
         let ver = r.u8()
-        guard ver == HohoProtocol.version else { return nil }
+        guard ver == SailProtocol.version else { return nil }
 
         let moduleID = r.u8()
         let sogRaw   = r.u16()

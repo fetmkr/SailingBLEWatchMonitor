@@ -81,7 +81,7 @@ final class ScannerManager: NSObject, ObservableObject {
     func startScanning() {
         guard central.state == .poweredOn, !central.isScanning else { return }
         central.scanForPeripherals(
-            withServices: [HohoProtocol.serviceUUID],
+            withServices: [SailProtocol.serviceUUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
         )
         isScanning = true

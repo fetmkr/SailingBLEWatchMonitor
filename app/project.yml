@@ -2,10 +2,10 @@
 #   생성:  cd app && xcodegen generate
 # .xcodeproj 는 이 파일에서 만들어지므로 직접 편집하지 말고 여기를 고칠 것.
 
-name: HohoBLE
+name: SailingMonitor
 
 options:
-  bundleIdPrefix: com.hoho.bletest
+  bundleIdPrefix: kr.fetm
   createIntermediateGroups: true
   deploymentTarget:
     iOS: "17.0"
@@ -21,7 +21,9 @@ settings:
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
-    DEVELOPMENT_TEAM: ""
+    # Team ID 는 인증서의 OU 필드 값이다 (CN 괄호 안 값이 아님).
+    #   security find-certificate -c "Apple Development: <이름>" -p | openssl x509 -noout -subject
+    DEVELOPMENT_TEAM: 7HGKBV4DT3
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_EMIT_LOC_STRINGS: YES
     GENERATE_INFOPLIST_FILE: NO
@@ -31,7 +33,7 @@ settings:
 targets:
 
   # ── iPhone 앱 ───────────────────────────────────────────────────────────
-  HohoBLE:
+  SailingMonitor:
     type: application
     platform: iOS
     sources:
@@ -39,13 +41,13 @@ targets:
       - path: iOS
     settings:
       base:
-        PRODUCT_NAME: HohoBLE
-        PRODUCT_BUNDLE_IDENTIFIER: com.hoho.bletest
+        PRODUCT_NAME: SailingMonitor
+        PRODUCT_BUNDLE_IDENTIFIER: kr.fetm.sailingmonitor
         INFOPLIST_FILE: iOS/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
     dependencies:
       # 워치 앱을 아이폰 앱 번들 안에 넣어 함께 설치되도록 한다.
-      - target: HohoBLE Watch App
+      - target: SailingMonitor Watch App
         embed: true
         codeSign: true
         copy:
@@ -55,7 +57,7 @@ targets:
       testTargets: []
 
   # ── Apple Watch 앱 (단일 타깃, 독립 실행) ───────────────────────────────
-  HohoBLE Watch App:
+  SailingMonitor Watch App:
     type: application
     platform: watchOS
     sources:
@@ -63,10 +65,10 @@ targets:
       - path: Watch
     settings:
       base:
-        PRODUCT_NAME: HohoBLE Watch App
-        PRODUCT_BUNDLE_IDENTIFIER: com.hoho.bletest.watchkitapp
+        PRODUCT_NAME: SailingMonitor Watch App
+        PRODUCT_BUNDLE_IDENTIFIER: kr.fetm.sailingmonitor.watchkitapp
         INFOPLIST_FILE: Watch/Info.plist
-        CODE_SIGN_ENTITLEMENTS: Watch/HohoBLEWatch.entitlements
+        CODE_SIGN_ENTITLEMENTS: Watch/SailingMonitorWatch.entitlements
         TARGETED_DEVICE_FAMILY: "4"
         # 아이폰 앱 없이 워치 단독 설치 지원
         WATCHOS_DEPLOYMENT_TARGET: "10.0"
@@ -74,19 +76,19 @@ targets:
       testTargets: []
 
 schemes:
-  HohoBLE:
+  SailingMonitor:
     build:
       targets:
-        HohoBLE: all
+        SailingMonitor: all
     run:
       config: Debug
     archive:
       config: Release
 
-  HohoBLE Watch App:
+  SailingMonitor Watch App:
     build:
       targets:
-        HohoBLE Watch App: all
+        SailingMonitor Watch App: all
     run:
       config: Debug
     archive:

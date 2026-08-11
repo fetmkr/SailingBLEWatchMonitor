@@ -1,4 +1,4 @@
-// HOHO BLE 텔레메트리 프로토콜 v1
+// Sailing Monitor 텔레메트리 프로토콜 v1
 // 규격 원문: ../../PROTOCOL.md  — 이 파일과 app/Shared/Protocol.swift 는 항상 함께 수정할 것.
 #pragma once
 
@@ -6,20 +6,20 @@
 #include <stdint.h>
 #include <string.h>
 
-namespace hoho {
+namespace sail {
 
 // ── 식별자 ───────────────────────────────────────────────────────────────
 static constexpr const char* kServiceUUID   = "b0a70001-0000-4000-8000-000000000001";
 static constexpr const char* kTelemetryUUID = "b0a70002-0000-4000-8000-000000000001";
 
-// 광고 이름은 "HOHO-" + 사용자 지정 이름. 앱은 이 접두사로 우리 모듈을 골라낸다.
-//   예) HOHO-hojun
-static constexpr const char* kNamePrefix = "HOHO-";
+// 광고 이름은 "SAIL-" + 사용자 지정 이름. 앱은 이 접두사로 우리 모듈을 골라낸다.
+//   예) SAIL-hojun
+static constexpr const char* kNamePrefix = "SAIL-";
 
 // Scan response 예산: 31 = Manufacturer Data(13) + [len][type] + 이름
 //   → 접두사 포함 전체 이름 최대 16바이트
 static constexpr size_t kMaxFullNameLen = 16;
-static constexpr size_t kMaxUserNameLen = kMaxFullNameLen - 5; // "HOHO-" 제외 → 11
+static constexpr size_t kMaxUserNameLen = kMaxFullNameLen - 5; // "SAIL-" 제외 → 11
 
 static constexpr uint16_t kCompanyID = 0xFFFF;  // 미할당(테스트용) Company ID
 static constexpr uint8_t  kVersion   = 0x01;
@@ -130,4 +130,4 @@ inline void encodeManufacturerData(const Telemetry& t, uint8_t seq, uint8_t out[
     out[10] = seq;
 }
 
-} // namespace hoho
+} // namespace sail

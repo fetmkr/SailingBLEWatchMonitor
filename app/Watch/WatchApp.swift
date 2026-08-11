@@ -1,12 +1,12 @@
 //
 //  WatchApp.swift
-//  HOHO-01 텔레메트리 수신기 (watchOS, 독립 실행)
+//  SAIL-01 텔레메트리 수신기 (watchOS, 독립 실행)
 //
 
 import SwiftUI
 
 @main
-struct HohoBLEWatchApp: App {
+struct SailingMonitorWatchApp: App {
     @StateObject private var ble = BLEManager.shared
     @StateObject private var workout = WorkoutManager()
     @Environment(\.scenePhase) private var scenePhase

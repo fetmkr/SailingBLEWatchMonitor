@@ -1,4 +1,4 @@
-// HOHO TFT 화면 레이아웃 — Arduino 의존성 없는 순수 계산부.
+// Sailing Monitor TFT 화면 레이아웃 — Arduino 의존성 없는 순수 계산부.
 //
 // 좌표와 문자열 포맷을 여기 모아둔 이유:
 // 화면 글자가 240px 밖으로 밀려나도 컴파일은 통과한다. 실기기에 꽂아봐야
@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 
-namespace hoho {
+namespace sail {
 namespace layout {
 
 // ── 패널 ─────────────────────────────────────────────────────────────────
@@ -116,4 +116,4 @@ inline void formatName(char* out, size_t n, const char* name) {
 }
 
 } // namespace layout
-} // namespace hoho
+} // namespace sail

@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────
-//  HOHO — 요트 텔레메트리 BLE 테스트 펌웨어 (ESP32-S3 / NimBLE-Arduino 2.x)
+//  Sailing Monitor — 요트 텔레메트리 BLE 테스트 펌웨어 (ESP32-S3 / NimBLE-Arduino 2.x)
 //
 //  하는 일
 //    1. 가상 GPS/자세 데이터를 4 Hz 로 생성
@@ -27,12 +27,12 @@
 #include "protocol.h"
 #include "simulator.h"
 
-using hoho::Telemetry;
+using sail::Telemetry;
 
 // ── 모듈 신원 ────────────────────────────────────────────────────────────
 static Preferences gPrefs;
-static char        gUserName[hoho::kMaxUserNameLen + 1] = {0}; // "hojun"
-static char        gFullName[hoho::kMaxFullNameLen + 1] = {0}; // "HOHO-hojun"
+static char        gUserName[sail::kMaxUserNameLen + 1] = {0}; // "hojun"
+static char        gFullName[sail::kMaxFullNameLen + 1] = {0}; // "SAIL-hojun"
 static uint8_t     gModuleID = 1;
 
 // ── BLE 전역 상태 ────────────────────────────────────────────────────────
@@ -90,20 +90,20 @@ static void applyIdentity(const char* userName) {
     if (gUserName[0] == '\0') {
         defaultUserName(gUserName, sizeof(gUserName));
     }
-    snprintf(gFullName, sizeof(gFullName), "%s%s", hoho::kNamePrefix, gUserName);
-    gModuleID        = hoho::moduleIDFromName(gFullName);
+    snprintf(gFullName, sizeof(gFullName), "%s%s", sail::kNamePrefix, gUserName);
+    gModuleID        = sail::moduleIDFromName(gFullName);
     gLatest.moduleID = gModuleID;
 }
 
 static void loadIdentity() {
-    gPrefs.begin("hoho", /*readOnly=*/true);
+    gPrefs.begin("sail", /*readOnly=*/true);
     String saved = gPrefs.getString("name", "");
     gPrefs.end();
 
     if (saved.length() > 0) {
         applyIdentity(saved.c_str());
     } else {
-        char fallback[hoho::kMaxUserNameLen + 1];
+        char fallback[sail::kMaxUserNameLen + 1];
         defaultUserName(fallback, sizeof(fallback));
         applyIdentity(fallback);
     }
@@ -111,7 +111,7 @@ static void loadIdentity() {
 
 static void saveIdentity(const char* userName) {
     applyIdentity(userName);
-    gPrefs.begin("hoho", /*readOnly=*/false);
+    gPrefs.begin("sail", /*readOnly=*/false);
     gPrefs.putString("name", gUserName);
     gPrefs.end();
 }
@@ -131,7 +131,7 @@ static float arduinoRand01() {
 }
 
 static Telemetry simulate(uint32_t nowMs) {
-    Telemetry t = hoho::sim::simulate(nowMs, &arduinoRand01);
+    Telemetry t = sail::sim::simulate(nowMs, &arduinoRand01);
     t.moduleID  = gModuleID;
     return t;
 }
@@ -142,14 +142,14 @@ static Telemetry simulate(uint32_t nowMs) {
 static NimBLEAdvertisementData buildAdvData() {
     NimBLEAdvertisementData d;
     d.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP); // 0x06
-    d.setCompleteServices(NimBLEUUID(hoho::kServiceUUID));
+    d.setCompleteServices(NimBLEUUID(sail::kServiceUUID));
     return d;
 }
 
 // Scan Response: Manufacturer Data + Complete Local Name  (13 + 2+N 바이트)
 static NimBLEAdvertisementData buildScanData(const Telemetry& tm, uint8_t seq) {
-    uint8_t mfg[2 + hoho::kMfgLen];
-    hoho::encodeManufacturerData(tm, seq, mfg);
+    uint8_t mfg[2 + sail::kMfgLen];
+    sail::encodeManufacturerData(tm, seq, mfg);
 
     NimBLEAdvertisementData d;
     d.setManufacturerData(mfg, sizeof(mfg));
@@ -169,8 +169,8 @@ static void applyAdvertising() {
     adv->setConnectableMode(gConnected ? BLE_GAP_CONN_MODE_NON : BLE_GAP_CONN_MODE_UND);
     adv->setDiscoverableMode(BLE_GAP_DISC_MODE_GEN); // NON 이 아니어야 ADV_SCAN_IND 가 된다
     adv->enableScanResponse(true);
-    adv->setMinInterval(hoho::kAdvIntervalUnits);
-    adv->setMaxInterval(hoho::kAdvIntervalUnits);
+    adv->setMinInterval(sail::kAdvIntervalUnits);
+    adv->setMaxInterval(sail::kAdvIntervalUnits);
 
     adv->setAdvertisementData(buildAdvData());
     adv->setScanResponseData(buildScanData(gLatest, gSeq));
@@ -183,7 +183,7 @@ static void applyAdvertising() {
                   gFullName,
                   gConnected ? "ADV_SCAN_IND / non-connectable"
                              : "ADV_IND / connectable",
-                  hoho::kAdvIntervalMs);
+                  sail::kAdvIntervalMs);
 }
 
 // 광고를 멈추지 않고 scan response 안의 manufacturer data 만 1 Hz 로 교체
@@ -233,7 +233,7 @@ class TelemetryCallbacks : public NimBLECharacteristicCallbacks {
 static void printHelp() {
     Serial.println("──────────────────────────────────────────");
     Serial.println("  name <이름>   보드 이름 설정 (최대 11자, 영숫자/-/_)");
-    Serial.println("                예) name hojun  →  HOHO-hojun");
+    Serial.println("                예) name hojun  →  SAIL-hojun");
     Serial.println("  info          현재 설정 출력");
     Serial.println("  help          이 도움말");
     Serial.println("──────────────────────────────────────────");
@@ -258,9 +258,9 @@ static void handleCommand(String line) {
             Serial.println("[ID ] 이름이 비어 있습니다. 예) name hojun");
             return;
         }
-        if (arg.length() > hoho::kMaxUserNameLen) {
+        if (arg.length() > sail::kMaxUserNameLen) {
             Serial.printf("[ID ] 이름이 너무 깁니다 (최대 %u자). 잘라서 저장합니다.\n",
-                          (unsigned)hoho::kMaxUserNameLen);
+                          (unsigned)sail::kMaxUserNameLen);
         }
         saveIdentity(arg.c_str());
         printIdentity();
@@ -295,21 +295,21 @@ void setup() {
 
     loadIdentity();
 
-#if HOHO_HAS_TFT
+#if SAIL_HAS_TFT
     // 화면을 BLE 보다 먼저 켠다. BLE 초기화가 실패해도 보드가 살아있다는 걸
     // 눈으로 확인할 수 있어야 디버깅이 쉽다.
-    hoho::displayBegin();
-    hoho::displayBootMessage(gFullName, "BLE starting...");
+    sail::displayBegin();
+    sail::displayBootMessage(gFullName, "BLE starting...");
 #endif
 
     Serial.println();
     Serial.println("═══════════════════════════════════════════");
     Serial.printf("  %s — 요트 텔레메트리 BLE 테스트\n", gFullName);
     Serial.printf("  module_id %u (0x%02X)\n", gModuleID, gModuleID);
-    Serial.printf("  service   %s\n", hoho::kServiceUUID);
-    Serial.printf("  telemetry %s\n", hoho::kTelemetryUUID);
+    Serial.printf("  service   %s\n", sail::kServiceUUID);
+    Serial.printf("  telemetry %s\n", sail::kTelemetryUUID);
     Serial.printf("  notify %.1fHz / adv refresh %.1fHz\n",
-                  1000.0f / hoho::kNotifyPeriodMs, 1000.0f / hoho::kAdvRefreshMs);
+                  1000.0f / sail::kNotifyPeriodMs, 1000.0f / sail::kAdvRefreshMs);
     Serial.println("  이름을 바꾸려면:  name <이름>   (help 로 전체 명령)");
     Serial.println("═══════════════════════════════════════════");
 
@@ -324,14 +324,14 @@ void setup() {
     // 광고 재개는 applyAdvertising() 이 모드까지 맞춰서 직접 처리한다.
     gServer->advertiseOnDisconnect(false);
 
-    NimBLEService* svc = gServer->createService(hoho::kServiceUUID);
+    NimBLEService* svc = gServer->createService(sail::kServiceUUID);
     gTelemetryChr = svc->createCharacteristic(
-        hoho::kTelemetryUUID,
+        sail::kTelemetryUUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     gTelemetryChr->setCallbacks(new TelemetryCallbacks());
 
-    uint8_t initial[hoho::kTelemetryLen];
-    hoho::encodeTelemetryPacket(gLatest, initial);
+    uint8_t initial[sail::kTelemetryLen];
+    sail::encodeTelemetryPacket(gLatest, initial);
     gTelemetryChr->setValue(initial, sizeof(initial));
 
     // NimBLE 2.x 에서는 서버가 시작될 때 서비스도 함께 시작된다(svc->start() 는 no-op).
@@ -340,8 +340,8 @@ void setup() {
     applyAdvertising();
     gAdvNeedsApply = false;
 
-#if HOHO_HAS_TFT
-    hoho::displayBeginMainScreen();
+#if SAIL_HAS_TFT
+    sail::displayBeginMainScreen();
 #endif
 }
 
@@ -355,12 +355,12 @@ void loop() {
     pollSerial();
 
     // 1) 4 Hz — 데이터 생성 + characteristic 갱신 + notify
-    if (now - lastNotify >= hoho::kNotifyPeriodMs) {
+    if (now - lastNotify >= sail::kNotifyPeriodMs) {
         lastNotify = now;
         gLatest    = simulate(now);
 
-        uint8_t packet[hoho::kTelemetryLen];
-        hoho::encodeTelemetryPacket(gLatest, packet);
+        uint8_t packet[sail::kTelemetryLen];
+        sail::encodeTelemetryPacket(gLatest, packet);
         gTelemetryChr->setValue(packet, sizeof(packet)); // Read 용 값도 항상 최신
         if (gConnected) {
             gTelemetryChr->notify(); // 구독자가 없으면 NimBLE 가 알아서 무시
@@ -374,29 +374,29 @@ void loop() {
     }
 
     // 3) 1 Hz — 광고 페이로드 갱신
-    if (now - lastAdv >= hoho::kAdvRefreshMs) {
+    if (now - lastAdv >= sail::kAdvRefreshMs) {
         lastAdv = now;
         refreshAdvPayload();
     }
 
-#if HOHO_HAS_TFT
+#if SAIL_HAS_TFT
     // 3.5) 4 Hz — 내장 TFT 갱신. 바뀐 문자열만 다시 그리므로 SPI 부담이 적다.
     static uint32_t lastDraw = 0;
-    if (now - lastDraw >= hoho::kNotifyPeriodMs) {
+    if (now - lastDraw >= sail::kNotifyPeriodMs) {
         lastDraw = now;
-        hoho::DisplayState ds;
+        sail::DisplayState ds;
         ds.name      = gUserName;
         ds.moduleID  = gModuleID;
         ds.connected = gConnected;
         ds.notifying = gSubscribed;
         ds.seq       = gSeq;
         ds.telemetry = gLatest;
-        hoho::displayUpdate(ds);
+        sail::displayUpdate(ds);
     }
 #endif
 
     // 4) 1 Hz — 시리얼 로그
-    if (now - lastLog >= hoho::kLogPeriodMs) {
+    if (now - lastLog >= sail::kLogPeriodMs) {
         lastLog = now;
         Serial.printf(
             "[%7.1fs] %s | SOG %5.2f kn | COG %5.1f° | HEEL %+6.1f° | BATT %3d%% | seq %3u | %s%s\n",
@@ -405,7 +405,7 @@ void loop() {
             gLatest.sogKn,
             gLatest.cogDeg,
             gLatest.heelDeg,
-            (int)hoho::encodeBatt(gLatest.battPct),
+            (int)sail::encodeBatt(gLatest.battPct),
             gSeq,
             gConnected ? "CONNECTED" : "ADVERTISING",
             gConnected ? (gSubscribed ? " (notify ON)" : " (notify OFF)") : "");

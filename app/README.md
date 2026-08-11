@@ -1,4 +1,4 @@
-# app — HOHO 텔레메트리 수신 앱 (iOS + watchOS)
+# app — Sailing Monitor 수신 앱 (iOS + watchOS)
 
 CoreBluetooth 만 쓰는 SwiftUI 앱. 서드파티 의존성 없음.
 프로토콜은 [`../PROTOCOL.md`](../PROTOCOL.md) 를 따른다.
@@ -21,7 +21,7 @@ app/
 │   ├── ModulePin.swift      ← "내 모듈" 고정 저장 + 발견 목록 모델
 │   └── BLEManager.swift     ← 탐색/연결 모드, notify, 재연결, 모듈 검증
 ├── iOS/
-│   ├── HohoBLEApp.swift     ← @main, 탭 3개
+│   ├── SailingMonitorApp.swift     ← @main, 탭 3개
 │   ├── LiveView.swift       ← 라이브 탭
 │   ├── ScannerView.swift    ← 스캐너 탭
 │   ├── ScannerManager.swift ← 광고 전용 별도 CBCentralManager
@@ -32,7 +32,7 @@ app/
     ├── WatchLiveView.swift
     ├── WorkoutManager.swift ← HKWorkoutSession(.sailing)
     ├── Info.plist
-    └── HohoBLEWatch.entitlements
+    └── SailingMonitorWatch.entitlements
 ```
 
 ---
@@ -45,7 +45,7 @@ app/
 brew install xcodegen      # 처음 한 번만
 cd app
 xcodegen generate
-open HohoBLE.xcodeproj
+open SailingMonitor.xcodeproj
 ```
 
 > `project.yml` 을 고쳤으면 `xcodegen generate` 를 다시 돌려야 반영된다.
@@ -78,7 +78,7 @@ Team ID 는 Xcode → Settings → Accounts → 계정 선택 → Manage Certifi
 ### iPhone
 
 1. 아이폰을 USB 로 연결 (또는 같은 Wi-Fi 에서 무선 디버깅 페어링)
-2. Xcode 상단 스킴 → **HohoBLE**, 대상 → 본인 아이폰
+2. Xcode 상단 스킴 → **SailingMonitor**, 대상 → 본인 아이폰
 3. `⌘R`
 4. 첫 실행 시 아이폰에서 *설정 → 일반 → VPN 및 기기 관리* → 개발자 앱 신뢰
 5. 앱이 뜨면 블루투스 권한 허용
@@ -91,7 +91,7 @@ Team ID 는 Xcode → Settings → Accounts → 계정 선택 → Manage Certifi
 직접 워치에 빌드해 넣으려면:
 
 1. 워치가 아이폰과 페어링되어 있고, 워치 화면이 켜져 있고 잠금 해제 상태여야 한다
-2. Xcode 스킴 → **HohoBLE Watch App**, 대상 → 본인 Apple Watch
+2. Xcode 스킴 → **SailingMonitor Watch App**, 대상 → 본인 Apple Watch
 3. `⌘R` (첫 설치는 몇 분 걸릴 수 있다)
 4. 워치에서 블루투스·건강 권한 허용
 
@@ -191,7 +191,7 @@ didDisconnectPeripheral
 
 필요한 설정 (이미 되어 있음):
 
-- `Watch/HohoBLEWatch.entitlements` → `com.apple.developer.healthkit`
+- `Watch/SailingMonitorWatch.entitlements` → `com.apple.developer.healthkit`
 - `Watch/Info.plist` → `WKBackgroundModes = [workout-processing]`
 - `Watch/Info.plist` → `NSHealthShareUsageDescription`, `NSHealthUpdateUsageDescription`
 

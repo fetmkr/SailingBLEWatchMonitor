@@ -1,12 +1,12 @@
 //
-//  HohoBLEApp.swift
-//  HOHO-01 텔레메트리 수신기 (iOS)
+//  SailingMonitorApp.swift
+//  SAIL-01 텔레메트리 수신기 (iOS)
 //
 
 import SwiftUI
 
 @main
-struct HohoBLEApp: App {
+struct SailingMonitorApp: App {
     @StateObject private var ble = BLEManager.shared
     @Environment(\.scenePhase) private var scenePhase
 

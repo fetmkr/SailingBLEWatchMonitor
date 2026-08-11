@@ -1,4 +1,4 @@
-# firmware — HOHO 텔레메트리 모듈 (ESP32-S3)
+# firmware — Sailing Monitor 텔레메트리 모듈 (ESP32-S3)
 
 가상 요트 텔레메트리를 만들어 BLE 로 뿌리는 테스트 펌웨어.
 프로토콜은 [`../PROTOCOL.md`](../PROTOCOL.md) 를 따른다.
@@ -39,7 +39,7 @@ firmware/
 │   └── display_layout.h  ← 화면 좌표·문자열 포맷. 역시 Arduino 비의존
 ├── src/
 │   ├── main.cpp          ← BLE 서버 + 광고 제어 + 루프
-│   └── display.cpp       ← ST7789 그리기 (HOHO_HAS_TFT 일 때만 컴파일)
+│   └── display.cpp       ← ST7789 그리기 (SAIL_HAS_TFT 일 때만 컴파일)
 └── tools/
     ├── sim_test.cpp      ← 호스트에서 값·화면 좌표를 실측 검증하는 하네스
     └── Makefile
@@ -93,20 +93,20 @@ pio device monitor
 
 ```
 ═══════════════════════════════════════════
-  HOHO-hojun — 요트 텔레메트리 BLE 테스트
-  module_id 1 (0x01)
+  SAIL-hojun — 요트 텔레메트리 BLE 테스트
+  module_id 125 (0x7D)
   service   b0a70001-0000-4000-8000-000000000001
   telemetry b0a70002-0000-4000-8000-000000000001
   notify 4.0Hz / adv refresh 1.0Hz
   이름을 바꾸려면:  name <이름>   (help 로 전체 명령)
 ═══════════════════════════════════════════
-[BLE] advertising 시작 — HOHO-hojun (ADV_IND / connectable, interval 200ms)
-[    1.0s] HOHO-hojun | SOG  5.61 kn | COG  45.0° | HEEL  +12.3° | BATT 100% | seq   1 | ADVERTISING
-[    2.0s] HOHO-hojun | SOG  5.74 kn | COG  45.0° | HEEL  +12.9° | BATT 100% | seq   2 | ADVERTISING
+[BLE] advertising 시작 — SAIL-hojun (ADV_IND / connectable, interval 200ms)
+[    1.0s] SAIL-hojun | SOG  5.61 kn | COG  45.0° | HEEL  +12.3° | BATT 100% | seq   1 | ADVERTISING
+[    2.0s] SAIL-hojun | SOG  5.74 kn | COG  45.0° | HEEL  +12.9° | BATT 100% | seq   2 | ADVERTISING
 [BLE] 연결됨 ← 5f:2a:... (conn=1)
-[BLE] advertising 시작 — HOHO-hojun (ADV_SCAN_IND / non-connectable, interval 200ms)
+[BLE] advertising 시작 — SAIL-hojun (ADV_SCAN_IND / non-connectable, interval 200ms)
 [BLE] notify 구독 ON
-[    3.0s] HOHO-hojun | SOG  5.88 kn | COG  45.0° | HEEL  +13.5° | BATT 100% | seq   3 | CONNECTED (notify ON)
+[    3.0s] SAIL-hojun | SOG  5.88 kn | COG  45.0° | HEEL  +13.5° | BATT 100% | seq   3 | CONNECTED (notify ON)
 ```
 
 ### 보드 이름 붙이기
@@ -119,9 +119,9 @@ name hojun
 ```
 
 ```
-[ID ] 이름 HOHO-hojun | module_id 1 (0x01) | MAC F4:12:FA:59:75:D5
+[ID ] 이름 SAIL-hojun | module_id 125 (0x7D) | MAC F4:12:FA:59:75:D5
 [ID ] 저장 완료 — 앱에서 모듈을 다시 선택해야 합니다.
-[BLE] advertising 시작 — HOHO-hojun (ADV_IND / connectable, interval 200ms)
+[BLE] advertising 시작 — SAIL-hojun (ADV_IND / connectable, interval 200ms)
 ```
 
 | 명령 | 설명 |
@@ -131,13 +131,13 @@ name hojun
 | `help` | 도움말 |
 
 설정하지 않으면 **MAC 의 뒤쪽 2바이트**로 자동 생성된다.
-예) MAC `F4:12:FA:59:75:D5` → `HOHO-75D5`
+예) MAC `F4:12:FA:59:75:D5` → `SAIL-75D5`
 따라서 아무 설정 없이 여러 장을 구워도 이름이 겹치지 않는다.
 
 > ⚠️ **앞쪽 바이트를 쓰면 안 된다.** `F4:12:FA` 는 Espressif OUI(제조사 공통 접두사)라
 > 모든 보드가 같다. 그런데 `ESP.getEfuseMac()` 은 MAC[0] 이 최하위 바이트인 uint64 를
 > 돌려주므로 `mac & 0xFF` 가 바로 그 OUI 첫 바이트다. 실제로 이 실수로 모든 보드가
-> `HOHO-12F4` 로 나오는 버그가 있었다. 지금은 `esp_read_mac()` 으로 바이트 배열을
+> `SAIL-12F4` 로 나오는 버그가 있었다. 지금은 `esp_read_mac()` 으로 바이트 배열을
 > 받아 `mac[4]`, `mac[5]` 를 쓴다.
 
 이름을 바꾸면 `module_id` 도 바뀌므로 앱에서 모듈을 다시 골라야 한다.

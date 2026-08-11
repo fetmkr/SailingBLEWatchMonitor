@@ -13,7 +13,7 @@
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleDisplayName</key>
-	<string>HOHO BLE</string>
+	<string>Sailing Monitor</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -25,7 +25,7 @@
 	<key>WKApplication</key>
 	<true/>
 	<key>WKCompanionAppBundleIdentifier</key>
-	<string>com.hoho.bletest</string>
+	<string>kr.fetm.sailingmonitor</string>
 	<!-- 아이폰 앱 없이도 워치 단독으로 설치·실행 가능 -->
 	<key>WKRunsIndependentlyOfCompanionApp</key>
 	<true/>
@@ -37,7 +37,7 @@
 	</array>
 
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>요트 텔레메트리 모듈(HOHO-01)에 연결해 속도·침로·힐 각을 실시간으로 받기 위해 블루투스를 사용합니다.</string>
+	<string>요트 텔레메트리 모듈(SAIL-01)에 연결해 속도·침로·힐 각을 실시간으로 받기 위해 블루투스를 사용합니다.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>세일링 훈련 세션 중 심박수 등의 운동 데이터를 읽어 표시합니다.</string>
 	<key>NSHealthUpdateUsageDescription</key>

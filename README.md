@@ -25,7 +25,7 @@ BLE 로 뿌리고, 아이폰과 애플워치 네이티브 앱이 이를 받아 �
 cd firmware && pio run -t upload && pio device monitor
 
 # 2) 앱 프로젝트 만들기
-cd ../app && xcodegen generate && open HohoBLE.xcodeproj
+cd ../app && xcodegen generate && open SailingMonitor.xcodeproj
 #    project.yml 의 DEVELOPMENT_TEAM 을 채운 뒤 실기기로 ⌘R
 ```
 
@@ -39,7 +39,7 @@ cd ../app && xcodegen generate && open HohoBLE.xcodeproj
 
 | | |
 |---|---|
-| 디바이스 이름 | `HOHO-<이름>` — 보드마다 고유. 예) `HOHO-hojun` |
+| 디바이스 이름 | `SAIL-<이름>` — 보드마다 고유. 예) `SAIL-hojun` |
 | Service UUID | `B0A70001-0000-4000-8000-000000000001` |
 | Telemetry Characteristic | `B0A70002-0000-4000-8000-000000000001` (Read + Notify) |
 | Notify | 12바이트 / 4 Hz |
@@ -104,11 +104,11 @@ cd ../app && xcodegen generate && open HohoBLE.xcodeproj
 
 ```bash
 # 보드에 이름 붙이기 (USB 연결 후 시리얼 모니터에서)
-name hojun          →  HOHO-hojun, module_id 1
+name hojun          →  SAIL-hojun, module_id 125
 ```
 
 이름을 설정하지 않으면 MAC **뒤쪽** 2바이트로 자동 생성되므로
-(`F4:12:FA:59:75:D5` → `HOHO-75D5`), 아무 설정 없이 여러 장을 구워도 서로 구분된다.
+(`F4:12:FA:59:75:D5` → `SAIL-75D5`), 아무 설정 없이 여러 장을 구워도 서로 구분된다.
 앞쪽 바이트는 Espressif OUI 라 모든 보드가 같으니 쓰면 안 된다.
 
 앱에서는 **설정** 화면에서 주변 모듈 목록(가까운 순)을 보고 하나를 고른다.

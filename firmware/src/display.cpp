@@ -1,6 +1,6 @@
 #include "display.h"
 
-#if HOHO_HAS_TFT
+#if SAIL_HAS_TFT
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
@@ -9,10 +9,10 @@
 
 #include "display_layout.h"
 
-namespace hoho {
+namespace sail {
 namespace {
 
-namespace L = hoho::layout;
+namespace L = sail::layout;
 
 // 핀은 보드 variant(pins_arduino.h)가 정의한 값을 그대로 쓴다.
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
@@ -152,6 +152,6 @@ void displayUpdate(const DisplayState& s) {
     }
 }
 
-} // namespace hoho
+} // namespace sail
 
-#endif // HOHO_HAS_TFT
+#endif // SAIL_HAS_TFT

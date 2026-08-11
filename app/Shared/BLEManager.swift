@@ -1,6 +1,6 @@
 //
 //  BLEManager.swift
-//  HOHO 텔레메트리 수신기 — iOS / watchOS 공용
+//  Sailing Monitor 텔레메트리 수신기 — iOS / watchOS 공용
 //
 //  두 가지 모드로 동작한다.
 //
@@ -213,7 +213,7 @@ final class BLEManager: NSObject, ObservableObject {
             // 1) 시스템이 이미 연결해 둔 주변장치가 있으면 그걸 바로 쓴다.
             if peripheral == nil,
                let already = central.retrieveConnectedPeripherals(
-                   withServices: [HohoProtocol.serviceUUID]).first {
+                   withServices: [SailProtocol.serviceUUID]).first {
                 appendLog("이미 연결된 주변장치 발견 — \(already.identifier.uuidString.prefix(8))")
                 adopt(already)
                 if already.state == .connected {
@@ -255,7 +255,7 @@ final class BLEManager: NSObject, ObservableObject {
         //  · bound: 첫 콜백에 이름이 아직 안 붙어 있을 수 있어 재시도 기회가 필요해서
         appendLog("스캔 시작 (\(mode == .bound ? "고정 모듈 탐색" : "모듈 목록"))")
         central.scanForPeripherals(
-            withServices: [HohoProtocol.serviceUUID],
+            withServices: [SailProtocol.serviceUUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
     }
 
@@ -286,7 +286,7 @@ final class BLEManager: NSObject, ObservableObject {
             ModulePinStore.save(pin)
         }
 
-        p.discoverServices([HohoProtocol.serviceUUID])
+        p.discoverServices([SailProtocol.serviceUUID])
         p.readRSSI()
     }
 
@@ -406,7 +406,7 @@ extension BLEManager: CBCentralManagerDelegate {
         // 서비스 UUID 로 필터링해서 스캔하므로 오디오 기기 등은 여기까지 오지 않는다.
         let advName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
                    ?? peripheral.name
-        if let name = advName, !HohoProtocol.isHohoName(name) { return }
+        if let name = advName, !SailProtocol.isSailName(name) { return }
 
         // 광고에 실린 텔레메트리(있으면). 연결 없이도 module_id 와 속도를 알 수 있다.
         var advSample: TelemetrySample?
@@ -507,14 +507,14 @@ extension BLEManager: CBPeripheralDelegate {
             appendLog("서비스 탐색 실패 — \(error.localizedDescription)")
             return
         }
-        guard let svc = peripheral.services?.first(where: { $0.uuid == HohoProtocol.serviceUUID })
+        guard let svc = peripheral.services?.first(where: { $0.uuid == SailProtocol.serviceUUID })
         else {
             appendLog("서비스 없음 — 연결 해제")
             central.cancelPeripheralConnection(peripheral)
             return
         }
         appendLog("서비스 발견 → characteristic 탐색")
-        peripheral.discoverCharacteristics([HohoProtocol.telemetryUUID], for: svc)
+        peripheral.discoverCharacteristics([SailProtocol.telemetryUUID], for: svc)
     }
 
     func peripheral(_ peripheral: CBPeripheral,
@@ -525,7 +525,7 @@ extension BLEManager: CBPeripheralDelegate {
             return
         }
         guard let chr = service.characteristics?
-            .first(where: { $0.uuid == HohoProtocol.telemetryUUID }) else {
+            .first(where: { $0.uuid == SailProtocol.telemetryUUID }) else {
             appendLog("telemetry characteristic 없음")
             return
         }

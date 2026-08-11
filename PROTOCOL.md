@@ -1,4 +1,4 @@
-# HOHO BLE 텔레메트리 프로토콜 v1
+# Sailing Monitor 텔레메트리 프로토콜 v1
 
 요트 텔레메트리 모듈(ESP32-S3)과 수신 앱(iOS / watchOS) 사이의 BLE 규격.
 **펌웨어(`firmware/`)와 앱(`app/`)은 이 문서를 단일 진실 공급원(single source of truth)으로 삼는다.**
@@ -12,7 +12,7 @@
 
 | 항목 | 값 |
 |---|---|
-| Complete Local Name | `HOHO-<이름>` — 예: `HOHO-hojun` (전체 최대 16자) |
+| Complete Local Name | `SAIL-<이름>` — 예: `SAIL-hojun` (전체 최대 16자) |
 | Service UUID | `B0A70001-0000-4000-8000-000000000001` |
 | Telemetry Characteristic UUID | `B0A70002-0000-4000-8000-000000000001` |
 | Characteristic 속성 | Read + Notify |
@@ -26,11 +26,11 @@
 경기장에는 같은 서비스 UUID를 광고하는 모듈이 여러 대 있을 수 있다.
 "내 배의 모듈"을 구분하기 위해 모듈마다 고유한 이름을 갖는다.
 
-- 이름은 `HOHO-` 접두사 + 사용자 지정 문자열. 앱은 이 접두사로 우리 모듈을 골라낸다.
+- 이름은 `SAIL-` 접두사 + 사용자 지정 문자열. 앱은 이 접두사로 우리 모듈을 골라낸다.
 - 사용 가능 문자: 영숫자, `-`, `_`
 - **전체 길이 최대 16바이트** (접두사 5 + 사용자 부분 11).
   Scan Response 예산에서 나온 값이다 → §4.2
-- 설정하지 않으면 ESP32 MAC 뒷 2바이트로 자동 생성 (`HOHO-A3F2`).
+- 설정하지 않으면 ESP32 MAC 뒷 2바이트로 자동 생성 (`SAIL-A3F2`).
   아무 설정 없이 여러 장을 구워도 이름이 겹치지 않는다.
 
 `module_id`는 **이름에서 결정적으로 유도한 1바이트 해시**(FNV-1a 접기, `0`은 미지정 예약)다.
@@ -48,9 +48,9 @@ module_id = fold8( FNV-1a(전체 이름) )      // 0 이면 1 로 보정
 
 | 이름 | `module_id` |
 |---|---|
-| `HOHO-hojun` | 1 (0x01) |
-| `HOHO-KOR1234` | 243 (0xF3) |
-| `HOHO-A3F2` | 7 (0x07) |
+| `SAIL-hojun` | 125 (0x7D) |
+| `SAIL-KOR1234` | 70 (0x46) |
+| `SAIL-A3F2` | 156 (0x9C) |
 
 ---
 
@@ -100,7 +100,7 @@ module_id = fold8( FNV-1a(전체 이름) )      // 0 이면 1 로 보정
 
 **Notify 주기: 4 Hz (250 ms)**
 
-예시 (ver=1, module=1, uptime=123456ms, sog=5.53kn, cog=315.0°, heel=−12°, batt=87%):
+예시 (ver=1, module_id=1, uptime=123456ms, sog=5.53kn, cog=315.0°, heel=−12°, batt=87%):
 
 ```
 01 01 40 E2 01 00 29 02 4E 0C F4 57
@@ -109,7 +109,7 @@ module_id = fold8( FNV-1a(전체 이름) )      // 0 이면 1 로 보정
 │  │                 │      │      └──── 0xF4 = −12 °
 │  │                 │      └─────────── 0x0C4E = 3150 → 315.0 °
 │  │                 └────────────────── 0x0229 = 553  → 5.53 kn
-│  └── module_id = 1  (HOHO-hojun)
+│  └── module_id = 1
 └───── ver = 1
 ```
 
@@ -142,7 +142,7 @@ module_id = fold8( FNV-1a(전체 이름) )      // 0 이면 1 로 보정
 | AD Type | 이름 | 길이 |
 |---|---|---|
 | `0xFF` | Manufacturer Specific Data (Company ID `0xFFFF` + 9바이트 페이로드) | 13 |
-| `0x09` | Complete Local Name → `HOHO-<이름>` | 2 + N |
+| `0x09` | Complete Local Name → `SAIL-<이름>` | 2 + N |
 
 **모듈 이름의 길이 한도(§1.1)가 여기서 나온다.**
 
@@ -151,7 +151,7 @@ module_id = fold8( FNV-1a(전체 이름) )      // 0 이면 1 로 보정
 ```
 
 접두사를 포함한 전체 이름은 최대 16자.
-예) `HOHO-hojun` (10자) → scan response 25 바이트.
+예) `SAIL-hojun` (10자) → scan response 25 바이트.
 
 ### 4.3 Manufacturer Specific Data 페이로드 (Company ID 뒤 9 바이트)
 

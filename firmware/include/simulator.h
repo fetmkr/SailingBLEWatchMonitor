@@ -1,4 +1,4 @@
-// HOHO-01 가상 텔레메트리 생성기.
+// SAIL-01 가상 텔레메트리 생성기.
 // Arduino 의존성이 없는 순수 C++ 헤더라서 호스트(macOS)에서도 그대로 컴파일해
 // 값을 실측 검증할 수 있다. → tools/sim_test.cpp
 #pragma once
@@ -8,7 +8,7 @@
 
 #include "protocol.h"
 
-namespace hoho {
+namespace sail {
 namespace sim {
 
 // ── 시뮬레이션 파라미터 ──────────────────────────────────────────────────
@@ -95,4 +95,4 @@ inline Telemetry simulate(uint32_t nowMs, Rand01 rng) {
 }
 
 } // namespace sim
-} // namespace hoho
+} // namespace sail
