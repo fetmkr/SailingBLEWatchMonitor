@@ -40,7 +40,7 @@
 
 	<!-- BLE 권한 안내문 (iOS 13+ 는 Always 키 하나면 된다) -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>요트 텔레메트리 모듈(SAIL-01)에 연결해 속도·침로·힐 각을 실시간으로 받기 위해 블루투스를 사용합니다.</string>
+	<string>요트 텔레메트리 모듈에 연결해 속도·침로·힐 각을 실시간으로 받기 위해 블루투스를 사용합니다.</string>
 
 	<!-- 백그라운드에서도 연결을 유지하기 위한 옵션 -->
 	<key>UIBackgroundModes</key>

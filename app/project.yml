@@ -76,7 +76,6 @@ targets:
         PRODUCT_NAME: SailingMonitor Watch App
         PRODUCT_BUNDLE_IDENTIFIER: kr.fetm.sailingmonitor.watchkitapp
         INFOPLIST_FILE: Watch/Info.plist
-        CODE_SIGN_ENTITLEMENTS: Watch/SailingMonitorWatch.entitlements
         TARGETED_DEVICE_FAMILY: "4"
         # 아이폰 앱 없이 워치 단독 설치 지원
         WATCHOS_DEPLOYMENT_TARGET: "10.0"

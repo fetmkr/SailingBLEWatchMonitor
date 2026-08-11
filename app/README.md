@@ -30,9 +30,7 @@ app/
 └── Watch/
     ├── WatchApp.swift
     ├── WatchLiveView.swift
-    ├── WorkoutManager.swift ← HKWorkoutSession(.sailing)
     ├── Info.plist
-    └── SailingMonitorWatch.entitlements
 ```
 
 ---
@@ -54,54 +52,143 @@ open SailingMonitor.xcodeproj
 
 ## 2. 서명 팀 설정
 
-`project.yml` 의 `DEVELOPMENT_TEAM` 한 줄만 채우면 두 타깃 모두에 적용된다.
+`project.yml` 의 `DEVELOPMENT_TEAM` 한 줄이면 두 타깃 모두에 적용된다.
 
 ```yaml
 settings:
   base:
-    DEVELOPMENT_TEAM: ABCDE12345   # ← 본인 Team ID
+    DEVELOPMENT_TEAM: KC8YM8J64N   # FETM (Company)
 ```
 
-Team ID 는 Xcode → Settings → Accounts → 계정 선택 → Manage Certificates,
-또는 [developer.apple.com/account](https://developer.apple.com/account) 의 Membership 에서 확인한다.
+### Team ID 를 정확히 얻는 법
+
+⚠️ **인증서 이름 괄호 안의 값은 Team ID 가 아니다.** `OU` 필드가 Team ID 다.
+
+```bash
+security find-identity -v -p codesigning
+#   "Apple Development: hojun song (QFS2AH4UR3)"   ← QFS2AH4UR3 는 Team ID 가 아님
+
+security find-certificate -c "Apple Development: hojun song" -p \
+  | openssl x509 -noout -subject
+#   /UID=.../CN=.../OU=M38GX6QKSQ/O=SUPERLESS Inc.   ← OU 가 Team ID
+```
+
+계정에 팀이 여러 개면 Xcode 가 캐시한 목록에서 확인할 수 있다.
+(Xcode 를 한 번 종료해야 디스크에 기록된다)
+
+```bash
+defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier \
+  | grep -E "teamID|teamName|isFree"
+```
 
 번들 ID 를 바꾸려면 **세 곳**을 함께 고친다.
 
 1. `project.yml` 의 `PRODUCT_BUNDLE_IDENTIFIER` (iOS)
-2. `project.yml` 의 `PRODUCT_BUNDLE_IDENTIFIER` (watch, 반드시 iOS 것 + `.watchkitapp`)
+2. `project.yml` 의 `PRODUCT_BUNDLE_IDENTIFIER` (watch, iOS 것 + `.watchkitapp`)
 3. `Watch/Info.plist` 의 `WKCompanionAppBundleIdentifier` (iOS 것과 동일)
 
-무료 개인 계정으로도 실기기 배포가 되지만 프로비저닝이 7일마다 만료된다.
+---
 
-## 3. 실기기 배포
+## 3. 실기기 배포 — 처음 한 번 (여기서 제일 많이 막힌다)
 
-### iPhone
+순서대로 하지 않으면 엉뚱한 에러가 난다.
 
-1. 아이폰을 USB 로 연결 (또는 같은 Wi-Fi 에서 무선 디버깅 페어링)
-2. Xcode 상단 스킴 → **SailingMonitor**, 대상 → 본인 아이폰
-3. `⌘R`
-4. 첫 실행 시 아이폰에서 *설정 → 일반 → VPN 및 기기 관리* → 개발자 앱 신뢰
-5. 앱이 뜨면 블루투스 권한 허용
+### 3.1 기기를 개발자 포털에 등록
 
-### Apple Watch
+Xcode 자동 서명이 기기를 자동 등록해 주는 건 **특정 기기를 대상으로 빌드할 때**다.
+`generic/platform=iOS` 로 빌드하면 등록되지 않고 이런 에러가 난다.
 
-워치 앱은 아이폰 앱 번들 안에 임베드되어 있으므로 **아이폰 앱을 설치하면
-워치에도 자동으로 설치**된다 (Watch 앱 → 사용 가능한 앱 목록에서 설치).
+```
+error: Communication with Apple failed: Your team has no devices from
+       which to generate a provisioning profile.
+```
 
-직접 워치에 빌드해 넣으려면:
+팀에 등록된 기기가 0대면 개발용 프로파일 자체를 만들 수 없다. 확실한 방법은 수동 등록:
 
-1. 워치가 아이폰과 페어링되어 있고, 워치 화면이 켜져 있고 잠금 해제 상태여야 한다
-2. Xcode 스킴 → **SailingMonitor Watch App**, 대상 → 본인 Apple Watch
-3. `⌘R` (첫 설치는 몇 분 걸릴 수 있다)
-4. 워치에서 블루투스·건강 권한 허용
+```bash
+# UDID 얻기
+xcrun xctrace list devices          # 괄호 안 25자리
+xcrun devicectl list devices
+```
 
-> 워치가 대상 목록에 안 뜨면: 워치를 충전기에 올려두고, 아이폰과 워치 모두
-> 잠금 해제한 뒤 Xcode → Window → Devices and Simulators 에서 페어링 상태를 확인한다.
+[developer.apple.com/account](https://developer.apple.com/account) → Certificates, Identifiers & Profiles
+→ **Devices** → `+` → Platform / 이름 / UDID 입력. **아이폰과 워치를 각각** 등록한다.
 
-### 시뮬레이터
+> 팀이 약관(PLA)에 동의하지 않은 상태면 무슨 짓을 해도 프로파일이 안 나온다.
+> `PLA Update available` 에러가 그것이고, **Account Holder 만** 동의할 수 있다.
 
-CoreBluetooth 가 시뮬레이터에서는 동작하지 않는다 (상태가 `unsupported`).
-UI 레이아웃 확인용으로만 쓰고, BLE 테스트는 반드시 실기기에서 한다.
+### 3.2 두 기기 모두 개발자 모드 켜기
+
+```
+설정 → 개인정보 보호 및 보안 → 개발자 모드 → 켜기 → 재시동
+```
+
+안 켜면: `error: Developer Mode disabled`
+
+### 3.3 아이폰 설치
+
+```bash
+xcodebuild -project SailingMonitor.xcodeproj -scheme "SailingMonitor" \
+  -destination 'platform=iOS,id=<아이폰 UDID>' -configuration Debug build \
+  -allowProvisioningUpdates
+
+APP=$(find ~/Library/Developer/Xcode/DerivedData/SailingMonitor-*/Build/Products/Debug-iphoneos \
+      -maxdepth 1 -name "SailingMonitor.app" | head -1)
+xcrun devicectl device install app --device <아이폰 UDID> "$APP"
+xcrun devicectl device process launch --device <아이폰 UDID> kr.fetm.sailingmonitor
+```
+
+아이폰이 잠겨 있으면 실행만 실패한다(`BSErrorCodeDescription = Locked`).
+
+### 3.4 워치 설치 — 함정 셋
+
+**함정 1. 워치 앱 임베드 위치는 `Watch/` 다.**
+
+`XcodeGen` 이슈 #1613 은 Xcode 26 에서 `PlugIns/` 로 옮기라고 하지만,
+그렇게 하면 **아이폰 Watch 앱의 "사용 가능한 앱" 목록에서 아예 사라진다.**
+실기기(iOS 26.5 / watchOS 26.6)에서 양쪽 다 확인한 결과다.
+그 이슈는 *빌드가 실패하는* 경우에 대한 것이고 이 구성에는 해당하지 않는다.
+
+**함정 2. watchOS 26.5 는 아이폰 경유 설치가 깨져 있다.**
+
+애플이 인정한 회귀다 (Feedback **FB22807635**, DTS 확인).
+IDS peer transport 에서 소켓이 60초 타임아웃 나면서
+Watch 앱의 "설치" 가 돌기만 하고 끝난다. 재부팅·초기화·인증서 재발급 전부 무효.
+**아이폰과 워치를 둘 다 26.6 으로 올리면 해결된다.** 한쪽만 올리면 안 된다.
+
+**함정 3. 아이폰 블루투스가 켜져 있으면 맥에서 워치로 직접 설치도 안 된다.**
+
+워치는 아이폰이 블루투스 범위에 있으면 Wi-Fi 를 올리지 않는다. 그런데 Xcode·devicectl 은
+워치에 **로컬 네트워크로만** 접근한다. 그래서 터널이 안 열린다.
+
+```bash
+xcrun devicectl device info details --device <워치 UDID> | grep -E "transportType|tunnelState"
+#   transportType: localNetwork
+#   tunnelState:   disconnected      ← 아이폰 블루투스가 켜져 있을 때
+```
+
+**아이폰 설정 → Bluetooth → 끄기.** 그러면 워치가 Wi-Fi 로 올라오고 터널이 붙는다.
+
+```bash
+xcodebuild -project SailingMonitor.xcodeproj -scheme "SailingMonitor Watch App" \
+  -destination 'generic/platform=watchOS' -configuration Debug build -allowProvisioningUpdates
+
+WAPP=$(find ~/Library/Developer/Xcode/DerivedData/SailingMonitor-*/Build/Products/Debug-watchos \
+       -maxdepth 1 -name "SailingMonitor Watch App.app" | head -1)
+xcrun devicectl device install app --device <워치 UDID> --timeout 240 "$WAPP"
+xcrun devicectl device process launch --device <워치 UDID> kr.fetm.sailingmonitor.watchkitapp
+```
+
+> `-destination 'platform=watchOS,id=...'` 로 빌드하면 기기 대기에서 타임아웃 날 수 있다.
+> `generic/platform=watchOS` 로 빌드하고 `devicectl` 로 따로 설치하는 편이 확실하다.
+>
+> `devicectl device info` 의 OS 버전·터널 상태는 **캐시된 값일 수 있다.**
+> 워치가 연결되지 않은 동안에는 마지막 값을 그대로 보여준다. 설치 출력 쪽을 믿을 것.
+
+### 3.5 시뮬레이터
+
+CoreBluetooth 가 동작하지 않는다(상태 `unsupported`).
+UI 레이아웃 확인용으로만 쓰고 BLE 테스트는 반드시 실기기에서 한다.
 
 ---
 
@@ -152,8 +239,8 @@ KOR1234             −78 dBm  · 4.10 kn
 
 ### watchOS — 세로 2페이지
 
-- **1페이지**: 속도 큰 숫자, COG/HEEL, 연결 상태, **훈련 시작/종료** 버튼
-- **2페이지**: 설정 — 모듈 선택/해제 + 진단값 + 강제 재연결
+- **1페이지**: 속도(제일 크게) · COG · 힐. 상단에 점 + 모듈 이름뿐. 그 외 아무것도 없음
+- **2페이지**: 설정 — 모듈 선택/해제 + 진단값(경로·연결 Hz·광고 Hz·RSSI·배터리) + 강제 재연결
 
 ---
 
@@ -183,19 +270,19 @@ didDisconnectPeripheral
   건너뛴다. 그래서 연결 후 **매 패킷**의 `module_id` 를 확인하고, 다르면 즉시 끊고
   저장된 식별자를 버린 뒤 다시 찾는다 (`rejectWrongModule`)
 
-## 6. 워치 백그라운드 유지
+## 6. 워치 백그라운드 — 쓰지 않음
 
-`HKWorkoutSession(activityType: .sailing, locationType: .outdoor)` 이 돌고 있으면
-손목을 내려 화면이 꺼져도 앱이 suspend 되지 않아 BLE 연결과 notify 가 유지된다.
-세션 없이는 화면이 꺼지고 몇 초 뒤 연결이 끊긴다.
+`HKWorkoutSession(.sailing)` 으로 손목을 내려도 앱을 살려두는 구조를 넣었다가
+**제거했다.** 화면을 최소로 유지하기 위해 훈련 버튼을 없앴고, 버튼이 없으면
+세션을 시작할 수 없으므로 HealthKit 관련 코드·entitlement·Info.plist 키를
+전부 걷어냈다.
 
-필요한 설정 (이미 되어 있음):
+결과: **손목을 내려 화면이 꺼지면 몇 초 뒤 BLE 가 끊긴다.** 손목을 들면
+`scenePhase == .active` 에서 재연결이 걸려 곧 복구된다.
 
-- `Watch/SailingMonitorWatch.entitlements` → `com.apple.developer.healthkit`
-- `Watch/Info.plist` → `WKBackgroundModes = [workout-processing]`
-- `Watch/Info.plist` → `NSHealthShareUsageDescription`, `NSHealthUpdateUsageDescription`
-
-워크아웃이 실제로 살아있는지는 1페이지의 경과 시간과 심박수(bpm)로 확인할 수 있다.
+다시 필요해지면 되돌릴 것: `WorkoutManager.swift`, watch entitlements 의
+`com.apple.developer.healthkit`, Info.plist 의 `WKBackgroundModes` 와
+`NSHealthShare/UpdateUsageDescription`, 그리고 세션을 시작할 UI.
 
 ## 7. 권한 키 정리
 
@@ -203,7 +290,6 @@ didDisconnectPeripheral
 |---|:---:|:---:|
 | `NSBluetoothAlwaysUsageDescription` | ✅ | ✅ |
 | `UIBackgroundModes = [bluetooth-central]` | ✅ | — |
-| `WKBackgroundModes = [workout-processing]` | — | ✅ |
-| `NSHealthShareUsageDescription` | — | ✅ |
-| `NSHealthUpdateUsageDescription` | — | ✅ |
-| HealthKit capability (entitlement) | — | ✅ |
+
+
+워치 앱이 요구하는 권한은 **블루투스 하나**뿐이다.

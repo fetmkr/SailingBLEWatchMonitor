@@ -1,6 +1,6 @@
 //
 //  SailingMonitorApp.swift
-//  SAIL-01 텔레메트리 수신기 (iOS)
+//  Sailing Monitor 텔레메트리 수신기 (iOS)
 //
 
 import SwiftUI

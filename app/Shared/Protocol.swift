@@ -1,6 +1,6 @@
 //
 //  Protocol.swift
-//  SAIL-01 BLE 텔레메트리 프로토콜 v1 — iOS / watchOS 공용
+//  Sailing Monitor BLE 텔레메트리 프로토콜 v1 — iOS / watchOS 공용
 //
 //  규격 원문: ../../PROTOCOL.md
 //  펌웨어 대응 파일: ../../firmware/include/protocol.h
