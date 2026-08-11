@@ -44,8 +44,9 @@ fi
 
 # ── 3. 펌웨어 컴파일 ─────────────────────────────────────────────────────
 bar "3/4  펌웨어 컴파일 (ESP32-S3)"
-( cd "$ROOT/firmware" && pio run ) | tail -5
-ok "펌웨어 빌드"
+# 두 보드 모두 — TFT 있는 Feather 와 화면 없는 DevKit
+( cd "$ROOT/firmware" && pio run -e feather_s3_tft -e devkit_s3 ) | tail -6
+ok "펌웨어 빌드 (feather_s3_tft + devkit_s3)"
 
 # ── 4. 앱 빌드 ───────────────────────────────────────────────────────────
 bar "4/4  iOS / watchOS 앱 빌드"

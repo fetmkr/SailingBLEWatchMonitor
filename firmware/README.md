@@ -5,10 +5,25 @@
 
 | | |
 |---|---|
-| 보드 | ESP32-S3 DevKitC-1 (대부분의 S3 DevKit 호환) |
+| 기본 보드 | **Adafruit ESP32-S3 TFT Feather** ([product 5483](https://www.adafruit.com/product/5483)) |
+| 대체 보드 | ESP32-S3 DevKitC-1 (화면 없음, `-e devkit_s3`) |
 | 프레임워크 | Arduino (PlatformIO) |
 | BLE 스택 | NimBLE-Arduino 2.5.x |
-| 시리얼 | 115200 baud |
+| 화면 | 240x135 ST7789 (보드 내장) |
+| 시리얼 | 115200 baud (USB CDC) |
+
+### Feather TFT 핀 (보드 variant 가 정의하는 값)
+
+| 신호 | GPIO | 비고 |
+|---|---|---|
+| `TFT_I2C_POWER` | 21 | **HIGH 로 올리지 않으면 화면에 전원이 안 들어간다** |
+| `TFT_CS` | 7 | |
+| `TFT_DC` | 39 | |
+| `TFT_RST` | 40 | |
+| `TFT_BACKLITE` | 45 | 화면 초기화 후에 켠다 (부팅 시 흰 화면 방지) |
+| SCK / MOSI | 36 / 35 | 하드웨어 SPI |
+
+패널은 물리적으로 135x240 세로다. `init(135, 240)` + `setRotation(3)` 으로 240x135 가로로 쓴다.
 
 ---
 
@@ -18,17 +33,23 @@
 firmware/
 ├── platformio.ini
 ├── include/
-│   ├── protocol.h      ← 패킷 인코딩. app/Shared/Protocol.swift 와 쌍을 이룬다
-│   └── simulator.h     ← 가상 데이터 생성. Arduino 의존성 없는 순수 C++
+│   ├── protocol.h        ← 패킷 인코딩. app/Shared/Protocol.swift 와 쌍을 이룬다
+│   ├── simulator.h       ← 가상 데이터 생성. Arduino 의존성 없는 순수 C++
+│   ├── display.h         ← TFT 표시 인터페이스
+│   └── display_layout.h  ← 화면 좌표·문자열 포맷. 역시 Arduino 비의존
 ├── src/
-│   └── main.cpp        ← BLE 서버 + 광고 제어 + 루프
+│   ├── main.cpp          ← BLE 서버 + 광고 제어 + 루프
+│   └── display.cpp       ← ST7789 그리기 (HOHO_HAS_TFT 일 때만 컴파일)
 └── tools/
-    ├── sim_test.cpp    ← 호스트에서 값을 실측 검증하는 하네스
+    ├── sim_test.cpp      ← 호스트에서 값·화면 좌표를 실측 검증하는 하네스
     └── Makefile
 ```
 
-`simulator.h` 를 Arduino 와 분리해 둔 이유는, 보드에 굽기 전에 맥에서 그대로
-컴파일해 **값이 정말 스펙대로 나오는지 눈으로 확인**하기 위해서다.
+`simulator.h` 와 `display_layout.h` 를 Arduino 와 분리해 둔 이유는, 보드에 굽기 전에
+맥에서 그대로 컴파일해 **값과 화면 좌표가 정말 맞는지 확인**하기 위해서다.
+특히 화면은 글자가 240px 밖으로 밀려나도 컴파일이 통과해 버린다. 그래서
+`display_layout.h` 에 `static_assert` 를 걸고, 값에 따라 달라지는 문자열 길이는
+호스트 테스트에서 극단값으로 재본다.
 
 ---
 
@@ -56,8 +77,11 @@ pio device list                     # 포트 확인
 pio run -t upload --upload-port /dev/cu.usbmodem101
 ```
 
-> **부팅 모드 진입이 필요한 경우** (`Failed to connect` 에러)
-> `BOOT` 버튼을 누른 채 `RST` 를 한 번 눌렀다 떼고, `BOOT` 도 뗀 뒤 다시 업로드.
+이 보드는 네이티브 USB 라 PlatformIO 가 1200bps 터치로 알아서 부트로더에 들어간다.
+보드 정의에 `use_1200bps_touch` / `wait_for_upload_port` 가 이미 들어 있다.
+
+> **`Failed to connect` 가 나면** `RESET` 버튼을 **두 번 빠르게** 눌러 부트로더로
+> 진입시킨 뒤 다시 업로드한다. (Feather 는 BOOT+RESET 조합이 아니라 더블탭이다)
 
 ## 3. 시리얼 모니터
 
@@ -95,9 +119,9 @@ name hojun
 ```
 
 ```
-[ID ] 이름 HOHO-hojun | module_id 1 (0x01) | service b0a70001-...
-[BLE] advertising 시작 — HOHO-hojun (ADV_IND / connectable, interval 200ms)
+[ID ] 이름 HOHO-hojun | module_id 1 (0x01) | MAC F4:12:FA:59:75:D5
 [ID ] 저장 완료 — 앱에서 모듈을 다시 선택해야 합니다.
+[BLE] advertising 시작 — HOHO-hojun (ADV_IND / connectable, interval 200ms)
 ```
 
 | 명령 | 설명 |
@@ -106,24 +130,44 @@ name hojun
 | `info` | 현재 이름과 `module_id` 출력 |
 | `help` | 도움말 |
 
-설정하지 않으면 MAC 뒷 2바이트로 자동 생성된다 (`HOHO-A3F2`).
-따라서 **아무 설정 없이 여러 장을 구워도 이름이 겹치지 않는다.**
+설정하지 않으면 **MAC 의 뒤쪽 2바이트**로 자동 생성된다.
+예) MAC `F4:12:FA:59:75:D5` → `HOHO-75D5`
+따라서 아무 설정 없이 여러 장을 구워도 이름이 겹치지 않는다.
+
+> ⚠️ **앞쪽 바이트를 쓰면 안 된다.** `F4:12:FA` 는 Espressif OUI(제조사 공통 접두사)라
+> 모든 보드가 같다. 그런데 `ESP.getEfuseMac()` 은 MAC[0] 이 최하위 바이트인 uint64 를
+> 돌려주므로 `mac & 0xFF` 가 바로 그 OUI 첫 바이트다. 실제로 이 실수로 모든 보드가
+> `HOHO-12F4` 로 나오는 버그가 있었다. 지금은 `esp_read_mac()` 으로 바이트 배열을
+> 받아 `mac[4]`, `mac[5]` 를 쓴다.
 
 이름을 바꾸면 `module_id` 도 바뀌므로 앱에서 모듈을 다시 골라야 한다.
 
-### USB CDC 보드에서 로그가 안 보일 때
+## 4. 내장 화면
 
-일부 S3 보드는 UART 브리지 없이 USB-OTG 포트만 있다. 이 경우
-`platformio.ini` 의 아래 두 줄 주석을 해제하고 다시 빌드·플래시한다.
+Feather TFT 는 240x135 화면에 지금 내보내고 있는 값을 그대로 띄운다.
+(모듈은 송신 측이므로 "수신" 개념은 없다 — 광고/연결 상태만 표시)
 
-```ini
--DARDUINO_USB_CDC_ON_BOOT=1
--DARDUINO_USB_MODE=1
 ```
+┌────────────────────────────────────────┐
+│ hojun                    ● ADVERTISING │  이름 + 연결 상태
+│                                        │
+│   6.96                              kn │  SOG (청록, 큰 숫자)
+│                                        │
+│   315° NW                              │  COG (노랑) + 나침반 방위
+│                                        │
+│ HEEL -18  BATT 100%  SEQ  91  UP   91s │
+└────────────────────────────────────────┘
+```
+
+상태는 `ADVERTISING`(주황) / `LINK`(초록) / `LINK NOTIFY`(초록, 구독 중).
+
+깜빡임을 없애려고 **바뀐 문자열만** 다시 그린다. 모든 값은 고정폭으로 포맷하고
+(`%5.2f`, `%03d` 등) 글자 배경색을 함께 칠해 이전 픽셀을 덮는다.
+폭이 흔들리면 이전 글자가 남으므로, 고정폭 여부는 호스트 테스트가 극단값으로 검사한다.
 
 ---
 
-## 4. 하드웨어 없이 로직 검증
+## 5. 하드웨어 없이 로직 검증
 
 보드가 없어도 시뮬레이션과 패킷 인코딩은 맥에서 그대로 검증할 수 있다.
 

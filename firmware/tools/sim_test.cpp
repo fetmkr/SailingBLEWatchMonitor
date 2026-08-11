@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "display_layout.h"
 #include "protocol.h"
 #include "simulator.h"
 
@@ -152,6 +153,78 @@ static void testModuleIdentity() {
     uint8_t mfg[2 + hoho::kMfgLen];
     hoho::encodeManufacturerData(t, 0, mfg);
     check(mfg[3] == t.moduleID, "Manufacturer Data [3] 에 module_id 가 실림");
+}
+
+// ── 2.7 TFT 레이아웃 (240x135) ───────────────────────────────────────────
+// 좌표 상수는 display_layout.h 의 static_assert 가 이미 컴파일 타임에 막지만,
+// 런타임 문자열 길이(포맷 결과)는 값에 따라 달라지므로 여기서 실측한다.
+static void testDisplayLayout() {
+    namespace L = hoho::layout;
+    std::printf("\n── 2.7 TFT 레이아웃 (%dx%d) ──\n", L::kW, L::kH);
+
+    char buf[64];
+
+    // 극단값에서도 고정폭이 유지되는지 — 폭이 흔들리면 이전 글자가 화면에 남는다
+    struct { float sog; const char* why; } sogCases[] = {
+        {0.0f, "정지"}, {5.53f, "일반"}, {9.99f, "한 자리 최대"},
+        {10.0f, "두 자리 시작"}, {99.99f, "두 자리 최대"},
+    };
+    size_t sogLen = 0;
+    for (auto& c : sogCases) {
+        L::formatSog(buf, sizeof(buf), c.sog);
+        std::printf("   SOG %6.2f → \"%s\" (%zu글자, %s)\n",
+                    c.sog, buf, strlen(buf), c.why);
+        if (sogLen == 0) sogLen = strlen(buf);
+        if (strlen(buf) != sogLen) {
+            check(false, "SOG 문자열 폭이 값에 따라 달라짐");
+            sogLen = strlen(buf);
+        }
+    }
+    check(sogLen == (size_t)L::kSogChars, "SOG 실제 길이 == kSogChars");
+    check(L::kSogX + L::textW((int16_t)sogLen, L::kSogSize) <= L::kW,
+          "SOG 가 화면 폭 안");
+
+    // COG — 음수/360 넘김에서도 3글자
+    struct { float cog; const char* expect; } cogCases[] = {
+        {0.0f, "000"}, {45.0f, "045"}, {315.0f, "315"},
+        {359.9f, "000"}, {-1.0f, "359"}, {360.0f, "000"},
+    };
+    for (auto& c : cogCases) {
+        L::formatCog(buf, sizeof(buf), c.cog);
+        char msg[80];
+        std::snprintf(msg, sizeof(msg), "COG %.1f° → \"%s\" (기대 \"%s\")",
+                      c.cog, buf, c.expect);
+        check(strcmp(buf, c.expect) == 0 && strlen(buf) == 3, msg);
+    }
+
+    // 나침반 방위는 항상 3글자
+    bool pointsOk = true;
+    for (int d = 0; d < 360; d += 5) {
+        if (strlen(L::compassPoint((float)d)) != 3) pointsOk = false;
+    }
+    check(pointsOk, "나침반 방위가 전 각도에서 3글자 고정");
+
+    // 하단바 — 극단값에서 가장 길어질 때를 본다
+    L::formatBottom(buf, sizeof(buf), -128, 100, 255, 99999);
+    std::printf("   하단바 최장 → \"%s\" (%zu글자, %dpx)\n",
+                buf, strlen(buf), L::textW((int16_t)strlen(buf), L::kBotSize));
+    check(strlen(buf) == (size_t)L::kBotChars, "하단바 실제 길이 == kBotChars");
+    check(L::kBotX + L::textW((int16_t)strlen(buf), L::kBotSize) <= L::kW,
+          "하단바가 화면 폭 안");
+
+    // 이름 — 긴 이름이 잘려서 상태 표시를 침범하지 않는지
+    L::formatName(buf, sizeof(buf), "abcdefghijklmnop"); // 16자 입력
+    std::printf("   이름 16자 입력 → \"%s\" (%zu글자)\n", buf, strlen(buf));
+    check(strlen(buf) == (size_t)L::kNameChars, "이름이 11자로 잘림");
+    check(L::kNameX + L::textW((int16_t)strlen(buf), L::kNameSize) <= L::kStatusDotX - L::kStatusDotR,
+          "긴 이름이 상태 표시를 침범하지 않음");
+
+    // 세로: 각 영역이 겹치지 않는지 (컴파일 타임에도 걸리지만 수치를 눈으로 본다)
+    std::printf("   세로 배치: 상단바 0..%d / SOG %d..%d / COG %d..%d / 하단바 %d..%d\n",
+                L::kTopBarH, L::kSogY, L::kSogY + L::charH(L::kSogSize),
+                L::kCogY, L::kCogY + L::charH(L::kCogSize), L::kBotBarY, L::kH);
+    check(L::kSogY + L::charH(L::kSogSize) <= L::kCogY, "SOG 와 COG 세로 겹침 없음");
+    check(L::kCogY + L::charH(L::kCogSize) <= L::kBotBarY, "COG 가 하단바 침범 안 함");
 }
 
 // ── 3. 궤적 (노이즈 OFF) ─────────────────────────────────────────────────
@@ -328,6 +401,7 @@ int main(int argc, char** argv) {
     testTelemetryEncoding();
     testManufacturerEncoding();
     testModuleIdentity();
+    testDisplayLayout();
     testTrajectoryNoNoise();
     testTackPath();
     testWithNoise();

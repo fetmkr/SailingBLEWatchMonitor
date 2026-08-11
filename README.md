@@ -2,13 +2,14 @@
 
 요트 텔레메트리 BLE 테스트 모노레포.
 
-ESP32-S3 개발보드가 가상 GPS 속도 데이터를 만들어 BLE 로 뿌리고,
-아이폰과 애플워치 네이티브 앱이 이를 받아 실시간으로 표시한다.
+ESP32-S3 개발보드(**Adafruit ESP32-S3 TFT Feather**)가 가상 GPS 속도 데이터를 만들어
+BLE 로 뿌리고, 아이폰과 애플워치 네이티브 앱이 이를 받아 실시간으로 표시한다.
+보드 내장 240x135 화면에도 현재 속도·침로가 표시된다.
 
 ```
 .
 ├── PROTOCOL.md     ← 패킷 규격 (단일 진실 공급원)
-├── firmware/       ← ESP32-S3 펌웨어  (PlatformIO + Arduino + NimBLE)
+├── firmware/       ← ESP32-S3 펌웨어  (PlatformIO + Arduino + NimBLE, 내장 TFT 표시)
 ├── app/            ← Xcode 프로젝트   (SwiftUI, iOS 앱 + 독립 실행 watchOS 앱)
 └── tools/
     ├── verify.sh              ← 하드웨어 없이 돌리는 전체 검증
@@ -66,8 +67,8 @@ cd ../app && xcodegen generate && open HohoBLE.xcodeproj
 | 단계 | 내용 |
 |---|---|
 | 1 | 펌웨어 로직 호스트 검증 — 인코딩 바이트, 시뮬레이션 궤적, 값 범위, 배터리 감소 |
-| 2 | **C++ 인코더 → Swift 디코더 교차 검증** (192개 골든 벡터) |
-| 3 | 펌웨어 실제 컴파일 (ESP32-S3) |
+| 2 | **C++ 인코더 → Swift 디코더 교차 검증** (192개 골든 벡터) + TFT 레이아웃 넘침 검사 |
+| 3 | 펌웨어 실제 컴파일 (Feather TFT + DevKit 양쪽) |
 | 4 | iOS / watchOS 앱 빌드 |
 
 2단계가 이 저장소의 핵심 안전장치다. 펌웨어가 실제로 뱉는 바이트열을
@@ -106,8 +107,9 @@ cd ../app && xcodegen generate && open HohoBLE.xcodeproj
 name hojun          →  HOHO-hojun, module_id 1
 ```
 
-이름을 설정하지 않으면 MAC 뒷자리로 자동 생성되므로(`HOHO-A3F2`),
-아무 설정 없이 여러 장을 구워도 서로 구분된다.
+이름을 설정하지 않으면 MAC **뒤쪽** 2바이트로 자동 생성되므로
+(`F4:12:FA:59:75:D5` → `HOHO-75D5`), 아무 설정 없이 여러 장을 구워도 서로 구분된다.
+앞쪽 바이트는 Espressif OUI 라 모든 보드가 같으니 쓰면 안 된다.
 
 앱에서는 **설정** 화면에서 주변 모듈 목록(가까운 순)을 보고 하나를 고른다.
 한 번 고르면 저장되어 다음부터는 자동 연결되고, "다른 모듈 선택"으로 해제할 수 있다.

@@ -21,7 +21,9 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <esp_mac.h>
 
+#include "display.h"
 #include "protocol.h"
 #include "simulator.h"
 
@@ -46,11 +48,29 @@ static Telemetry gLatest;  // 마지막으로 생성한 값
 
 // ── 이름 관리 ────────────────────────────────────────────────────────────
 
-// 설정된 이름이 없을 때의 기본값. MAC 뒷 2바이트를 써서 보드마다 다르게 만든다.
-// 아무 설정 없이 여러 장을 구워도 이름이 겹치지 않는다.
+// 설정된 이름이 없을 때의 기본값. MAC 의 **뒤쪽** 바이트를 쓴다.
+//
+// ★ 주의: MAC 앞 3바이트(예: f4:12:fa)는 Espressif OUI 라 모든 보드가 같다.
+//   여기를 쓰면 기본 이름이 전부 겹쳐서 "보드마다 다르게" 라는 목적이 깨진다.
+//   ESP.getEfuseMac() 은 MAC[0] 이 최하위 바이트인 uint64 를 돌려주므로
+//   `mac & 0xFF` 가 바로 그 OUI 첫 바이트다. 그래서 쓰지 않고,
+//   esp_read_mac() 으로 바이트 배열을 받아 뒤쪽 2바이트를 쓴다.
 static void defaultUserName(char* out, size_t cap) {
-    uint64_t mac = ESP.getEfuseMac();
-    snprintf(out, cap, "%02X%02X", (uint8_t)((mac >> 8) & 0xFF), (uint8_t)(mac & 0xFF));
+    uint8_t mac[6] = {0};
+    if (esp_read_mac(mac, ESP_MAC_BT) != ESP_OK) {
+        esp_read_mac(mac, ESP_MAC_WIFI_STA); // 폴백
+    }
+    snprintf(out, cap, "%02X%02X", mac[4], mac[5]);
+}
+
+// 진단용 — 전체 MAC 을 사람이 읽는 형식으로
+static void formatMac(char* out, size_t cap) {
+    uint8_t mac[6] = {0};
+    if (esp_read_mac(mac, ESP_MAC_BT) != ESP_OK) {
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    }
+    snprintf(out, cap, "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 // 광고에 실을 수 있는 문자만 남긴다 (영숫자, '-', '_').
@@ -97,8 +117,10 @@ static void saveIdentity(const char* userName) {
 }
 
 static void printIdentity() {
-    Serial.printf("[ID ] 이름 %s | module_id %u (0x%02X) | service %s\n",
-                  gFullName, gModuleID, gModuleID, hoho::kServiceUUID);
+    char mac[20];
+    formatMac(mac, sizeof(mac));
+    Serial.printf("[ID ] 이름 %s | module_id %u (0x%02X) | MAC %s\n",
+                  gFullName, gModuleID, gModuleID, mac);
 }
 
 // ── 가상 데이터 생성 ─────────────────────────────────────────────────────
@@ -273,6 +295,13 @@ void setup() {
 
     loadIdentity();
 
+#if HOHO_HAS_TFT
+    // 화면을 BLE 보다 먼저 켠다. BLE 초기화가 실패해도 보드가 살아있다는 걸
+    // 눈으로 확인할 수 있어야 디버깅이 쉽다.
+    hoho::displayBegin();
+    hoho::displayBootMessage(gFullName, "BLE starting...");
+#endif
+
     Serial.println();
     Serial.println("═══════════════════════════════════════════");
     Serial.printf("  %s — 요트 텔레메트리 BLE 테스트\n", gFullName);
@@ -310,6 +339,10 @@ void setup() {
 
     applyAdvertising();
     gAdvNeedsApply = false;
+
+#if HOHO_HAS_TFT
+    hoho::displayBeginMainScreen();
+#endif
 }
 
 void loop() {
@@ -345,6 +378,22 @@ void loop() {
         lastAdv = now;
         refreshAdvPayload();
     }
+
+#if HOHO_HAS_TFT
+    // 3.5) 4 Hz — 내장 TFT 갱신. 바뀐 문자열만 다시 그리므로 SPI 부담이 적다.
+    static uint32_t lastDraw = 0;
+    if (now - lastDraw >= hoho::kNotifyPeriodMs) {
+        lastDraw = now;
+        hoho::DisplayState ds;
+        ds.name      = gUserName;
+        ds.moduleID  = gModuleID;
+        ds.connected = gConnected;
+        ds.notifying = gSubscribed;
+        ds.seq       = gSeq;
+        ds.telemetry = gLatest;
+        hoho::displayUpdate(ds);
+    }
+#endif
 
     // 4) 1 Hz — 시리얼 로그
     if (now - lastLog >= hoho::kLogPeriodMs) {
