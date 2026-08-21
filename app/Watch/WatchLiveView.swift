@@ -1,8 +1,10 @@
 //
 //  WatchLiveView.swift
-//  세로 2페이지 (watchOS verticalPage)
+//  세로 3페이지 (watchOS verticalPage)
 //    1페이지 — 항해 중 보는 화면. 속도 · COG · 힐 세 개만, 최대한 크게.
-//    2페이지 — 설정: 모듈 선택 / 세션 / 진단
+//    2페이지 — 센서 상세: HDG · PITCH · 위성 · 9축
+//    3페이지 — 설정: 모듈 선택 / 세션 / 진단
+
 //
 //  1페이지에는 숫자 전환 애니메이션을 쓰지 않는다.
 //  10 Hz 로 갱신되는 값에 애니메이션을 걸면 글자가 계속 꿈틀거려 못 읽는다.
@@ -20,9 +22,119 @@ struct WatchLiveView: View {
     var body: some View {
         TabView {
             MainPage()
+            DebugPage()
             SettingsPage()
         }
         .tabViewStyle(.verticalPage)
+    }
+}
+
+// MARK: - 2페이지 · 센서 상세
+//
+// 1페이지는 속도·COG·힐 세 개만 크게 둔다. 그 밖의 값은 여기에 모은다.
+// 시계는 화면이 작다. Ultra 에서는 스크롤 없이 한 화면에 들어오도록 줄을
+// 아꼈고, 작은 시계에서는 알아서 스크롤된다.
+//
+// "시뮬레이터 값" 이라는 안내 줄은 뺐다. 1페이지에서 SOG 숫자가 이미 빨갛게
+// 뜨고, 이 페이지에서는 위성 숫자가 빨간 것이 같은 뜻이기 때문이다.
+// (위성을 못 잡았으니 속도·침로를 지어내고 있다)
+
+private struct DebugPage: View {
+    @EnvironmentObject private var ble: BLEManager
+
+    private var extra: TelemetryExtra? { ble.sample?.extra }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 4) {
+                if let e = extra {
+                    HStack(spacing: 0) {
+                        pair(e.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—",
+                             "HDG")
+                        pair(String(format: "%+.1f°", e.pitchDegrees), "PITCH")
+                    }
+                    HStack(spacing: 0) {
+                        pair("\(e.satellites)", "SAT", warn: !e.gpsFix)
+                        pair(e.hdop.map { String(format: "%.1f", $0) } ?? "—", "HDOP")
+                    }
+
+                    if e.imuOK {
+                        axisRow("ACC", e.accel, "%+.2f")
+                        axisRow("GYR", e.gyro, "%+.1f")
+                        if e.magOK {
+                            axisRow("MAG", e.mag, "%+.0f")
+                        } else {
+                            note("NO MAG")
+                        }
+                    } else {
+                        note("NO IMU")
+                    }
+                } else if ble.sample != nil {
+                    note("NO 9-AXIS DATA")
+                } else {
+                    note("NO DATA")
+                }
+            }
+            .padding(.horizontal, 3)
+            .padding(.bottom, 2)
+        }
+        // 내용이 화면보다 작으면 아예 스크롤되지 않게 한다.
+        // 그냥 ScrollView 로 두면 다 보이는데도 손가락에 튕기는 반응이 와서
+        // "뭔가 더 있나" 하고 계속 밀어 보게 된다.
+        // 그래도 ScrollView 를 남기는 이유: 작은 시계에서는 실제로 넘치기 때문에
+        // 그때는 스크롤이 있어야 한다.
+        .scrollBounceBehavior(.basedOnSize)
+    }
+
+    // 1페이지의 COG/HEEL 보다 조금 작게 잡는다.
+    // 오른쪽 위에 시스템 시계가 얹히는 만큼 세로 자리가 줄어들기 때문이다.
+    private func pair(_ value: String, _ label: String, warn: Bool = false) -> some View {
+        VStack(spacing: -2) {
+            Text(value)
+                .font(.system(size: 25, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .minimumScaleFactor(0.4)
+                .lineLimit(1)
+                .foregroundStyle(warn ? Color.sailWarn : Color.primary)
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    // 축 이름을 값과 같은 줄에 둔다.
+    //
+    // 이름을 윗줄에 따로 두면 그것만으로 세 줄을 잡아먹어서 화면이 넘쳤다.
+    // 단위(g / °/s / µT)는 뺐다. 값이 어느 센서 것인지만 알면 단위는 고정이고,
+    // 시계 화면에서는 한 글자가 아깝다. 단위는 아이폰 상세 화면에 적혀 있다.
+    private func axisRow(_ label: String, _ v: Vector3, _ fmt: String) -> some View {
+        HStack(spacing: 2) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 30, alignment: .leading)
+            axisValue(v.x, fmt)
+            axisValue(v.y, fmt)
+            axisValue(v.z, fmt)
+        }
+    }
+
+    private func axisValue(_ value: Double, _ fmt: String) -> some View {
+        Text(String(format: fmt, value))
+            .font(.system(size: 19, weight: .medium, design: .rounded))
+            .monospacedDigit()
+            .minimumScaleFactor(0.4)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 13))
+            .foregroundStyle(Color.sailWarn)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 6)
     }
 }
 
@@ -33,7 +145,19 @@ private struct MainPage: View {
     /// 손목을 내려 화면이 어두워진 상태 (Always On)
     @Environment(\.isLuminanceReduced) private var isDim
 
+    /// 어두워진 횟수. 손목을 내린 화면은 스크린샷으로 못 찍기 때문에,
+    /// Always On 이 실제로 걸리는지 이 값으로 확인한다. (설정 페이지에 표시)
+    @AppStorage("dimCount") private var dimCount = 0
+
     private var stale: Bool { !ble.isLive }
+
+    /// 속도·침로가 지어낸 값인가. 확장 필드를 안 보내는 보드면 알 수 없으므로 false.
+    private var sogSimulated: Bool { ble.sample?.extra?.sogIsSimulated ?? false }
+    /// 힐이 지어낸 값인가. IMU 가 죽었을 때만 그렇다.
+    private var heelSimulated: Bool {
+        guard let e = ble.sample?.extra else { return false }
+        return !e.imuOK
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,12 +180,14 @@ private struct MainPage: View {
             } else {
                 Spacer(minLength: 0)
 
-                // 속도 — 화면에서 제일 큰 것
+                // 속도 — 화면에서 제일 큰 것.
+                // 지어낸 값이면 숫자를 빨갛게 칠한다. 단위와 라벨은 그대로 둔다.
                 Text(ble.sample?.sogText ?? "—.—")
                     .font(.system(size: isDim ? 84 : 68, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .minimumScaleFactor(0.4)
                     .lineLimit(1)
+                    .foregroundStyle(sogSimulated ? Color.sailWarn : Color.primary)
                 Text("kn")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -71,8 +197,10 @@ private struct MainPage: View {
                 // Always On 에서는 속도만 남긴다.
                 if !isDim {
                     HStack(spacing: 0) {
-                        bigPair(ble.sample.map { $0.cogText } ?? "—", "COG")
-                        bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL")
+                        bigPair(ble.sample.map { $0.cogText } ?? "—", "COG",
+                                warn: sogSimulated)
+                        bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL",
+                                warn: heelSimulated)
                     }
                     Spacer(minLength: 0)
                 }
@@ -80,15 +208,20 @@ private struct MainPage: View {
         }
         .opacity(stale ? 0.45 : 1)
         .padding(.horizontal, 2)
+        .onChange(of: isDim) { _, nowDim in
+            if nowDim { dimCount += 1 }
+        }
     }
 
-    private func bigPair(_ value: String, _ label: String) -> some View {
+    private func bigPair(_ value: String, _ label: String,
+                         warn: Bool = false) -> some View {
         VStack(spacing: -2) {
             Text(value)
                 .font(.system(size: 34, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .minimumScaleFactor(0.4)
                 .lineLimit(1)
+                .foregroundStyle(warn ? Color.sailWarn : Color.primary)
             Text(label)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
@@ -136,6 +269,7 @@ private struct MainPage: View {
 private struct SettingsPage: View {
     @EnvironmentObject private var ble: BLEManager
     @EnvironmentObject private var session: SessionManager
+    @AppStorage("dimCount") private var dimCount = 0
     @State private var showUnpinConfirm = false
 
     var body: some View {
@@ -241,6 +375,9 @@ private struct SettingsPage: View {
 
     private var diagnostics: some View {
         VStack(alignment: .leading, spacing: 4) {
+            // 0 이면 Always On 이 한 번도 안 걸린 것이다.
+            // 워치 설정 → 디스플레이 및 밝기 → 항상 켜짐 을 확인할 것.
+            row("어두워짐", "\(dimCount)회")
             row("경로", ble.source.displayText)
             row("연결", ble.connLastAt == nil ? "—" : String(format: "%.1f Hz", ble.connRateHz))
             row("광고", ble.advLastAt == nil ? "—" : String(format: "%.1f Hz", ble.advRateHz))

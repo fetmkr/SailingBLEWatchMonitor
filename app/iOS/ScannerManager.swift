@@ -119,10 +119,25 @@ final class ScannerManager: NSObject, ObservableObject {
 
     // MARK: 내부
 
+    /// 이만큼 조용하면 목록에서 뺀다.
+    ///
+    /// 광고는 200 ms 마다 오므로 5초면 스무 번 넘게 못 들은 것이다. 그 정도면
+    /// 꺼졌거나 멀어진 것이지 잠깐 놓친 게 아니다.
+    /// **지금 안 보이는 모듈이 목록에 남아 있으면 그게 더 나쁘다** — 없는 배를
+    /// 있다고 믿게 된다.
+    private static let dropAfterSeconds: TimeInterval = 5.0
+
     private func startRefreshTimer() {
         refreshTimer?.invalidate()
         let t = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
             guard let self else { return }
+
+            // 한동안 안 보이는 모듈은 지운다.
+            let now = Date()
+            self.pending = self.pending.filter {
+                now.timeIntervalSince($0.value.lastSeen) <= Self.dropAfterSeconds
+            }
+
             // stale 표시를 갱신해야 하므로 dirty 가 아니어도 주기적으로 publish 한다.
             self.modules = self.pending.values.sorted { $0.id < $1.id }
             self.dirty = false

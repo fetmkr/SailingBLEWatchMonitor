@@ -118,6 +118,102 @@ inline void encodeTelemetryPacket(const Telemetry& t, uint8_t out[kTelemetryLen]
     out[11] = encodeBatt(t.battPct);
 }
 
+// ── 확장 페이로드 (37 바이트) ────────────────────────────────────────────
+//
+// 앞 12바이트는 위 encodeTelemetryPacket() 과 완전히 같다. 그 뒤에 9축과
+// GPS 상태를 덧붙인다.
+//
+// ★ 버전을 올리지 않는다. PROTOCOL.md §7 이 "길면 앞부분만 파싱" 을 규정하고
+//   있어서, 옛 수신 측은 이 패킷을 받아도 앞 12바이트만 읽고 그대로 돈다.
+//   그래서 앱을 안 고쳐도 깨지지 않는다.
+//
+// ※ firmware/ (Feather TFT) 는 9축이 없으므로 12바이트만 보낸다. 그것도
+//   규격에 맞다. 두 보드가 서로 다른 길이를 보내는 게 정상이다.
+//
+//  offset  size  type     name       단위
+//  ------  ----  -------  ---------  --------------------------------------
+//  [0..11]  12            (기존)     PROTOCOL.md §3 그대로
+//  [12]      1   u8       flags      bit0 GPS fix / bit1 IMU / bit2 자력계
+//                                    bit3 SOG·COG 가 시뮬레이터 값
+//  [13]      1   u8       sats       위성 수
+//  [14]      1   u8       hdop       HDOP × 10.  255 = 모름
+//  [15..16]  2   u16le    hdg        자력계 방위 deg × 10 (0…3599)
+//                                    0xFFFF = 자력계 없음
+//  [17..18]  2   i16le    pitch      deg × 10
+//  [19..24]  6   i16le×3  acc XYZ    g × 1000
+//  [25..30]  6   i16le×3  gyr XYZ    °/s × 10
+//  [31..36]  6   i16le×3  mag XYZ    µT × 10
+//  ------  ----  -------  ---------  --------------------------------------
+//  total    37
+static constexpr size_t kTelemetryExtLen = 37;
+
+struct TelemetryExtra {
+    bool    gpsFix       = false;
+    bool    imuOk        = false;
+    bool    magOk        = false;
+    bool    sogSimulated = true; // 참이면 SOG·COG 가 지어낸 값이다
+    uint8_t satellites   = 0;
+    float   hdop         = -1.0f; // 음수면 모름
+    float   headingDeg   = -1.0f; // 음수면 자력계 없음
+    float   pitchDeg     = 0.0f;
+    float   accX = 0, accY = 0, accZ = 0; // g
+    float   gyrX = 0, gyrY = 0, gyrZ = 0; // °/s
+    float   magX = 0, magY = 0, magZ = 0; // µT
+};
+
+// 실수를 int16 칸에 넣는다. 범위를 벗어나면 자른다.
+// 자르는 편이 조용히 뒤집히는 것보다 낫다 (예: 32768 이 -32768 이 되는 일).
+inline int16_t clampToI16(float v) {
+    if (v >= 32767.0f) return 32767;
+    if (v <= -32768.0f) return -32768;
+    return (int16_t)lroundf(v);
+}
+
+inline void putI16LE(uint8_t* p, int16_t v) { putU16LE(p, (uint16_t)v); }
+
+inline void encodeTelemetryExt(const Telemetry& t, const TelemetryExtra& e,
+                               uint8_t out[kTelemetryExtLen]) {
+    encodeTelemetryPacket(t, out); // 앞 12바이트는 기존과 한 글자도 다르지 않다
+
+    uint8_t flags = 0;
+    if (e.gpsFix) flags |= 0x01;
+    if (e.imuOk) flags |= 0x02;
+    if (e.magOk) flags |= 0x04;
+    if (e.sogSimulated) flags |= 0x08;
+    out[12] = flags;
+
+    out[13] = e.satellites;
+
+    if (e.hdop < 0.0f) {
+        out[14] = 255; // 모름
+    } else {
+        long h  = lroundf(e.hdop * 10.0f);
+        out[14] = (uint8_t)(h > 254 ? 254 : (h < 0 ? 0 : h));
+    }
+
+    uint16_t hdg = 0xFFFF;
+    if (e.headingDeg >= 0.0f) {
+        long d = lroundf(e.headingDeg * 10.0f) % 3600;
+        if (d < 0) d += 3600;
+        hdg = (uint16_t)d;
+    }
+    putU16LE(&out[15], hdg);
+
+    putI16LE(&out[17], clampToI16(e.pitchDeg * 10.0f));
+
+    putI16LE(&out[19], clampToI16(e.accX * 1000.0f));
+    putI16LE(&out[21], clampToI16(e.accY * 1000.0f));
+    putI16LE(&out[23], clampToI16(e.accZ * 1000.0f));
+
+    putI16LE(&out[25], clampToI16(e.gyrX * 10.0f));
+    putI16LE(&out[27], clampToI16(e.gyrY * 10.0f));
+    putI16LE(&out[29], clampToI16(e.gyrZ * 10.0f));
+
+    putI16LE(&out[31], clampToI16(e.magX * 10.0f));
+    putI16LE(&out[33], clampToI16(e.magY * 10.0f));
+    putI16LE(&out[35], clampToI16(e.magZ * 10.0f));
+}
+
 // Manufacturer Specific Data. Company ID(2) + 페이로드(9) = 11바이트. PROTOCOL.md §4.3
 inline void encodeManufacturerData(const Telemetry& t, uint8_t seq, uint8_t out[2 + kMfgLen]) {
     putU16LE(&out[0], kCompanyID);

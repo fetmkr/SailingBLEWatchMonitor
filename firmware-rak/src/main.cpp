@@ -845,6 +845,35 @@ static bool  gUsingGpsSog  = false;
 static bool  gUsingImuHeel = false;
 static float gBattPct      = 100.0f; // 1 Hz 로 갱신
 
+// BLE 로 함께 내보낼 확장 필드를 모은다.
+//
+// 앞 12바이트 뒤에 붙는 값들이라, 옛 앱은 이걸 못 보고도 그대로 돈다
+// (PROTOCOL.md §7 전방 호환). 자세한 배치는 protocol.h 의 encodeTelemetryExt().
+static sail::TelemetryExtra buildExtra() {
+    sail::TelemetryExtra e;
+    e.gpsFix       = gGpsFix;
+    e.imuOk        = gImuOk;
+    e.magOk        = gMagOk;
+    e.sogSimulated = !gUsingGpsSog;
+    e.satellites   = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
+
+    // HDOP — 작을수록 정확하다. 음수는 "모름" 이라는 뜻이다.
+    //
+    // ★ 위성을 못 잡으면 L76K 가 25.5 같은 값을 채워 보낸다. 자리를 비워 두지
+    //   않으려고 넣는 숫자일 뿐 정확도가 아니다. 그대로 흘리면 화면에
+    //   "fix 없음 / HDOP 25.4" 처럼 앞뒤가 안 맞는 값이 뜬다.
+    //   실제 GPS 문장:  $GNGSA,A,1,,,,,,,,,,,,,25.5,25.5,25.5
+    float hdop = gGps.hdop.isValid() ? (float)gGps.hdop.hdop() : -1.0f;
+    if (!gGpsFix || hdop > 20.0f) hdop = -1.0f; // 20 넘는 HDOP 은 어차피 못 쓴다
+    e.hdop = hdop;
+    e.headingDeg   = headingDeg();
+    e.pitchDeg     = gPitchDeg;
+    e.accX = gAcc.x; e.accY = gAcc.y; e.accZ = gAcc.z;
+    e.gyrX = gGyr.x; e.gyrY = gGyr.y; e.gyrZ = gGyr.z;
+    e.magX = gMag.x; e.magY = gMag.y; e.magZ = gMag.z;
+    return e;
+}
+
 static Telemetry buildTelemetry(uint32_t nowMs) {
     // 시뮬레이터는 폴백으로 늘 돌려 둔다. GPS 를 놓친 순간에도 값이 이어진다.
     Telemetry sim = sail::sim::simulate(nowMs, &arduinoRand01);
@@ -1221,8 +1250,8 @@ void setup() {
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     gTelemetryChr->setCallbacks(new TelemetryCallbacks());
 
-    uint8_t initial[sail::kTelemetryLen];
-    sail::encodeTelemetryPacket(gLatest, initial);
+    uint8_t initial[sail::kTelemetryExtLen];
+    sail::encodeTelemetryExt(gLatest, buildExtra(), initial);
     gTelemetryChr->setValue(initial, sizeof(initial));
 
     // NimBLE 2.x 에서는 서버가 시작될 때 서비스도 함께 시작된다(svc->start() 는 no-op).
@@ -1272,8 +1301,10 @@ void loop() {
         gpsUpdateFix();
         gLatest = buildTelemetry(now);
 
-        uint8_t packet[sail::kTelemetryLen];
-        sail::encodeTelemetryPacket(gLatest, packet);
+        // 12바이트 뒤에 9축과 GPS 상태를 덧붙여 보낸다. 옛 앱은 앞 12바이트만
+        // 읽으므로 그대로 돈다 (PROTOCOL.md §7).
+        uint8_t packet[sail::kTelemetryExtLen];
+        sail::encodeTelemetryExt(gLatest, buildExtra(), packet);
         gTelemetryChr->setValue(packet, sizeof(packet)); // Read 용 값도 항상 최신
         if (gConnected) {
             gTelemetryChr->notify(); // 구독자가 없으면 NimBLE 가 알아서 무시

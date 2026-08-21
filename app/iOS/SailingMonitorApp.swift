@@ -31,8 +31,12 @@ struct RootView: View {
             LiveView()
                 .tabItem { Label("라이브", systemImage: "speedometer") }
 
-            ScannerView()
-                .tabItem { Label("스캐너", systemImage: "dot.radiowaves.left.and.right") }
+            // 라이브 탭은 속도·COG·힐 세 개만 크게 보여준다.
+            // 9축과 GPS 상태처럼 자세한 값은 바로 옆 탭에서 본다.
+            SensorDetailView(ble: ble)
+                .tabItem {
+                    Label("상세", systemImage: "gauge.with.dots.needle.bottom.50percent")
+                }
 
             SettingsView()
                 .tabItem { Label("설정", systemImage: "gearshape") }

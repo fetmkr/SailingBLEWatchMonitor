@@ -14,60 +14,58 @@ struct ScannerView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if !scanner.bluetoothPoweredOn {
-                    ContentUnavailableView("블루투스를 켜주세요",
-                                           systemImage: "antenna.radiowaves.left.and.right.slash")
-                } else if scanner.modules.isEmpty {
-                    ContentUnavailableView {
-                        Label("광고를 찾는 중", systemImage: "dot.radiowaves.left.and.right")
-                    } description: {
-                        Text("\(SailProtocol.namePrefix)* 모듈의 광고 패킷을 기다리는 중입니다.\n연결은 하지 않습니다.")
-                    }
-                } else {
-                    List {
-                        Section {
-                            ForEach(scanner.modules) { module in
-                                ModuleRow(module: module)
-                            }
-                        } header: {
-                            Text("모듈 \(scanner.modules.count)개")
-                        } footer: {
-                            Text("allowDuplicates 를 켜고 스캔합니다. 광고 인터벌 200 ms → 콜백은 약 5 Hz, "
-                                 + "페이로드 갱신은 1 Hz 이므로 seq 가 바뀐 것만 새 패킷으로 셉니다.")
+        Group {
+            if !scanner.bluetoothPoweredOn {
+                ContentUnavailableView("블루투스를 켜주세요",
+                                       systemImage: "antenna.radiowaves.left.and.right.slash")
+            } else if scanner.modules.isEmpty {
+                ContentUnavailableView {
+                    Label("광고를 찾는 중", systemImage: "dot.radiowaves.left.and.right")
+                } description: {
+                    Text("\(SailProtocol.namePrefix)* 모듈의 광고 패킷을 기다리는 중입니다.\n연결은 하지 않습니다.")
+                }
+            } else {
+                List {
+                    Section {
+                        ForEach(scanner.modules) { module in
+                            ModuleRow(module: module)
                         }
+                    } header: {
+                        Text("모듈 \(scanner.modules.count)개")
+                    } footer: {
+                        Text("allowDuplicates 를 켜고 스캔합니다. 광고 인터벌 200 ms → 콜백은 약 5 Hz, "
+                             + "페이로드 갱신은 1 Hz 이므로 seq 가 바뀐 것만 새 패킷으로 셉니다.")
+                    }
 
-                        Section {
-                            LabeledContent("scan response 못 받음",
-                                           value: "\(scanner.undecodableCount)")
-                            LabeledContent("일시정지 재기준", value: "\(scanner.pausedResyncs)")
-                        } header: {
-                            Text("진단")
-                        } footer: {
-                            Text("텔레메트리는 scan response 에 실려 있어 SCAN_REQ/RSP 왕복이 한 번 더 필요합니다. "
-                                 + "첫 항목이 크면 그 왕복이 자주 실패하는 것입니다.\n"
-                                 + "앱이 백그라운드로 가면 스캔이 멈추는데, 그 사이 벌어진 seq 간격은 "
-                                 + "유실로 세지 않고 기준점을 다시 잡습니다.")
-                        }
-                        .font(.caption)
+                    Section {
+                        LabeledContent("scan response 못 받음",
+                                       value: "\(scanner.undecodableCount)")
+                        LabeledContent("일시정지 재기준", value: "\(scanner.pausedResyncs)")
+                    } header: {
+                        Text("진단")
+                    } footer: {
+                        Text("텔레메트리는 scan response 에 실려 있어 SCAN_REQ/RSP 왕복이 한 번 더 필요합니다. "
+                             + "첫 항목이 크면 그 왕복이 자주 실패하는 것입니다.\n"
+                             + "앱이 백그라운드로 가면 스캔이 멈추는데, 그 사이 벌어진 seq 간격은 "
+                             + "유실로 세지 않고 기준점을 다시 잡습니다.")
                     }
+                    .font(.caption)
                 }
             }
-            .navigationTitle("스캐너")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("초기화") { scanner.reset() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(scanner.isScanning ? Color.blue : Color.gray)
-                            .frame(width: 8, height: 8)
-                        Text(scanner.isScanning ? "스캔 중" : "정지")
-                            .font(.caption)
-                    }
+        }
+        .navigationTitle("스캐너")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("초기화") { scanner.reset() }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(scanner.isScanning ? Color.blue : Color.gray)
+                        .frame(width: 8, height: 8)
+                    Text(scanner.isScanning ? "스캔 중" : "정지")
+                        .font(.caption)
                 }
             }
         }
@@ -148,7 +146,7 @@ struct ModuleRow: View {
                 stat("seq", "\(module.sample.sequence.map(String.init) ?? "—")")
                 stat("수신", "\(module.receivedPackets)")
                 stat("유실", "\(module.lostPackets)",
-                     color: module.lostPackets > 0 ? .orange : nil)
+                     color: module.lostPackets > 0 ? Color.sailWarn : nil)
                 stat("수신율", String(format: "%.1f%%", module.receptionRate), color: rateColor)
                 stat("갱신", String(format: "%.2fHz", module.updateRateHz))
                 stat("배터리", "\(module.sample.batteryPercent)%")

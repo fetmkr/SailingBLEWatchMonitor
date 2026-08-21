@@ -43,10 +43,32 @@ if [ "$QUICK" = "quick" ]; then
 fi
 
 # ── 3. 펌웨어 컴파일 ─────────────────────────────────────────────────────
-bar "3/4  펌웨어 컴파일 (ESP32-S3)"
-# 두 보드 모두 — TFT 있는 Feather 와 화면 없는 DevKit
-( cd "$ROOT/firmware" && pio run -e feather_s3_tft -e devkit_s3 ) | tail -6
-ok "펌웨어 빌드 (feather_s3_tft + devkit_s3)"
+bar "3/4  펌웨어 컴파일"
+
+# ★ pio 결과를 파이프로 넘기면 종료 코드가 tail 것으로 바뀌어 실패가 묻힌다.
+#   실제로 이것 때문에 feather_s3_tft 빌드가 깨진 채로 "전체 통과" 가 나온 적이
+#   있다. 로그는 파일로 받고 pio 자체의 종료 코드로 판정한다.
+#   (앱 빌드 쪽은 원래 이렇게 하고 있었는데 펌웨어만 빠져 있었다)
+build_firmware() {
+    local dir="$1" name="$2" logfile="$3"
+    shift 3
+    if ( cd "$dir" && pio run "$@" ) > "$logfile" 2>&1; then
+        printf '   %s — OK\n' "$name"
+    else
+        printf '\033[31m   %s — 빌드 실패\033[0m\n' "$name"
+        grep -E "error|Error|FAILED" "$logfile" | sort -u | head -20
+        printf '   전체 로그: %s\n' "$logfile"
+        return 1
+    fi
+}
+
+# 보드마다 따로 빌드한다. 한 번에 두 env 를 돌리면 espressif32 플랫폼이
+# 프레임워크 경로를 준비하는 도중에 서로 밟아서 간헐적으로 실패한다.
+build_firmware "$ROOT/firmware"     "firmware / feather_s3_tft" "$BUILD/fw-feather.log" -e feather_s3_tft
+build_firmware "$ROOT/firmware"     "firmware / devkit_s3"      "$BUILD/fw-devkit.log"  -e devkit_s3
+build_firmware "$ROOT/firmware-rak" "firmware-rak / rak3112"    "$BUILD/fw-rak.log"
+
+ok "펌웨어 빌드 (Feather TFT · DevKit · RAK3112)"
 
 # ── 4. 앱 빌드 ───────────────────────────────────────────────────────────
 bar "4/4  iOS / watchOS 앱 빌드"

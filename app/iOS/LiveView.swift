@@ -17,6 +17,20 @@ struct LiveView: View {
 
     private var dimmed: Bool { !ble.isLive }
 
+    /// 속도·침로가 지어낸 값인가. 확장 필드를 안 보내는 보드면 알 수 없으므로 false.
+    private var sogSimulated: Bool { ble.sample?.extra?.sogIsSimulated ?? false }
+    /// 힐이 지어낸 값인가. IMU 가 죽었을 때만 그렇다.
+    private var heelSimulated: Bool {
+        guard let e = ble.sample?.extra else { return false }
+        return !e.imuOK
+    }
+
+    /// 숫자에만 칠하는 색. 라벨과 단위는 건드리지 않는다.
+    private func numberStyle(_ warn: Bool) -> AnyShapeStyle {
+        if dimmed { return AnyShapeStyle(.secondary) }
+        return warn ? AnyShapeStyle(Color.sailWarn) : AnyShapeStyle(.primary)
+    }
+
     // 항해 중에는 화면이 저절로 꺼지면 안 된다.
     // iOS 에는 watchOS 의 Always On 같은 게 없으므로 자동 잠금을 막는 것이 전부다.
     // 값을 실제로 받고 있을 때만 막는다 — 연결도 안 된 화면을 켜둘 이유는 없다.
@@ -38,10 +52,11 @@ struct LiveView: View {
                 } else {
                     Spacer(minLength: 8)
 
-                    // 속도
+                    // 속도 — 지어낸 값이면 숫자를 빨갛게 칠한다.
                     bigValue(ble.sample?.sogText ?? "—.—",
                              unit: "knots",
-                             size: 96)
+                             size: 96,
+                             warn: sogSimulated)
 
                     Spacer(minLength: 8)
 
@@ -53,11 +68,13 @@ struct LiveView: View {
                     HStack(alignment: .top, spacing: 0) {
                         smallerValue("COG",
                                      ble.sample.map { $0.cogText } ?? "—",
-                                     sub: ble.sample.map { compassPoint($0.cogDegrees) } ?? " ")
+                                     sub: ble.sample.map { compassPoint($0.cogDegrees) } ?? " ",
+                                     warn: sogSimulated)
                         Divider().frame(height: 90)
                         smallerValue("HEEL",
                                      ble.sample.map { $0.heelText } ?? "—",
-                                     sub: ble.sample.map { $0.heelSideLabel } ?? " ")
+                                     sub: ble.sample.map { $0.heelSideLabel } ?? " ",
+                                     warn: heelSimulated)
                     }
 
                     Spacer(minLength: 8)
@@ -79,21 +96,23 @@ struct LiveView: View {
 
     // MARK: 조각
 
-    private func bigValue(_ text: String, unit: String, size: CGFloat) -> some View {
+    private func bigValue(_ text: String, unit: String, size: CGFloat,
+                          warn: Bool = false) -> some View {
         VStack(spacing: 0) {
             Text(text)
                 .font(.system(size: size, weight: .semibold))
                 .monospacedDigit()
                 .minimumScaleFactor(0.4)
                 .lineLimit(1)
+                .foregroundStyle(numberStyle(warn))
             Text(unit)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
-        .foregroundStyle(dimmed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
     }
 
-    private func smallerValue(_ title: String, _ value: String, sub: String) -> some View {
+    private func smallerValue(_ title: String, _ value: String, sub: String,
+                              warn: Bool = false) -> some View {
         VStack(spacing: 2) {
             Text(title)
                 .font(.caption.weight(.semibold))
@@ -103,12 +122,12 @@ struct LiveView: View {
                 .monospacedDigit()
                 .minimumScaleFactor(0.4)
                 .lineLimit(1)
+                .foregroundStyle(numberStyle(warn))
             Text(sub)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)
-        .foregroundStyle(dimmed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
     }
 
     // 색은 "무엇을 받고 있나" 기준. 연결 상태보다 이게 더 중요하다.

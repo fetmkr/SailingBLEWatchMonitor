@@ -23,6 +23,16 @@ struct SettingsView: View {
                     pickerSection
                 }
 
+                // 모듈 이야기 바로 밑에 둔다. 주변에 어떤 배가 떠 있는지
+                // 보는 화면이라 모듈 고르는 흐름과 이어진다.
+                Section {
+                    NavigationLink {
+                        ScannerView()
+                    } label: {
+                        Label("스캐너", systemImage: "dot.radiowaves.left.and.right")
+                    }
+                }
+
                 Section {
                     LabeledContent("연결 상태", value: ble.state.displayText)
                     LabeledContent("데이터 경로", value: ble.source.displayText)
