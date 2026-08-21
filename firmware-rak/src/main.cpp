@@ -377,8 +377,92 @@ static void doScan() {
 // UART1 로 1 초에 한 번 NMEA 문장 뭉치를 보낸다. 기본 9600 bps.
 // 위성을 잡기 전에도 문장은 계속 나오는데, 값이 비어 있고 상태 글자가
 // V(무효)로 온다. 그래서 "바이트가 들어온다" 와 "위치를 안다" 는 다른 얘기다.
+// ── 갱신율과 통신 속도 ───────────────────────────────────────────────────
+//
+// L76K 는 켜지면 1 Hz / 9600bps 로 시작한다. 1초에 한 번이면 배가 방향을 트는
+// 동안 값이 몇 번 안 바뀌어 화면이 굼떠 보인다. notify 를 10 Hz 로 쏴도
+// 같은 숫자가 열 번 반복될 뿐이다.
+//
+// ★ 이 모듈은 PMTK(MediaTek) 명령을 안 받는다. PCAS 명령을 쓴다.
+//   처음에 PMTK251/PMTK220 을 보냈다가 모듈이 통신 속도를 안 바꿔서,
+//   우리만 38400 으로 듣게 되어 들어오는 바이트가 전부 깨졌다.
+//   근거: Quectel L76K GNSS Protocol Specification V1.1 §2.3
+//     $PCAS01,<n>     통신 속도   1=9600  3=38400  5=115200
+//     $PCAS02,<ms>    갱신 간격   1000=1Hz  500=2Hz  200=5Hz
+//     $PCAS03,...     문장 종류별 출력 주기 (0 이면 끔)
+//
+// ★ 같은 문서가 못을 박는다. 1000ms 미만으로 내리려면 문장 종류를 줄이고
+//   통신 속도를 115200 으로 올려야 한다.
+//     "It is required to set the type of NMEA sentences output to single and
+//      change the baud rate to 115200 bps when the <Interval> is less than 1000."
+//   9600bps 는 초당 960바이트뿐인데 NMEA 한 벌이 400~500바이트다. 5 Hz 로
+//   올리면 당연히 잘린다.
+//
+// 우리가 쓰는 문장은 둘뿐이다.
+//   RMC — 속도 · 침로 · 위치 · 시각
+//   GGA — 위성 수 · HDOP · 고도
+// 나머지(GLL / GSA / GSV / VTG / ZDA / ANT)는 꺼서 대역을 아낀다.
+static constexpr uint32_t kGpsBaud = 115200;
+
+static uint8_t gGpsHz = 10; // 실제로 건 갱신율 (진단 출력용)
+
+// 체크섬을 붙여 한 줄 보낸다. ($ 와 * 사이 문자들의 XOR)
+static void gpsSend(const char* body) {
+    uint8_t ck = 0;
+    for (const char* p = body; *p; ++p) ck ^= (uint8_t)*p;
+    Serial1.printf("$%s*%02X\r\n", body, ck);
+    Serial1.flush();
+    delay(60); // flush 뒤에도 실제로 나갈 시간을 준다. 이걸 아끼면 명령이 씹힌다.
+}
+
+// 갱신율을 바꾼다.
+//
+// 문서(§2.3.2)가 적어 놓은 값은 1000 / 500 / 200 (1·2·5 Hz) 뿐이다.
+// 100(10 Hz)은 문서에도, Meshtastic 같은 실제 구현에도 사례가 없다.
+// 다만 제품 사양에는 "up to 10 Hz" 라고 적혀 있어서 넣어는 둔다.
+// 걸렸는지 아닌지는 `gpshz` 명령이 문장 수를 세서 알려준다.
+static void gpsSetRate(uint8_t hz) {
+    int ms = 1000;
+    if (hz >= 10)     ms = 100;
+    else if (hz >= 5) ms = 200;
+    else if (hz >= 2) ms = 500;
+
+    char body[24];
+    snprintf(body, sizeof(body), "PCAS02,%d", ms);
+    gpsSend(body);
+
+    gGpsHz = (ms == 100) ? 10 : (ms == 200 ? 5 : (ms == 500 ? 2 : 1));
+}
+
 static void gpsBegin() {
-    Serial1.begin(9600, SERIAL_8N1, rak::kUART1_RX, rak::kUART1_TX);
+    // 지금 모듈이 어느 속도로 말하는지 알 수 없다. 방금 전원이 들어왔으면
+    // 9600 이지만, 보드만 리셋되고 모듈은 안 꺼졌다면 이미 115200 이다.
+    // 두 속도로 각각 보낸다. 못 알아듣는 쪽은 그냥 버려진다.
+    for (uint32_t baud : {9600u, kGpsBaud}) {
+        Serial1.begin(baud, SERIAL_8N1, rak::kUART1_RX, rak::kUART1_TX);
+        delay(150);
+        // 위성을 다 본다. 기본값은 3 (GPS + BeiDou) 이라 GLONASS 가 꺼져 있다.
+        //   1=GPS  2=BeiDou  3=GPS+BeiDou(기본)  4=GLONASS
+        //   5=GPS+GLONASS  6=BeiDou+GLONASS  7=셋 다
+        // 많이 볼수록 위성을 빨리 잡고 건물 사이에서도 덜 놓친다.
+        // (QZSS 는 기본으로 켜져 있고 끌 수 없다 — 문서 §2.3.4)
+        gpsSend("PCAS04,7");
+        // GGA, RMC 만 남기고 나머지는 끈다
+        gpsSend("PCAS03,1,0,0,0,1,0,0,0,0,0,0,0,0,0");
+        gpsSend("PCAS01,5"); // 115200
+        delay(150);
+        Serial1.end();
+        delay(50);
+    }
+
+    // 이제부터는 바뀐 속도로 듣는다.
+    Serial1.begin(kGpsBaud, SERIAL_8N1, rak::kUART1_RX, rak::kUART1_TX);
+    delay(200);
+
+    // 10 Hz. 문서에는 5 Hz(200ms)까지만 적혀 있지만 실기기에서 확인했다
+    //   요청 10 Hz → 초당 문장 19.6개 (GGA+RMC 두 종류이므로 9.8회), 체크섬 실패 0
+    // 문장 두 종류만 켜 두고 115200 을 쓰기 때문에 대역이 남는다.
+    gpsSetRate(10);
 }
 
 // loop() 에서 계속 부른다. 들어온 바이트를 파서에 먹인다.
@@ -425,6 +509,7 @@ static void doFix() {
                   (unsigned long)gGps.passedChecksum(),
                   (unsigned long)gGps.failedChecksum());
     Serial.printf("  위성 수       %d\n", sats);
+    Serial.printf("  갱신율        %u Hz (%lubps)\n", gGpsHz, (unsigned long)kGpsBaud);
     Serial.printf("  fix           %s\n", gGpsFix ? "있음" : "없음");
 
     if (gGpsFix) {
@@ -454,8 +539,8 @@ static void doFix() {
 // GPS 가 말하고 있다는 뜻이다.
 static void peekGps(uint32_t seconds, bool slotD) {
     Serial.println("──────────────────────────────────────────");
-    Serial.printf("  UART1 (RX GPIO%d / TX GPIO%d) 9600bps — %us 동안 원시 데이터\n",
-                  rak::kUART1_RX, rak::kUART1_TX, (unsigned)seconds);
+    Serial.printf("  UART1 (RX GPIO%d / TX GPIO%d) %lubps — %us 동안 원시 데이터\n",
+                  rak::kUART1_RX, rak::kUART1_TX, (unsigned long)kGpsBaud, (unsigned)seconds);
     Serial.printf("  슬롯 %s 로 가정합니다.\n", slotD ? "D" : "A");
 
     // GPS 모듈은 커넥터 핀10 을 RESET 으로 받는다. 그 핀이 슬롯마다 다르다.
@@ -1033,6 +1118,7 @@ static void printHelp() {
     Serial.println("  oled          화면을 나중에 꽂았을 때 다시 붙이기");
     Serial.println("  gps           UART1 원시 NMEA 5초 (GPS 가 슬롯 A)");
     Serial.println("  gps d         같은 것 (GPS 가 슬롯 D — IO6 로 리셋 해제)");
+    Serial.println("  gpshz <1|2|5|10> GPS 갱신율 (기본 5). 실제로 걸렸는지 세어 줍니다");
     Serial.println("  batt          배터리 전압 실측");
     Serial.println("  level         ★ 지금 자세를 힐 0° 로 삼기 (배가 평형일 때)");
     Serial.println("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)");
@@ -1057,6 +1143,50 @@ static void handleCommand(String line) {
     if (line == "fix")                 { doFix();      return; }
     if (line == "calib")               { doCalib();    return; }
     if (line == "level")               { doLevel();    return; }
+
+    // GPS 갱신율. 밖에서 값이 굼뜨면 올리고, 문장이 깨지면 내린다.
+    if (line.startsWith("gpshz ")) {
+        long hz = line.substring(6).toInt();
+        if (hz != 1 && hz != 2 && hz != 5 && hz != 10) {
+            Serial.println("[GPS] 1, 2, 5, 10 중에서 고르세요. 예) gpshz 5");
+            Serial.println("      1/2/5 는 문서에 있는 값, 10 은 확인 안 된 값입니다.");
+            return;
+        }
+        gpsSetRate((uint8_t)hz);
+        Serial.printf("[GPS] 갱신율 → %u Hz 로 요청했습니다. 실제로 걸렸는지 셉니다...\n",
+                      gGpsHz);
+
+        // 말로만 바뀌었는지 모르니 실제로 들어오는 문장을 센다.
+        // 우리가 켜 둔 문장은 GGA 와 RMC 둘뿐이므로, 갱신 한 번에 두 개가 온다.
+        const uint32_t before = gGps.passedChecksum();
+        const uint32_t bad0   = gGps.failedChecksum();
+        const uint32_t t0     = millis();
+        while (millis() - t0 < 5000) {
+            gpsPoll();
+            feedWatchdog();
+            delay(2);
+        }
+        const uint32_t got  = gGps.passedChecksum() - before;
+        const uint32_t bad  = gGps.failedChecksum() - bad0;
+        const float perSec  = got / 5.0f;
+
+        Serial.println("──────────────────────────────────────────");
+        Serial.printf("  5초 동안 문장 %lu개 (초당 %.1f개)\n",
+                      (unsigned long)got, perSec);
+        Serial.printf("  GGA+RMC 두 종류이므로 → 초당 %.1f 번 갱신\n", perSec / 2.0f);
+        Serial.printf("  체크섬 실패 %lu\n", (unsigned long)bad);
+        Serial.println("──────────────────────────────────────────");
+        if (bad > got / 10) {
+            Serial.println("  ★ 깨진 문장이 많습니다. 대역폭이 모자랍니다.");
+            Serial.println("    gpshz 5 로 되돌리세요.");
+        } else if (perSec / 2.0f < gGpsHz * 0.7f) {
+            Serial.printf("  ★ 요청한 %u Hz 만큼 안 옵니다. 모듈이 무시한 것입니다.\n",
+                          gGpsHz);
+        } else {
+            Serial.println("  요청한 만큼 들어옵니다.");
+        }
+        return;
+    }
 
     // 화면을 나중에 꽂았을 때 다시 붙인다. 재부팅할 필요 없다.
     if (line == "oled") {
@@ -1207,8 +1337,8 @@ void setup() {
 
     // ── 센서 붙이기 ─────────────────────────────────────────────────────
     gpsBegin();
-    Serial.printf("[GPS] UART1 9600bps 열림 (RX GPIO%d / TX GPIO%d)\n",
-                  rak::kUART1_RX, rak::kUART1_TX);
+    Serial.printf("[GPS] UART1 %lubps / %u Hz (RX GPIO%d / TX GPIO%d)\n",
+                  (unsigned long)kGpsBaud, gGpsHz, rak::kUART1_RX, rak::kUART1_TX);
 
     if (imuBegin()) {
         Serial.printf("[IMU] MPU-9250 붙음 | 자력계 %s\n",

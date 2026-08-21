@@ -1,6 +1,12 @@
 //
 //  WatchLiveView.swift
-//  세로 3페이지 (watchOS verticalPage)
+//  좌우 3페이지 (watchOS page)
+//
+//  ★ 좌우로 넘기는 이유
+//    애플 운동 앱과 같은 조작이라 익숙하다는 것도 있지만, 실질적인 이유는
+//    Digital Crown 이다. 세로 페이지(verticalPage)로 두면 크라운이 페이지를
+//    넘겨 버려서 페이지 안을 스크롤할 때 손가락만 써야 한다.
+//    좌우로 두면 크라운이 페이지 안 스크롤에 쓰인다.
 //    1페이지 — 항해 중 보는 화면. 속도 · COG · 힐 세 개만, 최대한 크게.
 //    2페이지 — 센서 상세: HDG · PITCH · 위성 · 9축
 //    3페이지 — 설정: 모듈 선택 / 세션 / 진단
@@ -25,7 +31,7 @@ struct WatchLiveView: View {
             DebugPage()
             SettingsPage()
         }
-        .tabViewStyle(.verticalPage)
+        .tabViewStyle(.page)
     }
 }
 
@@ -172,7 +178,7 @@ private struct MainPage: View {
                         .foregroundStyle(.orange)
                     Text("모듈을 고르세요")
                         .font(.headline)
-                    Text("아래로 스와이프")
+                    Text("옆으로 스와이프")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
