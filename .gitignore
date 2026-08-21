@@ -5,6 +5,16 @@ firmware/.cache/
 firmware/compile_commands.json
 firmware/tools/sim_test
 
+firmware-rak/.pio/
+firmware-rak/.vscode/
+firmware-rak/.cache/
+firmware-rak/compile_commands.json
+
+# ── 비밀 ─────────────────────────────────────────────────────────────────
+# WiFi SSID/암호 같은 것. secrets.example.h 만 커밋한다.
+firmware-rak/include/secrets.h
+firmware/include/secrets.h
+
 # ── Xcode ────────────────────────────────────────────────────────────────
 # .xcodeproj 는 project.yml 에서 생성하므로 커밋하지 않는다
 app/*.xcodeproj/
