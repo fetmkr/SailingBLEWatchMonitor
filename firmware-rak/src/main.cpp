@@ -1612,7 +1612,6 @@ static sail::TelemetryExtra buildExtra() {
     e.gpsFix       = gGpsFix;
     e.imuOk        = gImuOk;
     e.magOk        = gMagOk;
-    e.sogSimulated = false; // 더 이상 지어내지 않는다. 없으면 없다고 보낸다.
     e.satellites   = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
 
     // HDOP — 작을수록 정확하다. 음수는 "모름" 이라는 뜻이다.

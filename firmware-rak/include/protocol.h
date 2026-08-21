@@ -173,7 +173,6 @@ struct TelemetryExtra {
     bool    gpsFix       = false;
     bool    imuOk        = false;
     bool    magOk        = false;
-    bool    sogSimulated = true; // 참이면 SOG·COG 가 지어낸 값이다
     uint8_t satellites   = 0;
     float   hdop         = -1.0f; // 음수면 모름
     float   headingDeg   = -1.0f; // 음수면 자력계 없음
@@ -201,7 +200,8 @@ inline void encodeTelemetryExt(const Telemetry& t, const TelemetryExtra& e,
     if (e.gpsFix) flags |= 0x01;
     if (e.imuOk) flags |= 0x02;
     if (e.magOk) flags |= 0x04;
-    if (e.sogSimulated) flags |= 0x08;
+    // bit3 은 예약이다. 예전에 "시뮬레이터 값" 을 뜻했지만 시뮬레이터를
+    // 걷어냈다. 규격(PROTOCOL.md §3.1)이 항상 0 이라고 못 박고 있다.
     out[12] = flags;
 
     out[13] = e.satellites;

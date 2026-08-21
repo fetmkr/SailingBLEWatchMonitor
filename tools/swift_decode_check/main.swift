@@ -2,7 +2,7 @@
 //  main.swift
 //  펌웨어(C++) 인코더 ↔ 앱(Swift) 디코더 교차 검증기.
 //
-//  firmware/tools/sim_test.cpp 가 뽑아낸 골든 벡터를
+//  firmware-rak/tools/proto_test.cpp 가 뽑아낸 골든 벡터를
 //  app/Shared/Protocol.swift 의 디코더로 해석해 값이 일치하는지 본다.
 //  두 구현이 어긋나면 여기서 잡힌다.
 //
@@ -61,10 +61,11 @@ for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: true).enu
         fail(lineNo, "hex 파싱 실패: \(cols[1])")
         continue
     }
-    guard let sogRaw = Int(cols[2]), let cogRaw = Int(cols[3]),
-          let heelRaw = Int(cols[4]), let battRaw = Int(cols[5]),
-          let seqRaw = Int(cols[6]), let uptimeRaw = Int(cols[7]),
-          let moduleRaw = Int(cols[8]) else {
+    // sog·cog·heel 의 기대값은 "nil" 일 수 있어서 문자열로 들고 있는다.
+    // 숫자 하나를 "값 없음" 표시로 쓰면 안 된다 — 힐 -1도 는 실제로 나오는
+    // 값이라 -1 을 표시로 쓰면 겹친다. (실제로 겹쳐서 걸렸다)
+    guard let battRaw = Int(cols[5]), let seqRaw = Int(cols[6]),
+          let uptimeRaw = Int(cols[7]), let moduleRaw = Int(cols[8]) else {
         fail(lineNo, "기대값 파싱 실패")
         continue
     }
@@ -95,17 +96,33 @@ for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: true).enu
 
     checked += 1
 
-    // 물리량은 부동소수 나눗셈을 거치므로 원시값으로 되돌려 정수 비교한다.
-    guard let sogKn = s.sogKnots, let cogDeg = s.cogDegrees, let heelDeg = s.heelDegrees else {
-        fail(lineNo, "값이 없다고 디코딩됨 (무효 표식이 아닌데)")
-        continue
+    // 기대값이 "nil" 이면 값이 없어야 한다는 뜻이다.
+    //
+    // GPS 가 위성을 놓친 순간을 벡터에 섞어 두고, 앱이 그걸 0 이 아니라
+    // **없음(nil)** 으로 읽는지 여기서 확인한다. 0 으로 읽으면 정박 중과
+    // 구별이 안 되고, 배에서 그건 위험하다.
+    //
+    // 물리량은 부동소수 나눗셈을 거치므로 원시값으로 되돌려 정수로 비교한다.
+    func checkField(_ name: String, _ actual: Int?, _ expected: String) {
+        if expected == "nil" {
+            if let got = actual { fail(lineNo, "\(name) 은 값이 없어야 하는데 \(got) 이 나옴") }
+            return
+        }
+        guard let want = Int(expected) else {
+            fail(lineNo, "\(name) 기대값 파싱 실패: \(expected)")
+            return
+        }
+        guard let got = actual else {
+            fail(lineNo, "\(name) 이 없다고 디코딩됨 (무효 표식이 아닌데)")
+            return
+        }
+        if got != want { fail(lineNo, "\(name) \(got) ≠ \(want)") }
     }
-    let sogBack = Int((sogKn * 100).rounded())
-    let cogBack = Int((cogDeg * 10).rounded())
 
-    if sogBack != sogRaw   { fail(lineNo, "sog \(sogBack) ≠ \(sogRaw)") }
-    if cogBack != cogRaw   { fail(lineNo, "cog \(cogBack) ≠ \(cogRaw)") }
-    if heelDeg != heelRaw { fail(lineNo, "heel \(heelDeg) ≠ \(heelRaw)") }
+    checkField("sog",  s.sogKnots.map   { Int(($0 * 100).rounded()) }, cols[2])
+    checkField("cog",  s.cogDegrees.map { Int(($0 * 10).rounded()) },  cols[3])
+    checkField("heel", s.heelDegrees,                                  cols[4])
+
     if s.batteryPercent != battRaw { fail(lineNo, "batt \(s.batteryPercent) ≠ \(battRaw)") }
     if s.version != SailProtocol.version { fail(lineNo, "ver \(s.version)") }
     if s.moduleID != UInt8(moduleRaw) { fail(lineNo, "module_id \(s.moduleID) ≠ \(moduleRaw)") }

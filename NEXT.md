@@ -6,10 +6,13 @@
 
 ## 0. 시작할 때 5분 — 지금 상태 확인
 
+**보드에 안 구운 변경이 있다.** 프로토콜 헤더에서 죽은 플래그 필드를 걷어냈다.
+동작은 그대로지만 소스와 보드를 맞춰 두는 게 낫다.
+
 ```bash
 cd firmware-rak
 P=$(ls /dev/cu.usbmodem* | head -1)
-pio run -t upload --upload-port "$P"     # 필요하면
+pio run -t upload --upload-port "$P"
 ```
 
 시리얼에서 이 두 개만 쳐 보면 된다.
@@ -147,6 +150,8 @@ xcrun devicectl device install app \
 - 멀티미터로 배터리 전압 교차 확인
 - WiFi 용도 미정 (`secrets.h` 아직 안 씀)
 - 워치 Always On 근본 원인 (지금은 되지만 왜 됐는지 모름)
+- 옛 Feather 보드(`firmware/`) — **검증에서 뺐다.** 폴더와 코드는 그대로다.
+  필요하면 그 폴더에서 직접 `pio run`. 다시 쓸 일이 없으면 지워도 된다.
 
 ---
 
