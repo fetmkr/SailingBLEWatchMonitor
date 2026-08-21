@@ -228,7 +228,26 @@ KOR1234             −78 dBm  · 4.10 kn
   재연결에 몇 초 걸렸는지도 로그에 찍힌다
 - 연결이 끊기면 마지막 값을 **회색으로 유지**하고 배지가 "재연결 중… N초"
 
-### iOS — 스캐너 탭
+### iOS — 상세 탭
+
+라이브 바로 옆. 9축과 GPS 상태를 카드로 깐다. **스크롤 없이 한 화면**에
+들어오게 맞췄다 — 흔들리는 배 위에서 손가락으로 밀어 가며 읽을 수 없다.
+항목을 늘리려면 무엇을 뺄지 먼저 정해야 한다.
+
+지어낸 값(위성을 못 잡아 시뮬레이터로 채운 속도·침로)은 **숫자를 빨갛게**
+칠하고 맨 위에 배너를 띄운다. 색은 `Color.sailWarn` 하나로 모아 두었다.
+
+### iOS — 스캐너 (설정 안)
+
+탭에서 빼고 **설정 → 연결할 모듈 밑**으로 옮겼다. 연결이 이상할 때 들여다보는
+도구라 탭을 차지할 이유가 없고, 주변에 어떤 배가 떠 있는지 보는 화면이라
+모듈 고르는 흐름과 이어진다.
+
+**5초 동안 안 보이는 모듈은 목록에서 지운다.** 광고가 200 ms 간격이라 그 정도면
+꺼졌거나 멀어진 것이다. 없는 배가 목록에 남아 있으면 그게 더 나쁘다.
+(3초 흐림 표시는 그대로 — 잠깐 끊긴 것과 사라진 것을 나눈다)
+
+### iOS — 스캐너 화면 자체
 
 연결하지 않고 광고만 본다. `allowDuplicates` 켬.
 
@@ -374,3 +393,56 @@ didDisconnectPeripheral
 | `NSHealthShareUsageDescription` | — | ✅ |
 | `NSHealthUpdateUsageDescription` | — | ✅ |
 | HealthKit capability (entitlement) | — | ✅ |
+
+---
+
+## 명령줄로 굽기 (Xcode 안 열고)
+
+아이폰은 터미널에서 바로 넣을 수 있다. 코드만 고치고 확인할 때 훨씬 빠르다.
+
+```bash
+cd app
+DD=/tmp/sail-dd                      # 아무 임시 경로
+IPHONE=5D03F469-2C6D-5505-91BF-EB8473431364
+
+xcodebuild -project SailingMonitor.xcodeproj -scheme SailingMonitor \
+  -destination "id=$IPHONE" -configuration Debug \
+  -derivedDataPath "$DD" -allowProvisioningUpdates build
+
+xcrun devicectl device install app --device "$IPHONE" \
+  "$DD/Build/Products/Debug-iphoneos/SailingMonitor.app"
+```
+
+기기 ID 는 `xcrun devicectl list devices` 로 확인한다.
+
+### ★ 워치는 명령줄로 안 된다
+
+같은 방법으로 워치에 넣으면 이렇게 막힌다.
+
+```
+ERROR: CoreDeviceError 3002
+Coordinator ... was process-scoped, but not for client installcoordination_proxy
+```
+
+워치 앱이 아이폰 앱 번들 안에 embed 되어 시스템이 관리하기 때문이다.
+**Xcode 에서 스킴 `SailingMonitor Watch App` + 기기 워치로 ⌘R** 해야 한다.
+
+> 기기 목록에 워치가 안 보이면 **스킴이 아직 아이폰 앱**인 것이다.
+> 스킴을 먼저 바꿔야 기기 목록에 워치가 나타난다.
+
+빌드가 되는지만 볼 때는 시뮬레이터로 충분하다.
+
+```bash
+xcodebuild -project SailingMonitor.xcodeproj -scheme "SailingMonitor Watch App" \
+  -destination 'platform=watchOS Simulator,name=Apple Watch Series 11 (46mm)' \
+  CODE_SIGNING_ALLOWED=NO build
+```
+
+### 워치 화면 캡처
+
+시뮬레이터에는 **손목 내림(Always On) 트리거가 없다.** 어두워진 화면은
+실기기에서도 스크린샷으로 못 찍는다 — 손목을 드는 순간 밝은 상태로 돌아간다.
+그래서 Always On 동작은 3페이지 진단의 **`어두워짐` 횟수**로 판정한다.
+
+밝은 화면 캡처는 워치에서 **Digital Crown + 사이드 버튼**을 동시에 짧게 누르면
+아이폰 사진 앱에 저장된다 (Watch 앱 → 일반 → 스크린샷 활성화 필요).

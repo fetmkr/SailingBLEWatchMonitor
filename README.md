@@ -1,16 +1,26 @@
 # SailingBLEWatchMonitor
 
-요트 텔레메트리 BLE 테스트 모노레포.
+요트 텔레메트리 모노레포.
 
-ESP32-S3 개발보드(**Adafruit ESP32-S3 TFT Feather**)가 가상 GPS 속도 데이터를 만들어
-BLE 로 뿌리고, 아이폰과 애플워치 네이티브 앱이 이를 받아 실시간으로 표시한다.
-보드 내장 240x135 화면에도 현재 속도·침로가 표시된다.
+보드가 속도·침로·기울기를 BLE 로 뿌리고, 아이폰과 애플워치 앱이 받아 실시간으로
+보여준다. 배 이름은 **`random()`** 이고 광고에는 `SAIL-random()` 으로 나간다.
+
+**펌웨어가 두 벌이다. 지금 쓰는 것은 RAK 쪽이다.**
+
+| | 보드 | 상태 |
+|---|---|---|
+| [`firmware-rak/`](firmware-rak/README.md) | RAK3312(ESP32-S3) + RAK19007 | **지금 쓰는 것.** GPS·9축·화면·SD |
+| [`firmware/`](firmware/README.md) | Adafruit ESP32-S3 TFT Feather | 예전 것. 가상 데이터만. 손대지 않음 |
+
+칩은 둘 다 ESP32-S3 지만 보드·핀·붙는 모듈이 전부 달라서 폴더를 나눴다.
+기존 쪽은 실기기 검증이 끝난 상태라 건드리지 않는다.
 
 ```
 .
-├── PROTOCOL.md     ← 패킷 규격 (단일 진실 공급원)
-├── firmware/       ← ESP32-S3 펌웨어  (PlatformIO + Arduino + NimBLE, 내장 TFT 표시)
-├── app/            ← Xcode 프로젝트   (SwiftUI, iOS 앱 + 독립 실행 watchOS 앱)
+├── PROTOCOL.md      ← 패킷 규격 (단일 진실 공급원)
+├── firmware-rak/    ← RAK3112 펌웨어. GPS(L76K) · IMU(MPU-9250) · OLED · SD
+├── firmware/        ← Feather TFT 펌웨어 (가상 데이터, 내장 240x135 화면)
+├── app/             ← Xcode 프로젝트 (SwiftUI, iOS + 독립 실행 watchOS)
 └── tools/
     ├── verify.sh              ← 하드웨어 없이 돌리는 전체 검증
     └── swift_decode_check/    ← C++ 인코더 ↔ Swift 디코더 교차 검증기
@@ -21,15 +31,22 @@ BLE 로 뿌리고, 아이폰과 애플워치 네이티브 앱이 이를 받아 �
 ## 빠른 시작
 
 ```bash
-# 1) 펌웨어 굽기
-cd firmware && pio run -t upload && pio device monitor
+# 1) 펌웨어 굽기 (지금 쓰는 보드)
+cd firmware-rak
+pio run -t upload --upload-port "$(ls /dev/cu.usbmodem* | head -1)"
+pio device monitor          # 시리얼에서 check 를 치면 붙어 있는 것을 한 번에 훑는다
 
-# 2) 앱 프로젝트 만들기
+# 2) 앱
 cd ../app && xcodegen generate && open SailingMonitor.xcodeproj
-#    project.yml 의 DEVELOPMENT_TEAM 을 채운 뒤 실기기로 ⌘R
+#    아이폰: 스킴 SailingMonitor  + 기기 hojun            → ⌘R
+#    워치  : 스킴 SailingMonitor Watch App + 기기 워치     → ⌘R
 ```
 
-자세한 건 [`firmware/README.md`](firmware/README.md) 와 [`app/README.md`](app/README.md).
+> 포트 이름은 다시 꽂을 때마다 바뀐다 (`usbmodem1101` ↔ `usbmodem101`).
+> 고정해 두지 말고 위처럼 찾아 쓸 것.
+
+자세한 건 [`firmware-rak/README.md`](firmware-rak/README.md) 와
+[`app/README.md`](app/README.md).
 
 ---
 
@@ -42,16 +59,21 @@ cd ../app && xcodegen generate && open SailingMonitor.xcodeproj
 | 디바이스 이름 | `SAIL-<이름>` — 보드마다 고유. 예) `SAIL-hojun` |
 | Service UUID | `B0A70001-0000-4000-8000-000000000001` |
 | Telemetry Characteristic | `B0A70002-0000-4000-8000-000000000001` (Read + Notify) |
-| Notify | 12바이트 / 기본 10 Hz (보드에서 조절 가능) |
+| Notify | **12바이트**(Feather) 또는 **37바이트**(RAK, 9축·GPS 상태 포함) / 기본 10 Hz |
 | Advertising | legacy, 200 ms. Manufacturer Data(9바이트 + seq) 를 1 Hz 로 갱신 |
 
-**규격은 세 곳에 구현되어 있고 항상 함께 고쳐야 한다.**
+**규격은 네 곳에 구현되어 있고 항상 함께 고쳐야 한다.**
 
 | 역할 | 파일 |
 |---|---|
 | 문서 | `PROTOCOL.md` |
-| 펌웨어 인코더 | `firmware/include/protocol.h` |
+| 펌웨어 인코더 (RAK) | `firmware-rak/include/protocol.h` |
+| 펌웨어 인코더 (Feather) | `firmware/include/protocol.h` |
 | 앱 디코더 | `app/Shared/Protocol.swift` |
+
+두 펌웨어가 **서로 다른 길이를 보내는 것이 정상이다.** RAK 은 12바이트 뒤에
+9축과 GPS 상태를 덧붙여 37바이트로, Feather 는 9축이 없어 12바이트로 보낸다.
+`PROTOCOL.md` §7 이 "길면 앞부분만 파싱" 을 규정하므로 앱은 양쪽을 다 받는다.
 
 세 개가 어긋나는 걸 막으려고 교차 검증기를 붙여 뒀다 (아래).
 
@@ -68,7 +90,7 @@ cd ../app && xcodegen generate && open SailingMonitor.xcodeproj
 |---|---|
 | 1 | 펌웨어 로직 호스트 검증 — 인코딩 바이트, 시뮬레이션 궤적, 값 범위, 배터리 감소 |
 | 2 | **C++ 인코더 → Swift 디코더 교차 검증** (192개 골든 벡터) + TFT 레이아웃 넘침 검사 |
-| 3 | 펌웨어 실제 컴파일 (Feather TFT + DevKit 양쪽) |
+| 3 | 펌웨어 실제 컴파일 (RAK3112 + Feather TFT + DevKit) |
 | 4 | iOS / watchOS 앱 빌드 |
 
 2단계가 이 저장소의 핵심 안전장치다. 펌웨어가 실제로 뱉는 바이트열을
@@ -93,9 +115,14 @@ cd ../app && xcodegen generate && open SailingMonitor.xcodeproj
 | 6 | 모듈이 여러 대여도 내가 고른 것에만 붙음 | 설정에서 고른 이름이 계속 유지, 로그에 `다른 모듈에 붙음` 이 없음 |
 | 7 | 워치 액션 버튼으로 앱 실행 | 설정 → 액션 버튼 → 운동 → 앱 목록에 Sailing Monitor |
 
-4번 참고: 워크아웃 세션을 쓰지 않기로 했으므로, 손목을 내려 화면이 꺼지면
-몇 초 뒤 앱이 suspend 되면서 BLE 가 끊긴다. 손목을 들면 자동 재연결된다.
-그 사이 데이터는 없다 — 의도된 트레이드오프다.
+4번 참고: 지금은 **워크아웃 세션을 쓴다** (`HKWorkoutSession(.sailing)`, 앱을 켜면
+자동 시작). 그래서 손목을 내려도 앱이 화면에 남고 BLE 도 유지된다. Always On
+상태에서는 갱신이 초당 1회로 떨어지므로, 그때는 COG·힐을 숨기고 속도만 84pt 로
+키운다. 초당 1회로도 읽을 값만 남기는 것이다.
+
+> 세션이 안 돌면 손목을 내리는 순간 시계 화면으로 넘어가고 연결이 끊긴다.
+> 워치 3페이지(설정)에서 **`항해 중 mm:ss`** 인지, **`어두워짐`** 횟수가 올라가는지로
+> 확인한다.
 
 ---
 
@@ -105,11 +132,13 @@ cd ../app && xcodegen generate && open SailingMonitor.xcodeproj
 
 ```bash
 # 보드에 이름 붙이기 (USB 연결 후 시리얼 모니터에서)
-name hojun          →  SAIL-hojun, module_id 125
+name random()       →  SAIL-random(), module_id 160
 ```
 
+이름에는 영숫자와 `-`, `_`, 그리고 괄호를 쓸 수 있다 (이 배 이름이 `random()` 이다).
+
 이름을 설정하지 않으면 MAC **뒤쪽** 2바이트로 자동 생성되므로
-(`F4:12:FA:59:75:D5` → `SAIL-75D5`), 아무 설정 없이 여러 장을 구워도 서로 구분된다.
+(`3C:DC:75:70:2F:B5` → `SAIL-2FB5`), 아무 설정 없이 여러 장을 구워도 서로 구분된다.
 앞쪽 바이트는 Espressif OUI 라 모든 보드가 같으니 쓰면 안 된다.
 
 앱에서는 **설정** 화면에서 주변 모듈 목록(가까운 순)을 보고 하나를 고른다.
@@ -163,3 +192,47 @@ name hojun          →  SAIL-hojun, module_id 125
   화면이 비어버리면 "지금 안 보이는 게 끊긴 건지 값이 0인 건지" 구분이 안 된다.
 - **모든 화면에 실측 진단값이 있다.** 기대치가 아니라 실측 Hz 를 보여줘서
   "잘 되는 것 같다"가 아니라 숫자로 판정한다.
+
+---
+
+## 지금 어디까지 왔나 (2026-08-22)
+
+### 되는 것
+
+| | |
+|---|---|
+| BLE | `SAIL-random()` 광고 · 10 Hz notify · 37바이트 확장 패킷 |
+| GPS (RAK12501) | 통신 정상 (체크섬 실패 0). **아직 실외에서 위성 잡기 전** |
+| IMU (RAK1905) | 9축 실측. 자이로 0점 자동, 힐 0점은 `level` 명령 |
+| 화면 (RAK1921) | 속도·COG·HDG·힐·9축 표시 |
+| 배터리 | GPIO1 실측 + 리튬폴리머 방전 곡선 |
+| 아이폰 앱 | 라이브 / 상세 / 설정 세 탭. 상세에 9축·GPS 전부 |
+| 워치 앱 | 1p 속도·COG·힐 · 2p 센서 상세 · 3p 설정 |
+
+### 다음에 할 것
+
+1. **밖에서 GPS 잡기** — `SAT` 가 올라가고 `SIM` 표시가 사라지는지.
+   차가운 시작은 35초쯤 걸린다. 잡히면 SOG 가 시뮬레이터의 5~7 kn 에서
+   실제 값(서 있으면 0점 몇 kn)으로 확 떨어진다.
+2. **멀티미터로 배터리 대조** — 어긋나면 `board_rak.h` 의 `kBattCorrection` 조정
+3. **SD 카드 넣고 `sd`** — 아직 카드가 안 들어가 있다
+4. **배에 달고 `level`** — 물 위에서 평형일 때 힐 0점을 다시 잡아야 한다
+
+### 미뤄둔 판단
+
+- **힐에 상보 필터** — 지금은 가속도계만 쓴다. 파도에 출렁일 수 있는데,
+  바다에서 실제로 출렁이는지 보고 나서 넣기로 했다.
+- **HDG 보정** — 기울기 보정과 자기 편각(한국 약 8도 서편)이 빠져 있다.
+  배에 달고 실제 방위와 대조한 뒤에.
+- **워치 페이지 방향** — 좌우(`.page`)로 바꿨다가 Always On 확인하느라
+  세로(`.verticalPage`)로 되돌렸다. 좌우가 운동 앱과 같은 조작이고 크라운을
+  스크롤에 쓸 수 있어 낫지만, 바꾸면 Always On 을 다시 확인해야 한다.
+- **`firmware/` (Feather) 를 계속 둘지** — 지금은 안 쓰지만 검증에는 들어간다.
+
+### 알아두면 좋은 것
+
+- **워치 Always On 이 안 걸린 적이 있다.** 코드(`isLuminanceReduced` 로직)는
+  멀쩡했고 워치를 만지니 돌아왔다. 원인은 끝내 못 가렸다.
+  설정 페이지 진단의 **`어두워짐` 횟수**가 0 이면 같은 증상이다.
+- **WiFi 비밀은 `firmware-rak/include/secrets.h`** 에 있고 `.gitignore` 로 막혀
+  있다. 아직 어디에도 안 쓴다 — 용도가 정해지면 붙인다.
