@@ -54,6 +54,21 @@ inline uint8_t moduleIDFromName(const char* name) {
     return v == 0 ? 1 : v;
 }
 
+// ── 값 없음 표식 ─────────────────────────────────────────────────────────
+//
+// GPS 가 위성을 못 잡으면 속도·침로는 "모르는 값" 이다. 0 을 보내면 배가
+// 멈춘 것과 구별되지 않고, 지어낸 값을 채우면 실측과 구별되지 않는다.
+// 그래서 물리적으로 나올 수 없는 값을 무효 표식으로 예약한다.
+//
+//   sog  0xFFFF → 655.35 kn. 배가 낼 수 있는 속도가 아니다.
+//   cog  0xFFFF → 유효 범위(0…3599) 밖이다.
+//   heel 0x80   → -128°. 뒤집힘을 넘어선 각도라 나올 수 없다.
+//
+// 확장 필드에서 이미 쓰던 방식과 같다 (hdg 0xFFFF, hdop 255).
+static constexpr uint16_t kSogInvalid = 0xFFFF;
+static constexpr uint16_t kCogInvalid = 0xFFFF;
+static constexpr int8_t   kHeelInvalid = -128;
+
 // ── 물리량 → 원시값 인코딩 ───────────────────────────────────────────────
 inline uint16_t encodeSog(float knots) {
     if (knots < 0.0f) knots = 0.0f;
@@ -105,6 +120,13 @@ struct Telemetry {
     float    cogDeg   = 0.0f;
     float    heelDeg  = 0.0f;
     float    battPct  = 100.0f;
+
+    // 값이 있는가. false 면 위 숫자는 의미가 없고 무효 표식이 나간다.
+    //   sog·cog  GPS 가 위성을 잡았을 때만 참
+    //   heel     IMU 가 살아 있을 때만 참
+    bool sogValid  = true;
+    bool cogValid  = true;
+    bool heelValid = true;
 };
 
 // GATT characteristic 12바이트 인코딩. PROTOCOL.md §3
@@ -112,9 +134,9 @@ inline void encodeTelemetryPacket(const Telemetry& t, uint8_t out[kTelemetryLen]
     out[0] = kVersion;
     out[1] = t.moduleID;
     putU32LE(&out[2], t.uptimeMs);
-    putU16LE(&out[6], encodeSog(t.sogKn));
-    putU16LE(&out[8], encodeCog(t.cogDeg));
-    out[10] = (uint8_t)encodeHeel(t.heelDeg);
+    putU16LE(&out[6], t.sogValid ? encodeSog(t.sogKn) : kSogInvalid);
+    putU16LE(&out[8], t.cogValid ? encodeCog(t.cogDeg) : kCogInvalid);
+    out[10] = (uint8_t)(t.heelValid ? encodeHeel(t.heelDeg) : kHeelInvalid);
     out[11] = encodeBatt(t.battPct);
 }
 
@@ -134,7 +156,7 @@ inline void encodeTelemetryPacket(const Telemetry& t, uint8_t out[kTelemetryLen]
 //  ------  ----  -------  ---------  --------------------------------------
 //  [0..11]  12            (기존)     PROTOCOL.md §3 그대로
 //  [12]      1   u8       flags      bit0 GPS fix / bit1 IMU / bit2 자력계
-//                                    bit3 SOG·COG 가 시뮬레이터 값
+//                                    bit3 예약 (항상 0)
 //  [13]      1   u8       sats       위성 수
 //  [14]      1   u8       hdop       HDOP × 10.  255 = 모름
 //  [15..16]  2   u16le    hdg        자력계 방위 deg × 10 (0…3599)
@@ -219,9 +241,9 @@ inline void encodeManufacturerData(const Telemetry& t, uint8_t seq, uint8_t out[
     putU16LE(&out[0], kCompanyID);
     out[2] = kVersion;
     out[3] = t.moduleID;
-    putU16LE(&out[4], encodeSog(t.sogKn));
-    putU16LE(&out[6], encodeCog(t.cogDeg));
-    out[8]  = (uint8_t)encodeHeel(t.heelDeg);
+    putU16LE(&out[4], t.sogValid ? encodeSog(t.sogKn) : kSogInvalid);
+    putU16LE(&out[6], t.cogValid ? encodeCog(t.cogDeg) : kCogInvalid);
+    out[8]  = (uint8_t)(t.heelValid ? encodeHeel(t.heelDeg) : kHeelInvalid);
     out[9]  = encodeBatt(t.battPct);
     out[10] = seq;
 }

@@ -47,15 +47,16 @@ struct SensorDetailView: View {
 
     // MARK: - 맨 위 한 줄
     //
-    // 값이 지어낸 것인지 아닌지를 제일 먼저 알린다.
-    // 지어낸 숫자를 실측으로 오해하면 바다에서 위험하다.
+    // 속도·침로에 값이 있는지 없는지를 제일 먼저 알린다.
+    // 없을 때는 아래 카드들이 숫자 대신 대시를 보여준다.
 
     private var statusBanner: some View {
-        let sim = extra?.sogIsSimulated ?? false
-        let tint = sim ? Color.sailWarn : Color.green
+        let hasFix = sample?.sogKnots != nil
+        let tint = hasFix ? Color.green : Color.sailWarn
         return HStack(spacing: 8) {
-            Image(systemName: sim ? "exclamationmark.triangle.fill" : "location.fill")
-            Text(sim ? "속도·침로는 시뮬레이터 값" : "속도·침로는 GPS 실측")
+            Image(systemName: hasFix ? "location.fill" : "location.slash.fill")
+            Text(hasFix ? "속도·침로 GPS 실측"
+                        : "위성을 못 잡았습니다 — 속도·침로 없음")
                 .font(.subheadline.weight(.medium))
             Spacer()
             if let s = sample {
@@ -74,11 +75,9 @@ struct SensorDetailView: View {
 
     private var navRow: some View {
         HStack(spacing: 8) {
-            card("SOG", sample?.sogText ?? "—", sub: "kn",
-                 warn: extra?.sogIsSimulated ?? false)
-            card("COG", sample.map { String(format: "%.0f°", $0.cogDegrees) } ?? "—",
-                 sub: sample.map { compassPoint($0.cogDegrees) } ?? " ",
-                 warn: extra?.sogIsSimulated ?? false)
+            card("SOG", sample?.sogText ?? "—", sub: "kn")
+            card("COG", sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—",
+                 sub: sample?.cogDegrees.map { compassPoint($0) } ?? " ")
             // COG 는 가는 방향(GPS), HDG 는 뱃머리 방향(자력계). 서로 다른 값이다.
             card("HDG", headingText, sub: "뱃머리")
         }

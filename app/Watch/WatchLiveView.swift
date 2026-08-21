@@ -157,13 +157,7 @@ private struct MainPage: View {
 
     private var stale: Bool { !ble.isLive }
 
-    /// 속도·침로가 지어낸 값인가. 확장 필드를 안 보내는 보드면 알 수 없으므로 false.
-    private var sogSimulated: Bool { ble.sample?.extra?.sogIsSimulated ?? false }
-    /// 힐이 지어낸 값인가. IMU 가 죽었을 때만 그렇다.
-    private var heelSimulated: Bool {
-        guard let e = ble.sample?.extra else { return false }
-        return !e.imuOK
-    }
+
 
     var body: some View {
         VStack(spacing: 0) {
@@ -193,7 +187,7 @@ private struct MainPage: View {
                     .monospacedDigit()
                     .minimumScaleFactor(0.4)
                     .lineLimit(1)
-                    .foregroundStyle(sogSimulated ? Color.sailWarn : Color.primary)
+                    .foregroundStyle(Color.primary)
                 Text("kn")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -203,10 +197,8 @@ private struct MainPage: View {
                 // Always On 에서는 속도만 남긴다.
                 if !isDim {
                     HStack(spacing: 0) {
-                        bigPair(ble.sample.map { $0.cogText } ?? "—", "COG",
-                                warn: sogSimulated)
-                        bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL",
-                                warn: heelSimulated)
+                        bigPair(ble.sample.map { $0.cogText } ?? "—", "COG")
+                        bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL")
                     }
                     Spacer(minLength: 0)
                 }

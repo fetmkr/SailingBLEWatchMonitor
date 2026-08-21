@@ -125,7 +125,7 @@ struct ModuleRow: View {
                         Text("COG").font(.caption2).foregroundStyle(.secondary)
                         Text(module.sample.cogText)
                             .font(.callout.monospacedDigit().weight(.semibold))
-                        Text(compassPoint(module.sample.cogDegrees))
+                        Text(module.sample.cogDegrees.map { compassPoint($0) } ?? " ")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
                     HStack(spacing: 4) {

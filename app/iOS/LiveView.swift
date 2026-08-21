@@ -17,13 +17,10 @@ struct LiveView: View {
 
     private var dimmed: Bool { !ble.isLive }
 
-    /// 속도·침로가 지어낸 값인가. 확장 필드를 안 보내는 보드면 알 수 없으므로 false.
-    private var sogSimulated: Bool { ble.sample?.extra?.sogIsSimulated ?? false }
-    /// 힐이 지어낸 값인가. IMU 가 죽었을 때만 그렇다.
-    private var heelSimulated: Bool {
-        guard let e = ble.sample?.extra else { return false }
-        return !e.imuOK
-    }
+    /// 값이 없는가. 없으면 sogText 가 대시를 돌려주므로 숫자를 칠할 일은 없지만,
+    /// 라벨 쪽을 흐리게 두는 데 쓴다.
+    private var noFix: Bool { ble.sample?.sogKnots == nil }
+    private var noHeel: Bool { ble.sample?.heelDegrees == nil }
 
     /// 숫자에만 칠하는 색. 라벨과 단위는 건드리지 않는다.
     private func numberStyle(_ warn: Bool) -> AnyShapeStyle {
@@ -56,7 +53,7 @@ struct LiveView: View {
                     bigValue(ble.sample?.sogText ?? "—.—",
                              unit: "knots",
                              size: 96,
-                             warn: sogSimulated)
+                             warn: false)
 
                     Spacer(minLength: 8)
 
@@ -68,13 +65,13 @@ struct LiveView: View {
                     HStack(alignment: .top, spacing: 0) {
                         smallerValue("COG",
                                      ble.sample.map { $0.cogText } ?? "—",
-                                     sub: ble.sample.map { compassPoint($0.cogDegrees) } ?? " ",
-                                     warn: sogSimulated)
+                                     sub: ble.sample?.cogDegrees.map { compassPoint($0) } ?? " ",
+                                     warn: false)
                         Divider().frame(height: 90)
                         smallerValue("HEEL",
                                      ble.sample.map { $0.heelText } ?? "—",
                                      sub: ble.sample.map { $0.heelSideLabel } ?? " ",
-                                     warn: heelSimulated)
+                                     warn: false)
                     }
 
                     Spacer(minLength: 8)

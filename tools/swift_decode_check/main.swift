@@ -96,12 +96,16 @@ for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: true).enu
     checked += 1
 
     // 물리량은 부동소수 나눗셈을 거치므로 원시값으로 되돌려 정수 비교한다.
-    let sogBack = Int((s.sogKnots * 100).rounded())
-    let cogBack = Int((s.cogDegrees * 10).rounded())
+    guard let sogKn = s.sogKnots, let cogDeg = s.cogDegrees, let heelDeg = s.heelDegrees else {
+        fail(lineNo, "값이 없다고 디코딩됨 (무효 표식이 아닌데)")
+        continue
+    }
+    let sogBack = Int((sogKn * 100).rounded())
+    let cogBack = Int((cogDeg * 10).rounded())
 
     if sogBack != sogRaw   { fail(lineNo, "sog \(sogBack) ≠ \(sogRaw)") }
     if cogBack != cogRaw   { fail(lineNo, "cog \(cogBack) ≠ \(cogRaw)") }
-    if s.heelDegrees != heelRaw { fail(lineNo, "heel \(s.heelDegrees) ≠ \(heelRaw)") }
+    if heelDeg != heelRaw { fail(lineNo, "heel \(heelDeg) ≠ \(heelRaw)") }
     if s.batteryPercent != battRaw { fail(lineNo, "batt \(s.batteryPercent) ≠ \(battRaw)") }
     if s.version != SailProtocol.version { fail(lineNo, "ver \(s.version)") }
     if s.moduleID != UInt8(moduleRaw) { fail(lineNo, "module_id \(s.moduleID) ≠ \(moduleRaw)") }
@@ -129,6 +133,22 @@ func expectSome(_ label: String, _ value: TelemetrySample?) {
 }
 
 print("\n── 잘못된 입력 방어 ──")
+
+// 값 없음 표식 — 0 이나 지어낸 값이 아니라 nil 로 와야 한다 (PROTOCOL.md §2.1)
+do {
+    // ver=1, mid=1, uptime=0, sog=FFFF, cog=FFFF, heel=80(-128), batt=50
+    let d = Data([0x01, 0x01, 0,0,0,0, 0xFF,0xFF, 0xFF,0xFF, 0x80, 50])
+    if let s = TelemetrySample.decodeTelemetryPacket(d) {
+        if s.sogKnots != nil    { fail(0, "sog 무효 표식이 nil 이 아님: \(s.sogKnots!)") }
+        if s.cogDegrees != nil  { fail(0, "cog 무효 표식이 nil 이 아님: \(s.cogDegrees!)") }
+        if s.heelDegrees != nil { fail(0, "heel 무효 표식이 nil 이 아님: \(s.heelDegrees!)") }
+        if s.batteryPercent != 50 { fail(0, "무효 표식 옆의 batt 가 깨짐") }
+        if s.sogText != "—.—"   { fail(0, "sogText 가 대시가 아님: \(s.sogText)") }
+        print("  [ OK ] 값 없음 표식 → nil, 표시 문자열은 대시")
+    } else {
+        fail(0, "무효 표식이 든 패킷을 통째로 거부함")
+    }
+}
 
 expectNil("짧은 gatt(11바이트)", TelemetrySample.decodeTelemetryPacket(Data(repeating: 1, count: 11)))
 expectNil("버전 불일치 gatt",

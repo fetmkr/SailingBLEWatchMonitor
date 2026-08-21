@@ -35,7 +35,6 @@
 #include "board_rak.h"
 #include "display_rak.h"
 #include "protocol.h"
-#include "simulator.h"
 
 using sail::Telemetry;
 
@@ -914,21 +913,18 @@ static void checkSensors() {
 
 // ── 텔레메트리 조립 ──────────────────────────────────────────────────────
 //
-// 실측이 있으면 실측을, 없으면 시뮬레이터 값을 쓴다. 항목마다 따로 정한다.
+// ★ 값이 없으면 없다고 보낸다. 지어내지 않는다.
 //
-//   SOG·COG   GPS 가 위성을 잡았을 때만 실측. 못 잡으면 시뮬레이터.
-//   HEEL      IMU 가 붙어 있으면 언제나 실측. GPS 와 상관없다.
-//   BATT      ADC 실측 (1 Hz 로만 갱신해서 캐시).
+// 예전에는 위성을 못 잡으면 시뮬레이터가 만든 5~7 kn 을 채워 보냈다.
+// 표시에 (SIM) 을 붙였지만 결국 헷갈렸다 — 화면에 그럴듯한 숫자가 떠 있으면
+// 사람은 그걸 읽는다. 0 을 보내는 것도 안 된다. 정박 중 SOG 0.0 과
+// 구별되지 않는다. 그래서 무효 표식을 보내고 받는 쪽이 숫자를 아예 안 그린다.
 //
-// 시뮬레이터 본체는 include/simulator.h (호스트에서도 검증 가능한 순수 C++).
-static float arduinoRand01() {
-    return (float)random(0, 10001) / 10000.0f; // [0, 1]
-}
+//   SOG·COG   GPS 가 위성을 잡았을 때만 값이 있다
+//   HEEL      IMU 가 살아 있으면 GPS 와 무관하게 늘 값이 있다
+//   BATT      항상 있다 (1 Hz 로 갱신되는 캐시)
 
-// 지금 무엇을 실측으로 쓰고 있는지. 로그에 그대로 찍는다.
-static bool  gUsingGpsSog  = false;
-static bool  gUsingImuHeel = false;
-static float gBattPct      = 100.0f; // 1 Hz 로 갱신
+static float gBattPct = 100.0f; // 1 Hz 로 갱신
 
 // BLE 로 함께 내보낼 확장 필드를 모은다.
 //
@@ -939,7 +935,7 @@ static sail::TelemetryExtra buildExtra() {
     e.gpsFix       = gGpsFix;
     e.imuOk        = gImuOk;
     e.magOk        = gMagOk;
-    e.sogSimulated = !gUsingGpsSog;
+    e.sogSimulated = false; // 더 이상 지어내지 않는다. 없으면 없다고 보낸다.
     e.satellites   = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
 
     // HDOP — 작을수록 정확하다. 음수는 "모름" 이라는 뜻이다.
@@ -951,8 +947,9 @@ static sail::TelemetryExtra buildExtra() {
     float hdop = gGps.hdop.isValid() ? (float)gGps.hdop.hdop() : -1.0f;
     if (!gGpsFix || hdop > 20.0f) hdop = -1.0f; // 20 넘는 HDOP 은 어차피 못 쓴다
     e.hdop = hdop;
-    e.headingDeg   = headingDeg();
-    e.pitchDeg     = gPitchDeg;
+
+    e.headingDeg = headingDeg();
+    e.pitchDeg   = gPitchDeg;
     e.accX = gAcc.x; e.accY = gAcc.y; e.accZ = gAcc.z;
     e.gyrX = gGyr.x; e.gyrY = gGyr.y; e.gyrZ = gGyr.z;
     e.magX = gMag.x; e.magY = gMag.y; e.magZ = gMag.z;
@@ -960,27 +957,21 @@ static sail::TelemetryExtra buildExtra() {
 }
 
 static Telemetry buildTelemetry(uint32_t nowMs) {
-    // 시뮬레이터는 폴백으로 늘 돌려 둔다. GPS 를 놓친 순간에도 값이 이어진다.
-    Telemetry sim = sail::sim::simulate(nowMs, &arduinoRand01);
-
     Telemetry t;
     t.moduleID = gModuleID;
     t.uptimeMs = nowMs;
 
-    gUsingGpsSog = gGpsFix;
+    t.sogValid = gGpsFix;
+    t.cogValid = gGpsFix;
     if (gGpsFix) {
         t.sogKn  = (float)gGps.speed.knots();
         t.cogDeg = (float)gGps.course.deg();
-    } else {
-        t.sogKn  = sim.sogKn;
-        t.cogDeg = sim.cogDeg;
     }
 
-    // 힐은 IMU 가 있으면 언제나 진짜 값이다.
     // 어느 축을 힐로 볼지는 보드를 배에 어떻게 다느냐에 달렸다. 지금은 roll 을
     // 쓴다. 실제로 달아 보고 pitch 가 맞으면 여기 한 줄만 바꾸면 된다.
-    gUsingImuHeel = gImuOk;
-    t.heelDeg     = gImuOk ? currentHeelDeg() : sim.heelDeg;
+    t.heelValid = gImuOk;
+    if (gImuOk) t.heelDeg = currentHeelDeg();
 
     t.battPct = gBattPct;
     return t;
@@ -1333,7 +1324,6 @@ void setup() {
     analogSetPinAttenuation(rak::kBattAdcPin, ADC_11db);
     gBattPct = batteryPercent(readBatteryVolts(nullptr));
 
-    randomSeed(esp_random());
 
     // ── 센서 붙이기 ─────────────────────────────────────────────────────
     gpsBegin();
@@ -1476,7 +1466,8 @@ void loop() {
         ds.imuOk = gImuOk;
         ds.magOk = gMagOk;
 
-        ds.sogFromGps = gUsingGpsSog;
+        ds.sogValid   = gLatest.sogValid;
+        ds.heelValid  = gLatest.heelValid;
         ds.gpsFix     = gGpsFix;
         ds.satellites = gGps.satellites.isValid() ? (int)gGps.satellites.value() : 0;
         ds.hdop       = gGps.hdop.isValid() ? (float)gGps.hdop.hdop() : -1.0f;
@@ -1489,15 +1480,18 @@ void loop() {
     //    실측처럼 보이면 나중에 바다에서 엉뚱한 판단을 하게 된다.
     if (now - lastLog >= sail::kLogPeriodMs) {
         lastLog = now;
+        char sogTxt[16], cogTxt[16], heelTxt[16];
+        if (gLatest.sogValid)  snprintf(sogTxt, sizeof(sogTxt), "%5.2f", gLatest.sogKn);
+        else                   snprintf(sogTxt, sizeof(sogTxt), "%5s", "--.--");
+        if (gLatest.cogValid)  snprintf(cogTxt, sizeof(cogTxt), "%5.1f", gLatest.cogDeg);
+        else                   snprintf(cogTxt, sizeof(cogTxt), "%5s", "---");
+        if (gLatest.heelValid) snprintf(heelTxt, sizeof(heelTxt), "%+6.1f", gLatest.heelDeg);
+        else                   snprintf(heelTxt, sizeof(heelTxt), "%6s", "---");
+
         Serial.printf(
-            "[%7.1fs] %s | SOG %5.2f kn %s | COG %5.1f° %s | HEEL %+6.1f° %s | BATT %3d%% | seq %3u | %s%s\n",
-            now / 1000.0f,
-            gFullName,
-            gLatest.sogKn,   gUsingGpsSog ? "(GPS)" : "(SIM)",
-            gLatest.cogDeg,  gUsingGpsSog ? "(GPS)" : "(SIM)",
-            gLatest.heelDeg, gUsingImuHeel ? "(IMU)" : "(SIM)",
-            (int)sail::encodeBatt(gLatest.battPct),
-            gSeq,
+            "[%7.1fs] %s | SOG %s kn | COG %s° | HEEL %s° | BATT %3d%% | seq %3u | %s%s\n",
+            now / 1000.0f, gFullName, sogTxt, cogTxt, heelTxt,
+            (int)sail::encodeBatt(gLatest.battPct), gSeq,
             gConnected ? "CONNECTED" : "ADVERTISING",
             gConnected ? (gSubscribed ? " (notify ON)" : " (notify OFF)") : "");
         printGpsLine();

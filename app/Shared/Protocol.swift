@@ -36,6 +36,15 @@ enum SailProtocol {
     /// Manufacturer Data 중 Company ID(2바이트)를 제외한 페이로드 길이
     static let manufacturerPayloadLength = 9
 
+    // ── 값 없음 표식 (PROTOCOL.md §2.1) ──────────────────────────────────
+    //
+    // GPS 가 위성을 못 잡으면 속도·침로는 "모르는 값" 이다. 0 을 보내면 배가
+    // 멈춘 것과 구별되지 않고, 지어낸 값을 채우면 실측과 구별되지 않는다.
+    // 그래서 물리적으로 나올 수 없는 값을 무효 표식으로 쓴다.
+    static let sogInvalid: UInt16 = 0xFFFF  // 655.35 kn — 나올 수 없는 속도
+    static let cogInvalid: UInt16 = 0xFFFF  // 유효 범위(0…3599) 밖
+    static let heelInvalid: Int8 = -128     // -128° — 뒤집힘을 넘어선 각도
+
     /// 펌웨어 기본 Notify 주기 (10 Hz). 보드에서 `hz` 명령으로 바꿀 수 있으므로
     /// 화면에는 이 기대치가 아니라 **실측값**을 보여준다.
     static let notifyInterval: TimeInterval = 0.1
@@ -116,12 +125,6 @@ struct TelemetryExtra: Equatable {
     /// 자력계가 살아 있나
     var magOK: Bool
 
-    /// **참이면 `sogKnots` 와 `cogDegrees` 는 지어낸 값이다.**
-    ///
-    /// 위성을 못 잡았을 때 값을 비워 보낼 방법이 없어서 시뮬레이터로 채운다.
-    /// 화면에 반드시 표시할 것. 지어낸 숫자를 실측으로 오해하면 위험하다.
-    var sogIsSimulated: Bool
-
     var satellites: Int
     /// 작을수록 정확. `nil` 이면 아직 모름.
     var hdop: Double?
@@ -150,9 +153,12 @@ struct TelemetrySample: Equatable {
     var moduleID: UInt8
     /// GATT 패킷에만 존재. 광고 경로에서는 nil.
     var uptimeMs: UInt32?
-    var sogKnots: Double
-    var cogDegrees: Double
-    var heelDegrees: Int
+    /// **nil 이면 값이 없다는 뜻이다** (GPS 가 위성을 못 잡음).
+    /// 0 과 구별해야 한다 — 0.0 kn 은 "정박 중" 이라는 유효한 값이다.
+    var sogKnots: Double?
+    var cogDegrees: Double?
+    /// nil 이면 IMU 가 죽은 것이다.
+    var heelDegrees: Int?
     var batteryPercent: Int
     /// 광고 경로에만 존재. GATT 경로에서는 nil.
     var sequence: UInt8?
@@ -167,8 +173,9 @@ struct TelemetrySample: Equatable {
 
     /// 힐 방향 표기 — 좌현(port) 음수 / 우현(starboard) 양수
     var heelSideLabel: String {
-        if heelDegrees > 0 { return "STBD" }
-        if heelDegrees < 0 { return "PORT" }
+        guard let h = heelDegrees else { return " " }
+        if h > 0 { return "STBD" }
+        if h < 0 { return "PORT" }
         return "—"
     }
 }
@@ -220,7 +227,6 @@ extension TelemetrySample {
                 gpsFix:         flags & 0x01 != 0,
                 imuOK:          flags & 0x02 != 0,
                 magOK:          flags & 0x04 != 0,
-                sogIsSimulated: flags & 0x08 != 0,
                 satellites:     Int(sats),
                 hdop:           hdopRaw == 255 ? nil : Double(hdopRaw) / 10.0,
                 headingDegrees: hdgRaw == 0xFFFF ? nil : Double(hdgRaw) / 10.0,
@@ -233,9 +239,9 @@ extension TelemetrySample {
             version: ver,
             moduleID: moduleID,
             uptimeMs: uptime,
-            sogKnots: Double(sogRaw) / 100.0,
-            cogDegrees: Double(cogRaw) / 10.0,
-            heelDegrees: Int(heelRaw),
+            sogKnots: sogRaw == SailProtocol.sogInvalid ? nil : Double(sogRaw) / 100.0,
+            cogDegrees: cogRaw == SailProtocol.cogInvalid ? nil : Double(cogRaw) / 10.0,
+            heelDegrees: heelRaw == SailProtocol.heelInvalid ? nil : Int(heelRaw),
             batteryPercent: Int(battRaw),
             sequence: nil,
             receivedAt: date,
@@ -269,9 +275,9 @@ extension TelemetrySample {
             version: ver,
             moduleID: moduleID,
             uptimeMs: nil,
-            sogKnots: Double(sogRaw) / 100.0,
-            cogDegrees: Double(cogRaw) / 10.0,
-            heelDegrees: Int(heelRaw),
+            sogKnots: sogRaw == SailProtocol.sogInvalid ? nil : Double(sogRaw) / 100.0,
+            cogDegrees: cogRaw == SailProtocol.cogInvalid ? nil : Double(cogRaw) / 10.0,
+            heelDegrees: heelRaw == SailProtocol.heelInvalid ? nil : Int(heelRaw),
             batteryPercent: Int(battRaw),
             sequence: seq,
             receivedAt: date
@@ -282,9 +288,14 @@ extension TelemetrySample {
 // MARK: - 표시용 포매팅
 
 extension TelemetrySample {
-    var sogText: String  { String(format: "%.2f", sogKnots) }
-    var cogText: String  { String(format: "%.1f°", cogDegrees) }
-    var heelText: String { String(format: "%+d°", heelDegrees) }
+    /// 값이 없으면 숫자 대신 대시를 보여준다.
+    /// **0 을 쓰면 안 된다** — 정박 중 0.0 kn 과 구별되지 않는다.
+    var sogText: String  { sogKnots.map { String(format: "%.2f", $0) } ?? "—.—" }
+    var cogText: String  { cogDegrees.map { String(format: "%.1f°", $0) } ?? "—" }
+    var heelText: String { heelDegrees.map { String(format: "%+d°", $0) } ?? "—" }
+
+    /// GPS 값이 있는가. 화면에서 숫자를 그릴지 말지 판단할 때 쓴다.
+    var hasGpsFix: Bool { sogKnots != nil }
 }
 
 /// 침로를 나침반 방위로. 스캐너/라이브 탭 보조 표시용.

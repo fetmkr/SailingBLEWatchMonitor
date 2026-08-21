@@ -149,34 +149,35 @@ void displayUpdate(const DisplayState& s) {
     gOled.drawHLine(0, kLineY, kW);
 
     // ── 속도 — 제일 크게 ─────────────────────────────────────────────────
-    snprintf(buf, sizeof(buf), "%.2f", s.sogKn);
-    gOled.setFont(u8g2_font_logisoso18_tn); // 숫자와 마침표만 있는 폰트
-    drawChecked(2, kSogBaseline, buf, "SOG");
-
-    gOled.setFont(u8g2_font_6x10_tf);
-    gOled.drawStr(64, kSogBaseline, "kn");
-
-    // 이 속도를 얼마나 믿을 수 있는지.
-    //   SIM     위성이 하나도 안 보인다 → 시뮬레이터로 지어낸 값
-    //   SIM 3   위성 3개가 보이지만 아직 위치를 못 정했다 (잡는 중)
-    //   H1.2    잡았다. HDOP 이 1.2 (작을수록 정확)
-    //   FIX     잡았지만 HDOP 을 아직 모름
     //
-    // 위성 수를 같이 띄우는 이유: 밖에 나가서 처음 잡을 때 35초쯤 걸리는데,
+    // ★ 값이 없으면 숫자를 아예 안 그린다. 그럴듯한 숫자가 떠 있으면 사람은
+    //   그걸 읽는다. 예전에는 시뮬레이터 값에 SIM 을 붙여 띄웠는데 결국
+    //   헷갈렸다. 0 도 안 된다 — 정박 중 0.0 kn 과 구별되지 않는다.
+    if (s.sogValid) {
+        snprintf(buf, sizeof(buf), "%.2f", s.sogKn);
+        gOled.setFont(u8g2_font_logisoso18_tn); // 숫자와 마침표만 있는 폰트
+        drawChecked(2, kSogBaseline, buf, "SOG");
+
+        gOled.setFont(u8g2_font_6x10_tf);
+        gOled.drawStr(64, kSogBaseline, "kn");
+    } else {
+        // 큰 폰트는 숫자 전용(tn)이라 글자를 못 그린다. 작은 폰트로 바꾼다.
+        gOled.setFont(u8g2_font_6x10_tf);
+        gOled.drawStr(2, kSogBaseline, "NO GPS FIX");
+    }
+
+    // 위성이 몇 개나 보이는지. 밖에서 처음 잡을 때 35초쯤 걸리는데,
     // 그동안 아무 변화가 없으면 고장인지 기다리는 중인지 알 수가 없다.
     // 0 → 1 → 3 → 6 으로 늘어나는 게 보이면 제대로 가고 있다는 뜻이다.
-    //
-    // 지어낸 값을 실측으로 오해하면 바다에서 위험하다. 그래서 SIM 일 때만
-    // 흰 박스에 검은 글씨로 뒤집어 그린다. 멀리서도 바로 눈에 띈다.
-    if (!s.sogFromGps) {
-        if (s.satellites > 0) snprintf(buf, sizeof(buf), "SIM %d", s.satellites);
-        else                  snprintf(buf, sizeof(buf), "SIM");
-
-        const int tw = gOled.getStrWidth(buf);
+    gOled.setFont(u8g2_font_6x10_tf);
+    if (!s.sogValid) {
+        char tag[16];
+        snprintf(tag, sizeof(tag), "SAT %d", s.satellites);
+        const int tw = gOled.getStrWidth(tag);
         const int bx = kW - tw - 6;
         gOled.drawBox(bx, kTagBaseline - 9, tw + 5, 12);
         gOled.setDrawColor(0); // 박스 위에는 검은 글씨
-        gOled.drawStr(bx + 2, kTagBaseline, buf);
+        gOled.drawStr(bx + 2, kTagBaseline, tag);
         gOled.setDrawColor(1); // 원래대로 돌려놓지 않으면 다음 그리기가 다 뒤집힌다
     } else {
         if (s.hdop >= 0.0f) snprintf(buf, sizeof(buf), "H%.1f", s.hdop);
@@ -186,7 +187,8 @@ void displayUpdate(const DisplayState& s) {
 
     // ── 침로와 방위 ──────────────────────────────────────────────────────
     // COG 는 GPS 가 준 "가는 방향", HDG 는 자력계가 준 "뱃머리 방향".
-    snprintf(buf, sizeof(buf), "COG %03d", (int)(s.cogDeg + 0.5f) % 360);
+    if (s.sogValid) snprintf(buf, sizeof(buf), "COG %03d", (int)(s.cogDeg + 0.5f) % 360);
+    else            snprintf(buf, sizeof(buf), "COG ---");
     drawChecked(2, kCogBaseline, buf, "COG");
 
     if (s.headingDeg >= 0.0f) {
@@ -198,10 +200,10 @@ void displayUpdate(const DisplayState& s) {
 
     // ── 자세 ─────────────────────────────────────────────────────────────
     gOled.setFont(u8g2_font_5x7_tf);
-    if (s.imuOk) {
+    if (s.heelValid) {
         snprintf(buf, sizeof(buf), "HEEL%+6.1f  PITCH%+6.1f", s.heelDeg, s.pitchDeg);
     } else {
-        snprintf(buf, sizeof(buf), "HEEL%+6.1f  NO IMU", s.heelDeg);
+        snprintf(buf, sizeof(buf), "HEEL  ---   NO IMU");
     }
     drawChecked(2, kAttBaseline, buf, "자세");
 

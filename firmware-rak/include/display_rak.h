@@ -33,9 +33,10 @@ struct DisplayState {
     bool  imuOk = false;
     bool  magOk = false;
 
-    // ── GPS 상태 ─────────────────────────────────────────────────────────
-    // sogFromGps 가 false 면 시뮬레이터로 채운 값이라 화면에 SIM 을 띄운다.
-    bool  sogFromGps = false;
+    // ── 값이 있는가 ──────────────────────────────────────────────────────
+    // ★ 없으면 숫자를 그리지 않는다. 지어낸 값도, 0 도 보여주지 않는다.
+    bool  sogValid  = false; // GPS 가 위성을 잡았나
+    bool  heelValid = false; // IMU 가 살아 있나
     bool  gpsFix     = false;
     int   satellites = 0;
     float hdop       = -1.0f; // 음수면 아직 모름. 작을수록 정확하다.
