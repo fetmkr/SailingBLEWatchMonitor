@@ -1,6 +1,7 @@
 //
 //  LiveView.swift
-//  항해 중 보는 화면. 속도 · COG · 힐 세 개만 크게, 스크롤 없이 한 화면.
+//  항해 중 보는 화면. 속도 · HDG · 힐 세 개만 크게, 스크롤 없이 한 화면.
+//  요트 계기처럼 뱃머리 방향을 크게 둔다. COG 는 상세 화면에 있다.
 //
 //  진단값(수신율·uptime·RSSI·로그)은 설정 탭으로 뺐다.
 //  10 Hz 로 갱신되는 숫자에 전환 애니메이션을 걸면 글자가 계속 꿈틀거려서
@@ -61,11 +62,16 @@ struct LiveView: View {
 
                     Spacer(minLength: 8)
 
-                    // COG · 힐
+                    // 방위 · 힐
+                    //
+                    // 요트 계기처럼 뱃머리 방향(HDG)을 크게 둔다. 멈춰 있거나
+                    // 느릴 때 GPS 침로는 빙빙 돌지만 방위는 안 흔들린다.
+                    // 자력계가 없는 보드면 라벨이 COG 로 바뀐다.
                     HStack(alignment: .top, spacing: 0) {
-                        smallerValue("COG",
-                                     ble.sample.map { $0.cogText } ?? "—",
-                                     sub: ble.sample?.cogDegrees.map { compassPoint($0) } ?? " ",
+                        let bearing = ble.sample?.primaryBearing
+                        smallerValue(bearing?.label ?? "HDG",
+                                     bearing?.text ?? "—",
+                                     sub: bearing?.degrees.map { compassPoint($0) } ?? " ",
                                      warn: false)
                         Divider().frame(height: 90)
                         smallerValue("HEEL",

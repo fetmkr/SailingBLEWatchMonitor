@@ -7,8 +7,9 @@
 //    Digital Crown 이다. 세로 페이지(verticalPage)로 두면 크라운이 페이지를
 //    넘겨 버려서 페이지 안을 스크롤할 때 손가락만 써야 한다.
 //    좌우로 두면 크라운이 페이지 안 스크롤에 쓰인다.
-//    1페이지 — 항해 중 보는 화면. 속도 · COG · 힐 세 개만, 최대한 크게.
-//    2페이지 — 센서 상세: HDG · PITCH · 위성 · 9축
+//    1페이지 — 항해 중 보는 화면. 속도 · HDG · 힐 세 개만, 최대한 크게.
+//               요트 계기처럼 뱃머리 방향을 크게 둔다. COG 는 2페이지.
+//    2페이지 — 센서 상세: HDG · COG · 위성 · PITCH · 9축
 //    3페이지 — 설정: 모듈 선택 / 세션 / 진단
 
 //
@@ -37,13 +38,12 @@ struct WatchLiveView: View {
 
 // MARK: - 2페이지 · 센서 상세
 //
-// 1페이지는 속도·COG·힐 세 개만 크게 둔다. 그 밖의 값은 여기에 모은다.
+// 1페이지는 속도·HDG·힐 세 개만 크게 둔다. 그 밖의 값은 여기에 모은다.
 // 시계는 화면이 작다. Ultra 에서는 스크롤 없이 한 화면에 들어오도록 줄을
 // 아꼈고, 작은 시계에서는 알아서 스크롤된다.
 //
-// "시뮬레이터 값" 이라는 안내 줄은 뺐다. 1페이지에서 SOG 숫자가 이미 빨갛게
-// 뜨고, 이 페이지에서는 위성 숫자가 빨간 것이 같은 뜻이기 때문이다.
-// (위성을 못 잡았으니 속도·침로를 지어내고 있다)
+// 위성을 못 잡으면 SAT 숫자가 빨갛게 뜬다. 그때 1페이지의 속도는 대시로
+// 나온다 — 시뮬레이터는 없앴고, 값이 없으면 숫자를 아예 안 그린다.
 
 private struct DebugPage: View {
     @EnvironmentObject private var ble: BLEManager
@@ -54,14 +54,23 @@ private struct DebugPage: View {
         ScrollView {
             VStack(spacing: 4) {
                 if let e = extra {
+                    // 방향 두 개를 나란히 둔다.
+                    //   HDG 뱃머리가 보는 방향 (자력계). 멈춰 있어도 나온다.
+                    //   COG 배가 실제로 가는 방향 (GPS). 멈추면 의미가 없다.
+                    // 조류와 바람 때문에 둘이 벌어진다. 1페이지에는 HDG 만 크게 둔다.
                     HStack(spacing: 0) {
                         pair(e.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—",
                              "HDG")
-                        pair(String(format: "%+.1f°", e.pitchDegrees), "PITCH")
+                        pair(ble.sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—",
+                             "COG")
                     }
                     HStack(spacing: 0) {
                         pair("\(e.satellites)", "SAT", warn: !e.gpsFix)
                         pair(e.hdop.map { String(format: "%.1f", $0) } ?? "—", "HDOP")
+                    }
+                    HStack(spacing: 0) {
+                        pair(String(format: "%+.1f°", e.pitchDegrees), "PITCH")
+                        Color.clear.frame(maxWidth: .infinity)
                     }
 
                     if e.imuOK {
@@ -92,7 +101,7 @@ private struct DebugPage: View {
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    // 1페이지의 COG/HEEL 보다 조금 작게 잡는다.
+    // 1페이지의 HDG/HEEL 보다 조금 작게 잡는다.
     // 오른쪽 위에 시스템 시계가 얹히는 만큼 세로 자리가 줄어들기 때문이다.
     private func pair(_ value: String, _ label: String, warn: Bool = false) -> some View {
         VStack(spacing: -2) {
@@ -196,8 +205,12 @@ private struct MainPage: View {
 
                 // Always On 에서는 속도만 남긴다.
                 if !isDim {
+                    // 요트 계기처럼 뱃머리 방향(HDG)을 둔다. 멈춰 있거나 느릴 때
+                    // GPS 침로는 빙빙 돌지만 방위는 안 흔들린다. 침로도 보고
+                    // 싶으면 상세 페이지에 나란히 있다.
+                    let bearing = ble.sample?.primaryBearing
                     HStack(spacing: 0) {
-                        bigPair(ble.sample.map { $0.cogText } ?? "—", "COG")
+                        bigPair(bearing?.text ?? "—", bearing?.label ?? "HDG")
                         bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL")
                     }
                     Spacer(minLength: 0)

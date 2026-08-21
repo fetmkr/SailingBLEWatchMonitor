@@ -112,12 +112,33 @@ dead 0.10
 
 ---
 
-## 5. 앱에 반영
+## 5. 앱 설치 ← 코드는 끝났고 올리기만 하면 된다
 
-- [ ] 아이폰·워치에서 다듬은 값이 제대로 보이는지 확인
-- [ ] 워치는 Xcode ⌘R 로 올려야 한다 (명령줄 안 됨)
+메인 화면에서 COG 를 **HDG(뱃머리 방향)** 로 바꿨다. 요트 계기가 하는 방식이다.
+멈춰 있거나 느릴 때 GPS 침로는 빙빙 돌지만 자력계 방위는 안 흔들린다.
+COG 는 상세 화면(아이폰) / 2페이지(워치)에 HDG 와 나란히 있다.
 
----
+자력계가 없는 보드(옛 Feather)에서는 **라벨이 저절로 COG 로 바뀐다.**
+같은 라벨로 다른 값을 보여주면 읽는 사람이 속기 때문이다.
+
+빌드는 통과했다. 어제는 아이폰·워치가 연결돼 있지 않아 설치를 못 했다.
+
+- [ ] 아이폰 연결 후 설치
+
+```bash
+cd app
+DD=$(mktemp -d)
+xcodebuild -project SailingMonitor.xcodeproj -scheme SailingMonitor \
+  -destination 'id=5D03F469-2C6D-5505-91BF-EB8473431364' \
+  -configuration Debug -derivedDataPath "$DD" -allowProvisioningUpdates build
+xcrun devicectl device install app \
+  --device 5D03F469-2C6D-5505-91BF-EB8473431364 \
+  "$DD/Build/Products/Debug-iphoneos/SailingMonitor.app"
+```
+
+- [ ] 워치는 **Xcode 에서만 된다.** 스킴 `SailingMonitor Watch App` + 기기 워치 → ⌘R
+      (기기 목록에 워치가 안 보이면 스킴을 먼저 바꿀 것)
+- [ ] 두 화면 다 HDG 로 나오는지 눈으로 확인
 
 ## 미뤄둔 것
 
