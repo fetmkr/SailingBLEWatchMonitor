@@ -145,9 +145,31 @@ static constexpr int   kBattAdcPin    = 1;
 static constexpr float kBattDivider   = 0.6f;
 static constexpr float kBattCorrection = 1.0f; // 실측 대조 후 조정
 
-// 리튬폴리머 한 셀 기준. 방전 곡선은 직선이 아니라서 이 선형 환산은
-// 어림값이다. 정확한 잔량이 필요해지면 곡선 표로 바꾼다.
 static constexpr float kBattFullV  = 4.20f;
-static constexpr float kBattEmptyV = 3.30f;
+static constexpr float kBattEmptyV = 3.00f;
+
+// ── 리튬폴리머 방전 곡선 ─────────────────────────────────────────────────
+//
+// 전압과 잔량은 직선 관계가 아니다. 3.3~4.2 V 를 직선으로 잡으면 낮은
+// 전압에서 잔량을 크게 부풀린다.
+//
+//     3.70 V  →  직선 계산 44 %,  실제로는 15 % 밖에 안 남았다
+//     3.50 V  →  직선 계산 22 %,  실제로는  5 %
+//
+// 배가 바다에 있는데 곧 꺼질 배터리가 44 % 로 보이면 위험하다.
+// 그래서 꺾은선 표로 잡고 사이는 직선 보간한다.
+//
+// 전압이 높은 것부터 낮은 순으로 적을 것 (batteryPercent 가 그 순서를 가정한다).
+struct BattPoint {
+    float volts;
+    float percent;
+};
+
+static constexpr BattPoint kBattCurve[] = {
+    {4.20f, 100.0f}, {4.06f, 90.0f}, {3.98f, 80.0f}, {3.92f, 70.0f},
+    {3.87f, 60.0f},  {3.82f, 50.0f}, {3.79f, 40.0f}, {3.77f, 30.0f},
+    {3.74f, 20.0f},  {3.68f, 10.0f}, {3.45f, 5.0f},  {3.00f, 0.0f},
+};
+static constexpr int kBattCurveLen = sizeof(kBattCurve) / sizeof(kBattCurve[0]);
 
 } // namespace rak

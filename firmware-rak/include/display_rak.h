@@ -17,20 +17,28 @@ struct DisplayState {
     const char* userName = "";    // "2FB5" — 접두사 뺀 이름
     bool  bleConnected   = false;
     bool  bleNotifying   = false;
+    float battPct        = 100.0f;
 
+    // ── 항해 값 ──────────────────────────────────────────────────────────
     float sogKn   = 0.0f;
-    float cogDeg  = 0.0f;
-    float heelDeg = 0.0f;
-    float battPct = 100.0f;
+    float cogDeg  = 0.0f;   // GPS 침로 — 배가 실제로 가는 방향
+    float headingDeg = -1.0f; // 자력계 방위 — 뱃머리가 보는 방향. 음수면 없음
+    float heelDeg  = 0.0f;
+    float pitchDeg = 0.0f;
 
-    // 값의 출처. false 면 시뮬레이터로 채운 값이라 화면에 SIM 을 띄운다.
-    bool sogFromGps  = false;
-    bool heelFromImu = false;
+    // ── 9축 원본 ─────────────────────────────────────────────────────────
+    float accX = 0.0f, accY = 0.0f, accZ = 0.0f; // g
+    float gyrX = 0.0f, gyrY = 0.0f, gyrZ = 0.0f; // °/s
+    float magX = 0.0f, magY = 0.0f, magZ = 0.0f; // µT
+    bool  imuOk = false;
+    bool  magOk = false;
 
-    int  satellites = 0;
-    bool gpsFix     = false;
-
-    uint32_t uptimeMs = 0;
+    // ── GPS 상태 ─────────────────────────────────────────────────────────
+    // sogFromGps 가 false 면 시뮬레이터로 채운 값이라 화면에 SIM 을 띄운다.
+    bool  sogFromGps = false;
+    bool  gpsFix     = false;
+    int   satellites = 0;
+    float hdop       = -1.0f; // 음수면 아직 모름. 작을수록 정확하다.
 };
 
 // 0x3C 가 응답하면 화면을 켜고 true. 없으면 false (그래도 정상 동작).
@@ -43,6 +51,12 @@ bool displayPresent();
 void displayBootMessage(const char* line1, const char* line2);
 
 // 한 장면 그리기. 4 Hz 로 부르면 충분하다.
+// 화면이 없거나 응답이 끊기면 아무 일도 하지 않고 바로 돌아온다.
 void displayUpdate(const DisplayState& s);
+
+// 화면이 아직 붙어 있는지 확인한다. 1 Hz 로 부른다.
+// 사라졌으면 그리기를 멈추고, 다시 꽂히면 알아서 붙는다.
+// 화면 하나 때문에 배가 계기를 통째로 잃으면 안 된다.
+void displayHealthCheck();
 
 } // namespace sail

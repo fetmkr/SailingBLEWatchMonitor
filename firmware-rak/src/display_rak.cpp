@@ -12,13 +12,25 @@ namespace {
 
 // ── 화면 객체 ────────────────────────────────────────────────────────────
 //
-// 생성자 인자 순서는 (회전, reset, clock, data) 다.
-// ESP32 에서 U8g2 는 이 핀들이 채워져 있으면 Wire.begin(data, clock) 을
-// 대신 불러 준다. 비워 두면 보드 기본 I2C 핀으로 가버려서 화면이 안 켜진다.
-//   근거: U8g2/src/U8x8lib.cpp 의 U8X8_MSG_BYTE_INIT 처리
-//         U8g2lib.h:1695 생성자
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C gOled(
-    U8G2_R0, U8X8_PIN_NONE, rak::kI2C1_SCL, rak::kI2C1_SDA);
+// ★ I2C 핀을 U8g2 생성자에 넘기면 안 된다. 실제로 넘겼다가 보드가 통째로
+//   멈췄다.
+//
+//   U8g2 는 넘겨받은 핀을 초기화할 때 pinMode(핀, OUTPUT) 으로 바꿔 버린다.
+//     U8x8lib.cpp  U8X8_MSG_GPIO_AND_DELAY_INIT
+//                  → i < U8X8_PIN_OUTPUT_CNT 이면 pinMode(pin, OUTPUT)
+//     clib/u8x8.h  U8X8_PIN_I2C_CLOCK = 12, U8X8_PIN_I2C_DATA = 13,
+//                  U8X8_PIN_OUTPUT_CNT = 16   → 둘 다 OUTPUT 대상이다
+//
+//   I2C 는 오픈드레인이어야 하는데 푸시풀 출력이 되면 버스가 죽는다.
+//   같은 버스에 매달린 IMU 까지 함께 멈춰서 펌웨어가 통째로 정지했다.
+//
+// 대신 main 이 먼저 Wire.begin(SDA, SCL, 400000) 을 해 두면, U8g2 가 부르는
+// Wire.begin() 은 "이미 초기화됨" 으로 그냥 통과한다.
+//     Wire.cpp  if (i2cIsInit(num)) { started = true; goto end; }
+// 그래서 핀을 안 넘겨도 우리가 연 GPIO9/40 을 그대로 쓴다.
+//
+// ※ 따라서 displayBegin() 은 반드시 Wire.begin() 뒤에 불러야 한다.
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C gOled(U8G2_R0);
 
 bool gOk = false;
 
@@ -26,27 +38,36 @@ bool gOk = false;
 //
 //        0                                      127
 //    0   ┌──────────────────────────────────────┐
-//        │ 2FB5                     BLE*   94%  │  5x7,  기준선 y=7
+//    7   │ random()               BLE*     94%  │  5x7
 //    9   ├──────────────────────────────────────┤
-//        │                                 SIM  │  5x7,  기준선 y=22
-//        │  6.38                            kn  │  큰숫자, 기준선 y=38
-//   42   ├──────────────────────────────────────┤
-//        │ COG 045 SIM      HEEL  -0.2          │  6x10, 기준선 y=53
-//        │ SAT 0 NOFIX          UP 1234s        │  5x7,  기준선 y=63
-//   63   └──────────────────────────────────────┘
+//   27   │                             ██SIM██  │  6x10 반전 (SIM 일 때만)
+//   30   │  6.38 kn                             │  logisoso18 — 제일 크게
+//   41   │ COG 045       HDG 344                │  6x10
+//   49   │ HEEL  -1.9   PITCH  +2.9             │  5x7
+//   56   │ GYR  -0.5  +0.9  +1.1                │  5x7
+//   63   │ ACC +0.04 -0.08 -1.00                │  5x7
+//        └──────────────────────────────────────┘
 //
-// 배에서 정작 눈에 들어오는 건 속도 하나다. 그래서 속도만 큰 글씨를 쓰고
+// 배에서 제일 먼저 눈에 들어와야 하는 건 속도다. 그래서 SOG 만 18px 로 쓰고
 // 나머지는 작게 깐다.
+//
+//   COG 는 배가 실제로 가는 방향 (GPS). 멈춰 있으면 안 나온다.
+//   HDG 는 뱃머리가 보는 방향 (자력계). 멈춰 있어도 나온다.
+//   요트에서는 이 둘이 다르다. 그래서 나란히 보여준다.
+//   자력계 원본 세 축은 HDG 로 대신하고 화면에서는 뺐다 (시리얼에는 나온다).
+//
+// SOG 는 왼쪽, SIM 표시는 오른쪽이라 세로로 겹쳐도 서로 침범하지 않는다.
 constexpr int kW = 128;
 constexpr int kH = 64;
 
 constexpr int kTopBaseline = 7;
-constexpr int kLine1Y      = 9;  // 상태줄 아래 가로선
-constexpr int kSrcBaseline = 22; // 속도 출처(SIM) 표시
-constexpr int kSogBaseline = 38;
-constexpr int kLine2Y      = 42;
-constexpr int kMidBaseline = 53;
-constexpr int kBotBaseline = 63;
+constexpr int kLineY       = 9;  // 상태줄 아래 가로선
+constexpr int kTagBaseline = 27; // 속도 신뢰도 (SIM / H1.2 / FIX)
+constexpr int kSogBaseline = 30;
+constexpr int kCogBaseline = 41;
+constexpr int kAttBaseline = 49; // 힐 / 피치
+constexpr int kGyrBaseline = 56;
+constexpr int kAccBaseline = 63;
 
 // 5x7 폰트는 글자당 5px, 6x10 은 6px 이다. 오른쪽 정렬을 이 폭으로 계산한다.
 constexpr int kW5 = 5;
@@ -87,6 +108,17 @@ bool displayBegin() {
     return true;
 }
 
+void displayHealthCheck() {
+    const bool now = displayPresent();
+    if (gOk && !now) {
+        gOk = false;
+        Serial.println("[OLED] 응답이 끊겼습니다 — 그리기를 멈춥니다 (나머지는 계속 돕니다)");
+    } else if (!gOk && now) {
+        Serial.println("[OLED] 다시 보입니다 — 붙입니다");
+        displayBegin();
+    }
+}
+
 void displayBootMessage(const char* line1, const char* line2) {
     if (!gOk) return;
     gOled.clearBuffer();
@@ -100,56 +132,89 @@ void displayBootMessage(const char* line1, const char* line2) {
 void displayUpdate(const DisplayState& s) {
     if (!gOk) return;
 
-    char buf[32];
+    char buf[40];
     gOled.clearBuffer();
 
     // ── 상태줄 ───────────────────────────────────────────────────────────
     gOled.setFont(u8g2_font_5x7_tf);
     drawChecked(2, kTopBaseline, s.userName, "이름");
 
-    // BLE 상태. 별표는 앱이 notify 를 구독 중이라는 뜻.
+    // 별표는 앱이 notify 를 구독 중이라는 뜻.
     const char* ble = s.bleConnected ? (s.bleNotifying ? "BLE*" : "BLE") : "ADV";
     gOled.drawStr(rightX5(9), kTopBaseline, ble);
 
     snprintf(buf, sizeof(buf), "%3d%%", (int)(s.battPct + 0.5f));
     gOled.drawStr(rightX5(4), kTopBaseline, buf);
 
-    gOled.drawHLine(0, kLine1Y, kW);
+    gOled.drawHLine(0, kLineY, kW);
 
     // ── 속도 — 제일 크게 ─────────────────────────────────────────────────
-    // 시뮬레이터로 채운 값이면 SIM 을 띄운다. 이게 없으면 지어낸 숫자를
-    // 실측으로 오해하게 된다.
+    snprintf(buf, sizeof(buf), "%.2f", s.sogKn);
+    gOled.setFont(u8g2_font_logisoso18_tn); // 숫자와 마침표만 있는 폰트
+    drawChecked(2, kSogBaseline, buf, "SOG");
+
+    gOled.setFont(u8g2_font_6x10_tf);
+    gOled.drawStr(64, kSogBaseline, "kn");
+
+    // 이 속도를 얼마나 믿을 수 있는지.
+    //   SIM     위성이 하나도 안 보인다 → 시뮬레이터로 지어낸 값
+    //   SIM 3   위성 3개가 보이지만 아직 위치를 못 정했다 (잡는 중)
+    //   H1.2    잡았다. HDOP 이 1.2 (작을수록 정확)
+    //   FIX     잡았지만 HDOP 을 아직 모름
+    //
+    // 위성 수를 같이 띄우는 이유: 밖에 나가서 처음 잡을 때 35초쯤 걸리는데,
+    // 그동안 아무 변화가 없으면 고장인지 기다리는 중인지 알 수가 없다.
+    // 0 → 1 → 3 → 6 으로 늘어나는 게 보이면 제대로 가고 있다는 뜻이다.
+    //
+    // 지어낸 값을 실측으로 오해하면 바다에서 위험하다. 그래서 SIM 일 때만
+    // 흰 박스에 검은 글씨로 뒤집어 그린다. 멀리서도 바로 눈에 띈다.
     if (!s.sogFromGps) {
-        gOled.setFont(u8g2_font_5x7_tf);
-        gOled.drawStr(rightX5(3), kSrcBaseline, "SIM");
+        if (s.satellites > 0) snprintf(buf, sizeof(buf), "SIM %d", s.satellites);
+        else                  snprintf(buf, sizeof(buf), "SIM");
+
+        const int tw = gOled.getStrWidth(buf);
+        const int bx = kW - tw - 6;
+        gOled.drawBox(bx, kTagBaseline - 9, tw + 5, 12);
+        gOled.setDrawColor(0); // 박스 위에는 검은 글씨
+        gOled.drawStr(bx + 2, kTagBaseline, buf);
+        gOled.setDrawColor(1); // 원래대로 돌려놓지 않으면 다음 그리기가 다 뒤집힌다
+    } else {
+        if (s.hdop >= 0.0f) snprintf(buf, sizeof(buf), "H%.1f", s.hdop);
+        else                snprintf(buf, sizeof(buf), "FIX");
+        gOled.drawStr(kW - gOled.getStrWidth(buf) - 2, kTagBaseline, buf);
     }
 
-    snprintf(buf, sizeof(buf), "%.2f", s.sogKn);
-    gOled.setFont(u8g2_font_logisoso24_tn); // 숫자와 마침표만 있는 폰트
-    gOled.drawStr(2, kSogBaseline, buf);
-
-    gOled.setFont(u8g2_font_6x10_tf);
-    gOled.drawStr(rightX6(2), kSogBaseline, "kn");
-
-    gOled.drawHLine(0, kLine2Y, kW);
-
-    // ── 침로와 힐 ────────────────────────────────────────────────────────
-    gOled.setFont(u8g2_font_6x10_tf);
+    // ── 침로와 방위 ──────────────────────────────────────────────────────
+    // COG 는 GPS 가 준 "가는 방향", HDG 는 자력계가 준 "뱃머리 방향".
     snprintf(buf, sizeof(buf), "COG %03d", (int)(s.cogDeg + 0.5f) % 360);
-    drawChecked(2, kMidBaseline, buf, "COG");
+    drawChecked(2, kCogBaseline, buf, "COG");
 
-    // 힐은 IMU 가 붙어 있으면 GPS 와 상관없이 늘 실측이다.
-    snprintf(buf, sizeof(buf), "HEEL%+5.1f", s.heelDeg);
-    gOled.drawStr(rightX6(9), kMidBaseline, buf);
+    if (s.headingDeg >= 0.0f) {
+        snprintf(buf, sizeof(buf), "HDG %03d", (int)(s.headingDeg + 0.5f) % 360);
+    } else {
+        snprintf(buf, sizeof(buf), "HDG ---");
+    }
+    gOled.drawStr(66, kCogBaseline, buf);
 
-    // ── 아래줄 — 위성과 켜둔 시간 ────────────────────────────────────────
+    // ── 자세 ─────────────────────────────────────────────────────────────
     gOled.setFont(u8g2_font_5x7_tf);
-    snprintf(buf, sizeof(buf), "SAT %d %s", s.satellites,
-             s.gpsFix ? "FIX" : "NOFIX");
-    drawChecked(2, kBotBaseline, buf, "GPS 상태");
+    if (s.imuOk) {
+        snprintf(buf, sizeof(buf), "HEEL%+6.1f  PITCH%+6.1f", s.heelDeg, s.pitchDeg);
+    } else {
+        snprintf(buf, sizeof(buf), "HEEL%+6.1f  NO IMU", s.heelDeg);
+    }
+    drawChecked(2, kAttBaseline, buf, "자세");
 
-    snprintf(buf, sizeof(buf), "UP %lus", (unsigned long)(s.uptimeMs / 1000));
-    gOled.drawStr(rightX5(9), kBotBaseline, buf);
+    // ── 9축 원본 ─────────────────────────────────────────────────────────
+    if (s.imuOk) {
+        snprintf(buf, sizeof(buf), "GYR%+6.1f%+6.1f%+6.1f", s.gyrX, s.gyrY, s.gyrZ);
+        drawChecked(2, kGyrBaseline, buf, "자이로");
+
+        snprintf(buf, sizeof(buf), "ACC%+6.2f%+6.2f%+6.2f", s.accX, s.accY, s.accZ);
+        drawChecked(2, kAccBaseline, buf, "가속도");
+    } else {
+        gOled.drawStr(2, kGyrBaseline, "IMU NOT RESPONDING");
+    }
 
     gOled.sendBuffer();
 }

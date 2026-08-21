@@ -30,6 +30,7 @@
 #include <TinyGPS++.h>
 #include <Wire.h>
 #include <esp_mac.h>
+#include <esp_task_wdt.h>
 
 #include "board_rak.h"
 #include "display_rak.h"
@@ -69,6 +70,9 @@ static float    gRollDeg  = 0.0f;
 static float    gPitchDeg = 0.0f;
 static float    gImuTempC = 0.0f;
 
+// 자이로 0점 (원시값). 자세히는 아래 "자이로 0점" 항목 참고.
+static float gGyrOffX = 0.0f, gGyrOffY = 0.0f, gGyrOffZ = 0.0f;
+
 // ── 힐 0점 ───────────────────────────────────────────────────────────────
 //
 // 센서가 내놓는 각도는 보드를 어느 방향으로 달았느냐에 따라 통째로 치우친다.
@@ -101,6 +105,10 @@ static bool gEverHadFix = false; // 한 번이라도 잡은 적 있나 (진단�
 // GPS 가 준 값이 이 시간보다 오래됐으면 낡은 것으로 본다.
 static constexpr uint32_t kGpsStaleMs = 3000;
 
+// 워치독에게 살아 있다고 알린다. 몸통은 아래 "멈추지 않기 위한 장치" 에 있다.
+// 몇 초씩 걸리는 진단 명령들이 이걸 먼저 쓰므로 여기서 미리 알려 둔다.
+static void feedWatchdog();
+
 // ── 센서 전원 ────────────────────────────────────────────────────────────
 //
 // 지금 어느 핀을 전원 스위치로 쓰고 있는지. 0 이면 끈 상태.
@@ -132,13 +140,18 @@ static void formatMac(char* out, size_t cap) {
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-// 광고에 실을 수 있는 문자만 남긴다 (영숫자, '-', '_').
+// 광고에 실을 수 있는 문자만 남긴다.
+//
+// 영숫자와 '-', '_' 에 더해 괄호도 받는다. 이 배의 이름이 "random()" 이라
+// 괄호가 잘리면 이름이 달라져 버린다.
+// 화면 폰트(5x7)와 BLE 광고 둘 다 아스키라 그대로 나간다.
 static void sanitizeName(const char* in, char* out, size_t cap) {
     size_t j = 0;
     for (size_t i = 0; in[i] != '\0' && j + 1 < cap; i++) {
         char c = in[i];
         bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '-' || c == '_';
+                  (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                  c == '(' || c == ')';
         if (ok) out[j++] = c;
     }
     out[j] = '\0';
@@ -160,6 +173,9 @@ static void loadSettings() {
     gNotifyPeriodMs = gPrefs.getUInt("notify_ms", sail::kNotifyPeriodMs);
     gSensorPowerPin = (int)gPrefs.getInt("pwr_pin", rak::kSensorPowerA);
     gHeelOffsetDeg  = gPrefs.getFloat("heel_off", 0.0f);
+    gGyrOffX        = gPrefs.getFloat("gyr_x", 0.0f);
+    gGyrOffY        = gPrefs.getFloat("gyr_y", 0.0f);
+    gGyrOffZ        = gPrefs.getFloat("gyr_z", 0.0f);
     gPrefs.end();
 
     if (gNotifyPeriodMs < 10 || gNotifyPeriodMs > 2000) {
@@ -229,11 +245,25 @@ static float readBatteryVolts(uint32_t* rawMvOut) {
     return (mv / 1000.0f) / rak::kBattDivider * rak::kBattCorrection;
 }
 
+// 방전 곡선 표에서 잔량을 찾는다. 표 사이는 직선으로 잇는다.
+// 곡선을 쓰는 이유는 board_rak.h 의 kBattCurve 주석 참고.
 static float batteryPercent(float volts) {
-    float p = (volts - rak::kBattEmptyV) / (rak::kBattFullV - rak::kBattEmptyV) * 100.0f;
-    if (p > 100.0f) p = 100.0f;
-    if (p < 0.0f) p = 0.0f;
-    return p;
+    if (volts >= rak::kBattCurve[0].volts) return 100.0f;
+
+    const int last = rak::kBattCurveLen - 1;
+    if (volts <= rak::kBattCurve[last].volts) return 0.0f;
+
+    for (int i = 0; i < last; i++) {
+        const float vHi = rak::kBattCurve[i].volts;      // 전압이 높은 쪽
+        const float vLo = rak::kBattCurve[i + 1].volts;  // 낮은 쪽
+        if (volts <= vHi && volts >= vLo) {
+            const float pHi = rak::kBattCurve[i].percent;
+            const float pLo = rak::kBattCurve[i + 1].percent;
+            const float t   = (volts - vLo) / (vHi - vLo); // 0 = 낮은 쪽
+            return pLo + (pHi - pLo) * t;
+        }
+    }
+    return 0.0f; // 여기까지 오면 표가 잘못 적힌 것이다
 }
 
 static void printBattery() {
@@ -244,9 +274,11 @@ static void printBattery() {
     Serial.printf("  분압 되짚기       ÷ %.2f\n", rak::kBattDivider);
     Serial.printf("  배터리 전압       %.3f V  (약 %.0f%%)\n", v, batteryPercent(v));
     Serial.println("──────────────────────────────────────────");
-    Serial.println("  멀티미터로 배터리를 직접 재서 위 값과 비교하세요.");
-    Serial.println("  어긋나면 board_rak.h 의 kBattCorrection 을 조정합니다.");
-    Serial.println("  USB 만 꽂고 배터리가 없으면 값이 의미 없습니다.");
+    Serial.println("  잔량은 리튬폴리머 방전 곡선으로 환산합니다 (직선 아님).");
+    Serial.println("──────────────────────────────────────────");
+    Serial.println("  ★ USB 가 꽂혀 있으면 충전 중이라 실제보다 높게 나옵니다.");
+    Serial.println("    진짜 잔량은 USB 를 뽑고 재야 합니다.");
+    Serial.println("  멀티미터 값과 어긋나면 board_rak.h 의 kBattCorrection 조정.");
 }
 
 // ── I2C 스캔 ─────────────────────────────────────────────────────────────
@@ -450,6 +482,7 @@ static void peekGps(uint32_t seconds, bool slotD) {
             gGps.encode(c); // 보여주면서 파서에도 먹인다
             bytes++;
         }
+        feedWatchdog();
         delay(5);
     }
 
@@ -491,6 +524,82 @@ static bool imuBegin() {
     return true;
 }
 
+// ── 자이로 0점 ───────────────────────────────────────────────────────────
+//
+// MPU-9250 은 가만히 있어도 자이로가 0 이 아니다. 공장에서 나올 때부터
+// 축마다 조금씩 치우쳐 있다. 실제로 이 보드는 책상에 가만히 뒀는데도
+// -0.5 / +0.9 / +1.1 °/s 가 계속 나왔다.
+//
+// 이건 "드리프트" 가 아니라 영점이 어긋난 것이다. 값 자체는 안정적이라
+// 평균을 내서 빼주면 사라진다.
+//
+// ★ 자이로 0점은 자세와 상관없다. 보드가 기울어 있어도, 뒤집혀 있어도
+//   정지해 있기만 하면 제대로 잡힌다. (가속도 0점은 그렇지 않다 —
+//   그래서 라이브러리의 autoOffsets() 는 쓰지 않는다. 그건 가속도까지
+//   건드려서 배 위에서 부르면 힐이 통째로 어긋난다.)
+//
+// setGyrOffsets() 가 받는 값은 °/s 가 아니라 원시값이다.
+//   °/s = 원시값 x 250 / 32768   (±250°/s 범위) → 1 °/s 가 약 131
+// 재는 동안 이 폭보다 크게 흔들렸으면 못 믿는다. 원시값 500 은 약 3.8 °/s.
+static constexpr float kGyrCalMaxSpreadRaw = 500.0f;
+
+static void applyGyrOffsets() {
+    if (gImuOk) gImu.setGyrOffsets(gGyrOffX, gGyrOffY, gGyrOffZ);
+}
+
+// 지금 자이로 값을 0 으로 삼는다. 보드가 멈춰 있어야 한다.
+static bool calibrateGyro() {
+    if (!gImuOk) return false;
+
+    gImu.setGyrOffsets(0.0f, 0.0f, 0.0f); // 보정을 지우고 날값을 본다
+
+    const int kN = 64;
+    float sx = 0, sy = 0, sz = 0;
+    float mnx = 1e9f, mny = 1e9f, mnz = 1e9f;
+    float mxx = -1e9f, mxy = -1e9f, mxz = -1e9f;
+
+    for (int i = 0; i < kN; i++) {
+        xyzFloat r = gImu.getGyrRawValues();
+        sx += r.x; sy += r.y; sz += r.z;
+        if (r.x < mnx) mnx = r.x;  if (r.x > mxx) mxx = r.x;
+        if (r.y < mny) mny = r.y;  if (r.y > mxy) mxy = r.y;
+        if (r.z < mnz) mnz = r.z;  if (r.z > mxz) mxz = r.z;
+        feedWatchdog();
+        delay(5);
+    }
+
+    float spread = mxx - mnx;
+    if (mxy - mny > spread) spread = mxy - mny;
+    if (mxz - mnz > spread) spread = mxz - mnz;
+
+    if (spread > kGyrCalMaxSpreadRaw) {
+        // 흔들리는 동안 잰 값은 쓰면 안 된다. 이전 보정을 되돌린다.
+        applyGyrOffsets();
+        Serial.printf("[IMU] 자이로 0점 실패 — 재는 동안 흔들렸습니다 "
+                      "(폭 %.0f, 한계 %.0f)\n", spread, kGyrCalMaxSpreadRaw);
+        return false;
+    }
+
+    gGyrOffX = sx / kN;
+    gGyrOffY = sy / kN;
+    gGyrOffZ = sz / kN;
+    applyGyrOffsets();
+
+    gPrefs.begin("sail", false);
+    gPrefs.putFloat("gyr_x", gGyrOffX);
+    gPrefs.putFloat("gyr_y", gGyrOffY);
+    gPrefs.putFloat("gyr_z", gGyrOffZ);
+    gPrefs.end();
+
+    Serial.printf("[IMU] 자이로 0점 잡음 — 원시 %.0f %.0f %.0f "
+                  "(= %.2f %.2f %.2f °/s) 만큼 빼둡니다\n",
+                  gGyrOffX, gGyrOffY, gGyrOffZ,
+                  gGyrOffX * 250.0f / 32768.0f,
+                  gGyrOffY * 250.0f / 32768.0f,
+                  gGyrOffZ * 250.0f / 32768.0f);
+    return true;
+}
+
 // 최신 9축 값을 전역에 담는다. 10 Hz 로 부른다.
 static void imuUpdate() {
     if (!gImuOk) return;
@@ -499,6 +608,23 @@ static void imuUpdate() {
     if (gMagOk) gMag = gImu.getMagValues();
     gRollDeg  = gImu.getRoll();
     gPitchDeg = gImu.getPitch();
+}
+
+// 자력계로 뱃머리 방위를 구한다. 못 구하면 음수.
+//
+// GPS 의 침로(COG)는 배가 "실제로 가는 방향" 이고, 이 방위(HDG)는 뱃머리가
+// "보는 방향" 이다. 요트에서는 조류와 바람 때문에 둘이 다르고, 배가 멈춰
+// 있으면 COG 는 아예 안 나온다. 그래서 둘을 따로 보여준다.
+//
+// ★ 아직 거친 값이다. 두 가지가 빠져 있다.
+//     1) 기울기 보정 — 배가 기울면 방위가 틀어진다
+//     2) 자기 편각   — 자북과 진북의 차이 (한국은 약 8도 서편)
+//   배에 달고 실제 방위와 대조한 뒤에 보정을 넣는다.
+static float headingDeg() {
+    if (!gMagOk) return -1.0f;
+    float h = atan2f(gMag.y, gMag.x) * 180.0f / (float)M_PI;
+    if (h < 0.0f) h += 360.0f;
+    return h;
 }
 
 // 9축 한 줄 요약
@@ -564,6 +690,7 @@ static void doImu() {
     while (millis() - start < 5000) {
         imuUpdate();
         printImuLine();
+        feedWatchdog();
         delay(400);
     }
 
@@ -572,17 +699,26 @@ static void doImu() {
     Serial.println("  기울여서 roll 이 따라 움직이면 힐 실측을 붙일 수 있습니다.");
 }
 
-// 0점 다시 잡기. 배가 평평할 때만 쓸 것.
+// 자이로 0점 다시 잡기.
+//
+// 라이브러리의 autoOffsets() 는 쓰지 않는다. 그건 가속도 0점까지 함께
+// 건드려서, 배가 기울어 있을 때 부르면 힐이 통째로 어긋난다.
+// 여기서는 자이로만 만진다. 자이로 0점은 자세와 무관하므로 배가 기울어
+// 있어도 안전하다. 멈춰 있기만 하면 된다.
 static void doCalib() {
     if (!gImuOk) {
         Serial.println("[IMU] 붙어 있지 않습니다.");
         return;
     }
-    Serial.println("[IMU] 보드를 평평하게 두고 움직이지 마세요. 3초 뒤에 잽니다...");
-    delay(3000);
-    gImu.autoOffsets();
-    Serial.println("[IMU] 0점을 다시 잡았습니다.");
-    Serial.println("      배 위에서 했다면 그때 기울어진 각도가 0 이 됩니다. 주의하세요.");
+    Serial.println("──────────────────────────────────────────");
+    Serial.println("  자이로 0점을 다시 잡습니다. 보드를 움직이지 마세요.");
+    Serial.println("  (기울어 있어도 괜찮습니다. 멈춰 있기만 하면 됩니다)");
+    if (calibrateGyro()) {
+        Serial.println("  됐습니다. 이제 가만히 두면 자이로가 0 근처로 나옵니다.");
+    } else {
+        Serial.println("  다시 해보세요. 손을 떼고 보드가 멈춘 뒤에 치면 됩니다.");
+    }
+    Serial.println("──────────────────────────────────────────");
 }
 
 // ── SD카드 확인 (RAK15002, IO 슬롯) ──────────────────────────────────────
@@ -598,6 +734,7 @@ static void doSd() {
     Serial.printf("  카드 감지 GPIO%d = %s\n", rak::kSdCardDetect,
                   cd == LOW ? "LOW (카드 있음)" : "HIGH (카드 없음?)");
 
+    feedWatchdog();
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
 
     // 4 MHz 로 시작한다. 붙고 나서 필요하면 올린다.
@@ -630,6 +767,64 @@ static void doSd() {
 
     SD.end();
     Serial.println("──────────────────────────────────────────");
+}
+
+// ── 멈추지 않기 위한 장치 ────────────────────────────────────────────────
+//
+// 센서 하나가 죽었다고 계기가 통째로 멈추면 안 된다. 바다에서는 그게 제일
+// 위험하다. 세 겹으로 막는다.
+//
+//   1) I2C 타임아웃   — 버스가 물려도 50 ms 만에 포기하고 돌아온다
+//   2) 격리와 재연결  — 응답이 끊긴 센서는 끄고 나머지로 계속 간다.
+//                       다시 나타나면 알아서 붙는다.
+//   3) 워치독         — 그래도 어딘가에서 멈추면 보드를 다시 시작시킨다
+//
+// 실제로 화면 초기화 한 줄 때문에 I2C 버스가 죽어 펌웨어 전체가 정지한 적이
+// 있다. 그때는 아무 로그도 안 나와서 원인을 찾는 데 오래 걸렸다.
+
+// 워치독이 이 시간 동안 소식을 못 들으면 보드를 다시 시작시킨다.
+// check 명령 하나가 20초 넘게 걸리므로 넉넉히 잡고, 긴 작업 안에서는
+// feedWatchdog() 으로 살아 있다고 알린다.
+static constexpr uint32_t kWatchdogSec = 30;
+
+static bool gWatchdogOn = false;
+
+static void feedWatchdog() {
+    if (gWatchdogOn) esp_task_wdt_reset();
+}
+
+static void watchdogBegin() {
+    // 이미 초기화돼 있으면 그대로 두고 이 태스크만 등록한다.
+    esp_task_wdt_init(kWatchdogSec, /*panic=*/true);
+    if (esp_task_wdt_add(NULL) == ESP_OK) {
+        gWatchdogOn = true;
+        Serial.printf("[WDT] 워치독 %lu초 — 멈추면 스스로 다시 시작합니다\n",
+                      (unsigned long)kWatchdogSec);
+    } else {
+        Serial.println("[WDT] !! 워치독 등록 실패 — 멈춤 보호 없이 돕니다");
+    }
+}
+
+// 응답이 있는지만 가볍게 두드려 본다.
+static bool i2cPing(uint8_t addr) {
+    Wire.beginTransmission(addr);
+    return Wire.endTransmission() == 0;
+}
+
+// 1 Hz 로 부른다. 사라진 센서는 끄고, 돌아온 센서는 다시 붙인다.
+static void checkSensors() {
+    const bool imuNow = i2cPing(rak::kAddrImu);
+    if (gImuOk && !imuNow) {
+        gImuOk = false;
+        gMagOk = false;
+        Serial.println("[IMU] 응답이 끊겼습니다 — 힐을 시뮬레이터 값으로 돌립니다");
+    } else if (!gImuOk && imuNow) {
+        Serial.println("[IMU] 다시 보입니다 — 붙입니다");
+        imuBegin();
+        applyGyrOffsets();
+    }
+
+    sail::displayHealthCheck();
 }
 
 // ── 텔레메트리 조립 ──────────────────────────────────────────────────────
@@ -811,7 +1006,7 @@ static void printHelp() {
     Serial.println("  gps d         같은 것 (GPS 가 슬롯 D — IO6 로 리셋 해제)");
     Serial.println("  batt          배터리 전압 실측");
     Serial.println("  level         ★ 지금 자세를 힐 0° 로 삼기 (배가 평형일 때)");
-    Serial.println("  calib         IMU 센서 자체의 0점 (평평할 때만)");
+    Serial.println("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)");
     Serial.println("  help          이 도움말");
     Serial.println("──────────────────────────────────────────");
     Serial.println("  붙어 있는 것:  GPS 슬롯A · IMU 슬롯C · 화면 J12 · SD IO슬롯");
@@ -949,6 +1144,10 @@ void setup() {
     Serial.begin(115200);
     delay(300);
 
+    // 초기화 도중에 멈추는 경우까지 잡으려면 여기서 먼저 켜야 한다.
+    // 실제로 화면 초기화에서 멈춰 아무 로그도 없이 죽은 적이 있다.
+    watchdogBegin();
+
     pinMode(rak::kLedGreen, OUTPUT);
     pinMode(rak::kLedBlue, OUTPUT);
     digitalWrite(rak::kLedGreen, LOW);
@@ -985,9 +1184,15 @@ void setup() {
     if (imuBegin()) {
         Serial.printf("[IMU] MPU-9250 붙음 | 자력계 %s\n",
                       gMagOk ? "OK" : "응답 없음");
+        applyGyrOffsets();   // 지난번에 잡아둔 0점을 먼저 넣고
+        calibrateGyro();     // 지금 다시 잡아본다 (흔들리면 지난 값 그대로)
     } else {
         Serial.println("[IMU] !! 응답 없음 — 힐은 시뮬레이터 값을 씁니다");
     }
+
+    // 버스가 물려도 오래 붙들려 있지 않게 한다. 기본값도 50 ms 지만
+    // 이 값에 기대는 코드라 명시해 둔다. (Wire.h — "default timeout ... 50ms")
+    Wire.setTimeOut(50);
 
     // 화면은 J12 헤더에 꽂는다. 없어도 그냥 지나간다.
     if (sail::displayBegin()) {
@@ -1055,6 +1260,10 @@ void loop() {
         lastBatt = now;
         float fresh = batteryPercent(readBatteryVolts(nullptr));
         gBattPct    = gBattPct * 0.8f + fresh * 0.2f;
+
+        // 같은 주기로 센서가 아직 붙어 있는지도 확인한다.
+        // 사라졌으면 끄고 나머지로 계속 간다. 돌아오면 다시 붙는다.
+        checkSensors();
     }
 
     // 3) gNotifyPeriodMs 주기 — 값 조립 + characteristic 갱신 + notify
@@ -1092,15 +1301,25 @@ void loop() {
         ds.userName     = gUserName;
         ds.bleConnected = gConnected;
         ds.bleNotifying = gSubscribed;
-        ds.sogKn        = gLatest.sogKn;
-        ds.cogDeg       = gLatest.cogDeg;
-        ds.heelDeg      = gLatest.heelDeg;
         ds.battPct      = gLatest.battPct;
-        ds.sogFromGps   = gUsingGpsSog;
-        ds.heelFromImu  = gUsingImuHeel;
-        ds.satellites   = gGps.satellites.isValid() ? (int)gGps.satellites.value() : 0;
-        ds.gpsFix       = gGpsFix;
-        ds.uptimeMs     = now;
+
+        ds.sogKn      = gLatest.sogKn;
+        ds.cogDeg     = gLatest.cogDeg;
+        ds.headingDeg = headingDeg();
+        ds.heelDeg    = gLatest.heelDeg;
+        ds.pitchDeg   = gPitchDeg;
+
+        ds.accX  = gAcc.x; ds.accY = gAcc.y; ds.accZ = gAcc.z;
+        ds.gyrX  = gGyr.x; ds.gyrY = gGyr.y; ds.gyrZ = gGyr.z;
+        ds.magX  = gMag.x; ds.magY = gMag.y; ds.magZ = gMag.z;
+        ds.imuOk = gImuOk;
+        ds.magOk = gMagOk;
+
+        ds.sogFromGps = gUsingGpsSog;
+        ds.gpsFix     = gGpsFix;
+        ds.satellites = gGps.satellites.isValid() ? (int)gGps.satellites.value() : 0;
+        ds.hdop       = gGps.hdop.isValid() ? (float)gGps.hdop.hdop() : -1.0f;
+
         sail::displayUpdate(ds);
     }
 
@@ -1124,5 +1343,6 @@ void loop() {
         printImuLine();
     }
 
-    delay(2); // 워치독 여유
+    feedWatchdog(); // 여기까지 왔으면 살아 있다는 뜻
+    delay(2);
 }
