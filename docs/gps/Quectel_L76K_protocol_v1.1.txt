@@ -1,0 +1,2126 @@
+L76K GNSS Protocol
+Specification
+GNSS Module Series
+
+Version: 1.1
+
+Date: 2021-12-16
+
+Status: Released
+                                                                                   GNSS Module Series
+
+
+At Quectel, our aim is to provide timely and comprehensive services to our customers. If you
+require any assistance, please contact our headquarters:
+
+Quectel Wireless Solutions Co., Ltd.
+Building 5, Shanghai Business Park Phase III (Area B), No.1016 Tianlin Road, Minhang District, Shanghai
+200233, China
+Tel: +86 21 5108 6236
+Email: info@quectel.com
+
+Or our local offices. For more information, please visit:
+http://www.quectel.com/support/sales.htm.
+
+For technical support, or to report documentation errors, please visit:
+http://www.quectel.com/support/technical.htm.
+Or email us at: support@quectel.com.
+
+
+Legal Notices
+We offer information as a service to you. The provided information is based on your requirements and we
+make every effort to ensure its quality. You agree that you are responsible for using independent analysis
+and evaluation in designing intended products, and we provide reference designs for illustrative purposes
+only. Before using any hardware, software or service guided by this document, please read this notice
+carefully. Even though we employ commercially reasonable efforts to provide the best possible
+experience, you hereby acknowledge and agree that this document and related services hereunder are
+provided to you on an “as available” basis. We may revise or restate this document from time to time at
+our sole discretion without any prior notice to you.
+
+
+Use and Disclosure Restrictions
+License Agreements
+Documents and information provided by us shall be kept confidential, unless specific permission is
+granted. They shall not be accessed or used for any purpose except as expressly provided herein.
+
+
+Copyright
+Our and third-party products hereunder may contain copyrighted material. Such copyrighted material
+shall not be copied, reproduced, distributed, merged, published, translated, or modified without prior
+written consent. We and the third party have exclusive rights over copyrighted material. No license shall
+be granted or conveyed under any patents, copyrights, trademarks, or service mark rights. To avoid
+ambiguities, purchasing in any form cannot be deemed as granting a license other than the normal
+non-exclusive, royalty-free license to use the material. We reserve the right to take legal action for
+noncompliance with abovementioned requirements, unauthorized use, or other illegal or malicious use of
+the material.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                  1 / 41
+                                                                                        GNSS Module Series
+
+
+
+Trademarks
+Except as otherwise set forth herein, nothing in this document shall be construed as conferring any rights
+to use any trademark, trade name or name, abbreviation, or counterfeit product thereof owned by Quectel
+or any third party in advertising, publicity, or other aspects.
+
+
+Third-Party Rights
+This document may refer to hardware, software and/or documentation owned by one or more third parties
+(“third-party materials”). Use of such third-party materials shall be governed by all restrictions and
+obligations applicable thereto.
+
+We make no warranty or representation, either express or implied, regarding the third-party materials,
+including but not limited to any implied or statutory, warranties of merchantability or fitness for a particular
+purpose, quiet enjoyment, system integration, information accuracy, and non-infringement of any
+third-party intellectual property rights with regard to the licensed technology or use thereof. Nothing herein
+constitutes a representation or warranty by us to either develop, enhance, modify, distribute, market, sell,
+offer for sale, or otherwise maintain production of any our products or any other hardware, software,
+device, tool, information, or product. We moreover disclaim any and all warranties arising from the course
+of dealing or usage of trade.
+
+
+Privacy Policy
+To implement module functionality, certain device data are uploaded to Quectel’s or third-party’s servers,
+including carriers, chipset suppliers or customer-designated servers. Quectel, strictly abiding by the
+relevant laws and regulations, shall retain, use, disclose or otherwise process relevant data for the
+purpose of performing the service only or as permitted by applicable laws. Before data interaction with
+third parties, please be informed of their privacy and data security policy.
+
+
+Disclaimer
+a)   We acknowledge no liability for any injury or damage arising from the reliance upon the information.
+b)   We shall bear no liability resulting from any inaccuracies or omissions, or from the use of the
+     information contained herein.
+c)   While we have made every effort to ensure that the functions and features under development are
+     free from errors, it is possible that they could contain errors, inaccuracies, and omissions. Unless
+     otherwise provided by valid agreement, we make no warranties of any kind, either implied or express,
+     and exclude all liability for any loss or damage suffered in connection with the use of features and
+     functions under development, to the maximum extent permitted by law, regardless of whether such
+     loss or damage may have been foreseeable.
+d)   We are not responsible for the accessibility, safety, accuracy, availability, legality, or completeness of
+     information, advertising, commercial offers, products, services, and materials on third-party websites
+     and third-party resources.
+
+Copyright © Quectel Wireless Solutions Co., Ltd. 2021. All rights reserved.
+
+
+
+L76K_GNSS_Protocol_Specification                                                                        2 / 41
+                                                                           GNSS Module Series
+
+
+
+
+About the Document
+Document Information
+
+Title                        L76K GNSS Protocol Specification
+
+Subtitle                     GNSS Module Series
+
+Document Type                GNSS Protocol Specification
+
+Document Status              Released
+
+
+
+
+Revision History
+
+Version    Date         Description
+
+-          2020-07-28   Creation of the document
+
+1.0        2021-09-10   First official release
+                        1.   Updated the <TalkerID> in BeiDou satellite configuration (Table 2).
+                        2.   Updated the description of <UTC> and <M> parameters in GGA
+                             (Chapter 2.2.2).
+                        3.   Updated the examples of GSV, VTG and ZDA (Chapter 2.2.3, 2.2.5 and
+1.1        2021-12-16        2.2.8).
+                        4.   Changed the parameter name from <Flag> to <Interval> of PCAS02
+                             (Chapter 2.3.2).
+                        5.   Updated the message type of CFG-PRT, CFG-MSG and CFG-RATE
+                             (Chapter 3.2.2.1, 3.2.2.2 and 3.2.2.4).
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                         3 / 41
+                                                                                                                              GNSS Module Series
+
+
+
+
+Contents
+
+About the Document .................................................................................................................................. 3
+Contents ...................................................................................................................................................... 4
+Table Index .................................................................................................................................................. 5
+Figure Index ................................................................................................................................................ 6
+
+1     Introduction ......................................................................................................................................... 7
+
+2     NMEA Protocol .................................................................................................................................... 8
+      2.1.      Structure of NMEA Protocol Messages .................................................................................. 8
+      2.2.      Standard Messages ............................................................................................................... 9
+           2.2.1. RMC ................................................................................................................................ 9
+           2.2.2. GGA............................................................................................................................... 12
+           2.2.3. GSV ............................................................................................................................... 14
+           2.2.4. GSA ............................................................................................................................... 15
+           2.2.5. VTG ............................................................................................................................... 17
+           2.2.6. GLL ................................................................................................................................ 18
+           2.2.7. TXT ................................................................................................................................ 20
+           2.2.8. ZDA ............................................................................................................................... 20
+      2.3.      PCAS Messages .................................................................................................................. 22
+           2.3.1. PCAS01......................................................................................................................... 22
+           2.3.2. PCAS02......................................................................................................................... 22
+           2.3.3. PCAS03......................................................................................................................... 23
+           2.3.4. PCAS04......................................................................................................................... 25
+           2.3.5. PCAS10......................................................................................................................... 26
+
+3     CASIC Protocol ................................................................................................................................. 27
+      3.1.      Structure of CASIC Protocol Messages ............................................................................... 27
+           3.1.1. Data Type ...................................................................................................................... 28
+           3.1.2. Message Overview........................................................................................................ 28
+      3.2.      CASIC Messages ................................................................................................................. 29
+           3.2.1. ACK ............................................................................................................................... 29
+                3.2.1.1. ACK-NACK (0x05 0x00) ....................................................................................... 29
+                3.2.1.2. ACK-ACK (0x05 0x01).......................................................................................... 30
+           3.2.2. CFG ............................................................................................................................... 30
+                3.2.2.1. CFG-PRT (0x06 0x00) .......................................................................................... 30
+                3.2.2.2. CFG-MSG (0x06 0x01)......................................................................................... 33
+                3.2.2.3. CFG-RST (0x06 0x02).......................................................................................... 34
+                3.2.2.4. CFG-RATE (0x06 0x04) ....................................................................................... 35
+
+4     Appendix A References .................................................................................................................... 37
+5     Appendix B GNSS Numbering......................................................................................................... 40
+6     Appendix C Default Configuration .................................................................................................. 41
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                                                                      4 / 41
+                                                                                                                          GNSS Module Series
+
+
+
+
+Table Index
+
+Table 1: Structure of NMEA Protocol Messages .......................................................................................... 8
+Table 2: NMEA TalkerID ............................................................................................................................... 9
+Table 3: Structure of CASIC Protocol Messages ....................................................................................... 27
+Table 4: Data Type ..................................................................................................................................... 28
+Table 5: Message Overview ....................................................................................................................... 28
+Table 6: ACK-NACK Message Payload ..................................................................................................... 29
+Table 7: ACK-ACK Message Payload ........................................................................................................ 30
+Table 8: CFG-PRT Message Payload ........................................................................................................ 31
+Table 9: ProtoMask..................................................................................................................................... 31
+Table 10: Mode Flag Bits............................................................................................................................ 31
+Table 11: CFG-MSG Message Payload ..................................................................................................... 33
+Table 12: CFG-RST Message Payload ...................................................................................................... 34
+Table 13: CFG-RATE Message Payload.................................................................................................... 35
+Table 14: Related Documents .................................................................................................................... 37
+Table 15: Terms and Abbreviations ............................................................................................................ 37
+Table 16: GNSS Numbering ....................................................................................................................... 40
+Table 17: Default Configurations ................................................................................................................ 41
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                                                                5 / 41
+                                                                                                           GNSS Module Series
+
+
+
+
+Figure Index
+
+Figure 1: Structure of NMEA Protocol Messages ........................................................................................ 8
+Figure 2: Structure of CASIC Protocol Messages ..................................................................................... 27
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                                               6 / 41
+                                                                                 GNSS Module Series
+
+
+
+
+1 Introduction
+Quectel L76K GNSS module supports GPS, GLONASS, BeiDou and QZSS constellations. Concurrent
+tracking of GPS L1 C/A, GLONASS L1, BeiDou B1, and QZSS L1 frequency bands provides fast and
+accurate acquisition and makes this module the ideal solution for positioning and navigation in various
+vertical markets.
+
+This document describes the software commands that are needed to control and modify the module
+configuration. The software commands are NMEA proprietary commands defined by the chipset supplier
+(PCAS commands) and CASIC commands. To report GNSS information, the module supports output
+messages in NMEA 0183 standard protocol or CASIC protocol format.
+
+
+
+ NOTE
+
+1. The default configuration is GPS + BeiDou. QZSS is always enabled and can not be disabled.
+2. Only use the commands listed in this document. Quectel assumes no responsibility if other
+   commands are used.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                7 / 41
+                                                                                                   GNSS Module Series
+
+
+
+
+2 NMEA Protocol
+2.1. Structure of NMEA Protocol Messages
+
+                                                                                      Start with a ‘*’, 8-bit
+  The start character of the                                                       checksum value convert to
+      frame, always ‘$’                                                              two ASCII characters
+                         Address field, contains talker Identifier    Data field(s),                    End frame, always
+                               and sentence formatter                delimited by ‘,’                      <CR><LF>
+
+
+                                     <Address>
+              $                                                        [,<Data>]        *<Checksum>         <CR><LF>
+                          (<TalkerID><SentenceFormatter>)
+
+
+                                    The range for checksum calculation
+
+
+
+                               Figure 1: Structure of NMEA Protocol Messages
+
+
+
+
+Table 1: Structure of NMEA Protocol Messages
+
+
+ Field              Description
+
+ $                  Start of the sentence (Hex 0x24).
+
+                    In Standard Messages:
+                    In NMEA standard messages, this field consists of a two-character talker identifier
+                    (TalkerID) and a three-character sentence formatter (SentenceFormatter).
+                    The talker identifier serves to define the nature of the data being transmitted. For more
+                    information on the TalkerID, see Table 2: NMEA TalkerID.
+ <Address>          The sentence formatter is used to define data format and type.
+
+                    In Proprietary Messages:
+                    In NMEA proprietary messages, this field consists of the proprietary character P
+                    followed by a three-character Manufacturer's Mnemonic Code, used to identify the
+                    TALKER issuing a proprietary sentence, and any additional characters as required.
+                    Data fields, delimited by comma (,).
+ <Data>
+                    Variable length (depends on the NMEA message type).
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                                    8 / 41
+                                                                                 GNSS Module Series
+
+
+                 The checksum field follows the checksum delimiter character *.
+ <Checksum>      The checksum is the 8-bit exclusive OR of all characters in the sentence, including the
+                 comma (,) delimiter, between but not including the $ and the * delimiters.
+
+ <CR><LF>        End of the sentence (Hex 0x0D 0x0A).
+
+
+
+Table 2: NMEA TalkerID
+
+
+ GNSS Constellation Configuration                              TalkerID
+
+ GPS                                                           GP
+
+ GLONASS                                                       GL
+
+ BeiDou                                                        BD
+
+ QZSS                                                          GP
+
+ Combination of Multiple Satellite Systems                     GN
+
+
+
+ NOTE
+
+<TalkerID> is GP in both QZSS and GPS satellite configurations, see Table 16: GNSS Numbering for
+more information about satellite identifiers.
+
+
+
+
+2.2. Standard Messages
+
+This chapter explains the NMEA 0183 standard messages supported by the module.
+
+
+
+2.2.1. RMC
+
+Recommended Minimum Specific GNSS Data. Time, date, position, course, and speed data provided by
+a GNSS receiver.
+
+Type:
+
+Output
+
+Synopsis:
+
+$<TalkerID>RMC,<UTC>,<Status>,<Lat>,<N/S>,<Lon>,<E/W>,<SOG>,<COG>,<Date>,<MagVar>,<Ma
+gVarDir>,<ModeInd>,<NavStatus>*<Checksum><CR><LF>
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                 9 / 41
+                                                                       GNSS Module Series
+
+
+Parameter:
+
+
+Field         Format               Unit   Example       Description
+
+$             -                    -      $             Each NMEA message starts with $.
+
+                                                        Talker identifier.
+<TalkerID>    String               -      GN
+                                                        See Table 2: NMEA TalkerID.
+                                                        Recommended        Minimum Specific
+RMC           String               -      RMC
+                                                        GNSS Data.
+                                                        Position fix UTC:
+                                                        hh: Hours (00–23)
+<UTC>         hhmmss.sss           -      071556.000    mm: Minutes (00–59)
+                                                        ss: Seconds (00–59)
+                                                        sss: Decimal fraction of seconds
+                                                        Positioning system status:
+                                                        A = Data valid
+<Status>      Character            -      A
+                                                        V = Invalid
+                                                        D = Differential
+                                                        Latitude:
+                                                        dd: Degrees (00–90)
+                                                        mm: Minutes (00–59)
+<Lat>         ddmm.mmmmm           -      3149.29103    mmmmm: Decimal fraction of
+                                                        minutes
+                                                        Note that this field is empty in case of
+                                                        an invalid value.
+                                                        Latitude direction:
+                                                        N = North
+<N/S>         Character            -      N             S = South
+                                                        Note that this field is empty in case of
+                                                        an invalid value.
+                                                        Longitude:
+                                                        ddd: Degrees (000–180)
+                                                        mm: Minutes (00–59)
+<Lon>         dddmm.mmmmm          -      11706.92916   mmmmm: Decimal fraction of
+                                                        minutes
+                                                        Note that this field is empty in case of
+                                                        an invalid value.
+                                                        Longitude direction:
+                                                        E = East
+<E/W>         Character            -      E             W = West
+                                                        Note that this field is empty in case of
+                                                        an invalid value.
+
+<SOG>         Numeric              Knot   0.00          Speed over ground. Variable length.
+
+
+
+L76K_GNSS_Protocol_Specification                                                        10 / 41
+                                                                             GNSS Module Series
+
+
+                                                              Note that this field is empty in case of
+                                                              an invalid value.
+                                                              Course over ground. Variable length.
+                                                              Maximum value: 359.9.
+ <COG>          Numeric              Degree   0.00
+                                                              Note that this field is empty in case of
+                                                              an invalid value.
+                                                              Date:
+                                                              dd: Day of month
+ <Date>         ddmmyy               -        250420
+                                                              mm: Month
+                                                              yy: Year
+
+ <MagVar>       -                    -        -               Magnetic variation. Not supported.
+
+                                                              The direction of magnetic variation.
+ <MagVarDir>    -                    -        -
+                                                              Not supported.
+                                                              Mode indicator:
+                                                              A = Autonomous mode. Satellite
+                                                              system used in non-differential mode
+                                                              in position fix.
+                                                              D = Differential mode. Satellite
+                                                              system used in differential mode in
+ <ModeInd>      Character            -        A               position fix. Corrections from ground
+                                                              stations or Satellite Based
+                                                              Augmentation System (SBAS).
+                                                              E = Estimated (dead reckoning)
+                                                              mode.
+                                                              N = No fix. Satellite system not used
+                                                              in position fix, or fix not valid.
+                                                              Navigational status.
+                                                              S = safe
+ <NavStatus>    Character            -        V               C = Caution
+                                                              U = Unsafe
+                                                              V = Navigational status not valid
+
+ <Checksum>     Hexadecimal          -        *09             Checksum.
+
+ <CR><LF>       String               -        -               Carriage return and line feed.
+
+
+Example:
+
+$GNRMC,071556.000,A,3149.29103,N,11706.92916,E,0.00,0.00,250420,,,A,V*09
+
+
+
+ NOTE
+
+<TalkerID> is GP in both QZSS and GPS satellite configurations, see Table 16: GNSS Numbering for
+more information about satellite identifiers.
+
+
+
+L76K_GNSS_Protocol_Specification                                                               11 / 41
+                                                                                   GNSS Module Series
+
+
+
+2.2.2. GGA
+
+Global Positioning System Fix Data. Time, position, and fix-related data for a GNSS receiver.
+
+Type:
+
+Output.
+
+Synopsis:
+
+$<TalkerID>GGA,<UTC>,<Lat>,<N/S>,<Lon>,<E/W>,<Quality>,<NumSatUsed>,<HDOP>,<Alt>,M,<Sep
+>,M,<DiffAge>,<DiffStation>*<Checksum><CR><LF>
+
+Parameter:
+
+
+ Field              Format                Unit     Example          Description
+
+ $                  -                     -        $                Each NMEA message starts with $.
+
+                                                                    Talker identifier.
+ <TalkerID>         String                -        GN
+                                                                    See Table 2: NMEA TalkerID.
+
+ GGA                String                -        GGA              Global Positioning System Fix Data.
+
+                                                                    Position fix UTC:
+                                                                    hh: Hours (00–23)
+ <UTC>              hhmmss.sss            -        071556.000       mm: Minutes (00–59)
+                                                                    ss: Seconds (00–59)
+                                                                    sss: Decimal fraction of seconds
+                                                                    Latitude:
+                                                                    dd: Degrees (00–90)
+                                                                    mm: Minutes (00–59)
+ <Lat>              ddmm.mmmmm            -        3149.29103       mmmmm: Decimal fraction of
+                                                                    minutes
+                                                                    Note that this field is empty in case of
+                                                                    an invalid value.
+                                                                    Latitude direction:
+                                                                    N = North
+ <N/S>              Character             -        N                S = South
+                                                                    Note that this field is empty in case of
+                                                                    an invalid value.
+                                                                    Longitude:
+                                                                    ddd: Degrees (000–180)
+                                                                    mm: Minutes (00–59)
+ <Lon>              dddmm.mmmmm           -        11706.92916
+                                                                    mmmmm: Decimal fraction of
+                                                                    minutes
+                                                                    Note that this field is empty in case of
+
+
+
+L76K_GNSS_Protocol_Specification                                                                    12 / 41
+                                                                           GNSS Module Series
+
+
+                                                            an invalid value.
+
+                                                            Longitude direction:
+                                                            E = East
+ <E/W>            Character          -       E              W = West
+                                                            Note that this field is empty in case of
+                                                            an invalid value.
+                                                            GPS quality indicator:
+                                                            0 = Fix not available or invalid
+                                                            1 = GPS SPS Mode, fix valid
+                                                            2 = Differential GPS, SPS Mode, or
+ <Quality>        Numeric, 1 digit   -       1
+                                                            Satellite Based Augmentation
+                                                            System (SBAS), fix valid
+                                                            6 = Estimated (dead reckoning)
+                                                            mode
+
+ <NumSatUsed>1) Numeric, 2 digits    -       21             Number of satellites in use.
+
+ <HDOP>           Numeric            -       0.7            Horizontal dilution of precision.
+
+                                                            Altitude above mean-sea-level
+                                                            (geoid).
+ <Alt>            Numeric            Meter   75.7
+                                                            Note that this field is empty in case of
+                                                            an invalid value.
+                                                            Note that this field is empty in case of
+ M                Character          -       M
+                                                            an invalid value.
+                                                            Geoid separation (the difference
+                                                            between the earth ellipsoid surface
+                                                            and the mean-sea-level (geoid)
+ <Sep>            Numeric            Meter   -5.0           surface defined by the reference
+                                                            datum used in the position solution).
+                                                            Note that this field is empty in case of
+                                                            an invalid value.
+                                                            Note that this field is empty in case of
+ M                Character          -       M
+                                                            an invalid value.
+                                                            Differential GPS data age.
+ <DiffAge>        -                  -       -
+                                                            Not supported.
+                                                            Differential reference station ID.
+ <DiffStation>    -                  -       -
+                                                            Not supported.
+
+ <Checksum>       Hexadecimal        -       *69            Checksum.
+
+ <CR><LF>         String             -       -              Carriage return and line feed.
+
+
+Example:
+
+$GNGGA,071556.000,3149.29103,N,11706.92916,E,1,21,0.7,75.7,M,-5.0,M,,*69
+
+
+
+L76K_GNSS_Protocol_Specification                                                             13 / 41
+                                                                                   GNSS Module Series
+
+
+
+ NOTE
+
+1.   <TalkerID> is GP in both QZSS and GPS satellite configurations, see Table 16: GNSS Numbering for
+     more information about satellite identifiers.
+2.   The NMEA 0183 specification indicates that GGA messages are GPS specific. However, when the
+     receiver is configured for multi-constellations, the content of GGA messages will be generated from
+     the multi-constellation solution.
+     1)
+3.      According to the NMEA 0183 specification, the number of satellites in use is between 00 and 12.
+     However, in the multi-constellation solution, the number of satellites in use may exceed 12.
+
+
+
+2.2.3. GSV
+
+GNSS Satellites in View. The GSV sentence provides the number of satellites in view (SV), satellite ID
+numbers, elevation, azimuth, and SNR value, and contains maximum four satellites per transmission.
+Therefore, it may take several sentences to get complete information. The total number of sentences
+being transmitted and the sentence number are indicated in the first two data fields.
+
+Type:
+
+Output.
+
+Synopsis:
+
+$<TalkerID>GSV,<TotalNumSen>,<SenNum>,<TotalNumSat>,<SatID>,<SatElev>,<SatAz>,<SatCN0>[,
+…],<SignalID>*<Checksum><CR><LF>
+
+Parameter:
+
+
+ Field              Format                   Unit    Example      Description
+
+ $                  -                        -       $            Each NMEA message starts with $.
+
+                                                                  Talker identifier.
+ <TalkerID>         String                   -       GP
+                                                                  See Table 2: NMEA TalkerID.
+
+ GSV                String                   -       GSV          GNSS Satellites in View.
+
+                                                                  Total number of sentences.
+ <TotalNumSen>      Numeric                  -       3
+                                                                  Range:1-9.
+                                                                  Sentence number.
+ <SenNum>           Numeric                  -       1
+                                                                  Range: 1–TotalNumSen.
+                                                                  Total number of satellites in view.
+ <TotalNumSat>      Numeric                  -       12
+                                                                  Maximum value: 32.
+ Start of repeat block. Repeat times: 1–4.
+                                                                  Satellite ID.
+ <SatID>            Numeric                  -       02
+                                                                  See Table 16: GNSS Numbering.
+
+
+
+L76K_GNSS_Protocol_Specification                                                                   14 / 41
+                                                                                GNSS Module Series
+
+
+
+ <SatElev>          Numeric               Degree    49          Satellite elevation. Range: 00–90.
+
+                                                                Satellite azimuth, with true north as
+ <SatAz>            Numeric               Degree    123
+                                                                the reference plane. Range: 000–359.
+                                                                Satellite C/N0. Range: 00–99.
+ <SatCN0>           Numeric               dB-Hz     43
+                                                                Null when not tracking.
+ End of repeat block.
+                                                                GNSS signal ID.
+ <SignalID>         Numeric               -         0           Table 16: GNSS Numbering.
+                                                                Default: 0.
+
+ <Checksum>         Hexadecimal           -         *66         Checksum.
+
+ <CR><LF>           String                -         -           Carriage return and line feed.
+
+
+Example:
+
+$GPGSV,3,1,12,02,49,123,43,05,60,005,43,06,06,127,29,07,05,042,33,0*66
+$GPGSV,3,2,12,13,79,139,44,15,55,225,44,18,12,314,36,20,44,055,42,0*6C
+$GPGSV,3,3,12,29,48,275,42,30,20,069,38,193,69,062,42,195,46,160,42,0*6A
+$BDGSV,4,1,16,01,43,135,36,03,54,193,36,04,31,120,34,06,43,189,35,0*7B
+$BDGSV,4,2,16,07,06,196,28,08,63,008,35,09,30,194,32,10,09,210,29,0*74
+$BDGSV,4,3,16,13,59,342,38,16,50,184,37,27,57,183,40,30,53,295,39,0*77
+$BDGSV,4,4,16,32,65,305,41,38,68,046,40,39,59,181,38,41,40,042,38,0*78
+
+
+
+ NOTE
+
+1.   <TalkerID> is GP in both QZSS and GPS satellite configurations, see Table 16: GNSS Numbering for
+     more information about satellite identifiers.
+2.   GN cannot be used for GSV sentences. If satellites of multiple constellations are in view, use
+     separate GSV sentences with the corresponding talker ID for each constellation.
+
+
+
+2.2.4. GSA
+
+GNSS DOP and Active Satellites. GNSS receiver operating mode, satellites used in the navigation
+solution reported by the GGA or GNS sentence, and DOP values.
+
+Type:
+
+Output.
+
+Synopsis:
+
+$<TalkerID>GSA,<Mode>,<FixMode>,<SatID>,…,<SatID>,<PDOP>,<HDOP>,<VDOP><SystemID>*<C
+hecksum><CR><LF>
+
+
+
+L76K_GNSS_Protocol_Specification                                                                 15 / 41
+                                                                                      GNSS Module Series
+
+
+Parameter:
+
+
+ Field            Format                    Unit   Example    Description
+
+ $                -                         -      $          Each NMEA message starts with $.
+
+                                                              Talker identifier.
+ <TalkerID>       String                    -      GN
+                                                              See Table 2: NMEA TalkerID.
+
+ GSA              String                    -      GSA        GNSS DOP and Active Satellites.
+
+                                                              M = Manual, forced to operate in 2D or 3D
+                                                              mode
+ <Mode>           Character                 -      A
+                                                              A = Automatic, allowed to automatically
+                                                              switch to 2D/3D
+                                                              1 = Fix not available
+ <FixMode>        Numeric                   -      3          2 = 2D
+                                                              3 = 3D
+ Start of repeat block. Repeat times: 12.
+                                                              ID numbers of satellites used in solution.
+ <SatID>          Numeric                   -      10
+                                                              See Table 16: GNSS Numbering.
+ End of repeat block.
+                                                              Position dilution of precision. Maximum
+ <PDOP>           Numeric                   -      2.5
+                                                              value: 99.0.
+                                                              Horizontal dilution of precision. Maximum
+ <HDOP>           Numeric                   -      2.0
+                                                              value: 99.0.
+                                                              Vertical dilution of precision. Maximum
+ <VDOP>           Numeric                   -      1.5
+                                                              value: 99.0.
+                                                              GNSS system ID.
+ <SystemID>       Numeric                   -      1
+                                                              See Table 16: GNSS Numbering.
+
+ <Checksum>       Hexadecimal               -      *35        Checksum.
+
+ <CR><LF>         String                    -      -          Carriage return and line feed.
+
+
+Example:
+
+$GNGSA,A,3,10,13,15,20,,,,,,,,,2.5,2.0,1.5,1*35
+
+
+
+ NOTE
+
+1.   <TalkerID> is GP in both QZSS and GPS satellite configurations, see Table 16: GNSS Numbering for
+     more information about satellite identifiers.
+2.   If less than 12 satellites are used for navigation, the remaining <SatID> fields are left empty. If more
+     than 12 satellites are used for navigation, only the IDs of the first 12 are output.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                     16 / 41
+                                                                               GNSS Module Series
+
+
+
+2.2.5. VTG
+
+Course Over Ground & Ground Speed. The actual course and speed relative to the ground.
+
+Type:
+
+Output.
+
+Synopsis:
+
+$<TalkerID>VTG,<COGT>,T,<COGM>,M,<SOGN>,N,<SOGK>,K,<ModeInd>*<Checksum><CR><LF>
+
+Parameter:
+
+
+ Field          Format                Unit       Example     Description
+
+ $              -                     -          $           Each NMEA message starts with $.
+
+                                                             Talker identifier.
+ <TalkerID>     String                -          GN
+                                                             See Table 2: NMEA TalkerID.
+
+ VTG            String                -          VTG         Course Over Ground & Ground Speed.
+
+                                                             Course over ground, in true north
+ <COGT>         Numeric               Degrees    0.00
+                                                             course direction.
+
+ T              Character             -          T           --
+
+                                                             Course over ground (magnetic).
+ <COGM>         Numeric               Degrees    -
+                                                             Not supported.
+
+ M              Character             -          M           --
+
+ <SOGN>         Numeric               Knots      0.00        Speed over ground in knots.
+
+ N              Character             -          N           -
+
+                                                             Speed over ground in kilometers per
+ <SOGK>         Numeric               km/h       0.00
+                                                             hour.
+
+ K              Character             -          K           -
+
+                                                             The mode indicator of the positioning
+                                                             system:
+                                                             A = Autonomous mode. Satellite system
+                                                             used in non-differential mode in position
+ <ModeInd>      Character             -          A
+                                                             fix
+                                                             E = Estimated (dead reckoning) mode
+                                                             N = No fix. Satellite system not used in
+                                                             position fix, or fix not valid.
+
+ <Checksum>     Hexadecimal           -          *23         Checksum.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                              17 / 41
+                                                                                  GNSS Module Series
+
+
+
+ <CR><LF>        String                 -            -          Carriage return and line feed.
+
+
+
+Example:
+
+$GNVTG,0.00,T,,M,0.00,N,0.00,K,A*23
+
+
+
+ NOTE
+
+<TalkerID> is GP in both QZSS and GPS satellite configurations, see Table 16: GNSS Numbering for
+more information about satellite identifiers.
+
+
+
+2.2.6. GLL
+
+Geographic Position – Latitude/Longitude. Latitude and longitude of the GNSS receiver position, the time
+of position fix and status.
+
+Type:
+
+Output.
+
+Synopsis:
+
+$<TalkerID>GLL,<Lat>,<N/S>,<Lon>,<E/W>,<UTC>,<Status>,<ModeInd>*<Checksum><CR><LF>
+
+Parameter:
+
+
+ Field           Format                 Unit   Example          Description
+
+ $               -                      -      $                Each NMEA message starts with $.
+
+                                                                Talker identifier.
+ <TalkerID>      String                 -      GN
+                                                                See Table 2: NMEA TalkerID.
+                                                                Geographic Position –
+ GLL             String                 -      GLL
+                                                                Latitude/Longitude.
+                                                                Latitude:
+                                                                dd: Degrees (00–90)
+                                                                mm: Minutes (00–59)
+ <Lat>           ddmm.mmmmm             -      3149.29103
+                                                                mmmmm: Decimal fraction of minutes
+                                                                Note that this field is empty in case of an
+                                                                invalid value.
+                                                                Latitude direction:
+                                                                N = North
+ <N/S>           Character              -      N
+                                                                S = South
+                                                                Note that this field is empty in case of an
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                   18 / 41
+                                                                              GNSS Module Series
+
+
+                                                           invalid value.
+
+                                                           Longitude:
+                                                           ddd: Degrees (000–180)
+                                                           mm: Minutes (00–59)
+ <Lon>          dddmm.mmmmm          -      11706.92916
+                                                           mmmmm: Decimal fraction of minutes
+                                                           Note that this field is empty in case of an
+                                                           invalid value.
+                                                           Longitude direction:
+                                                           E = East
+ <E/W>          Character            -      E              W = West
+                                                           Note that this field is empty in case of an
+                                                           invalid value.
+                                                           Position UTC:
+                                                           hh: Hours (00–23)
+                                                           mm: Minutes (00–59)
+ <UTC>          hhmmss.sss           -      071556.000
+                                                           ss: Seconds (00–59)
+                                                           sss: Decimal fraction of           seconds
+                                                           (variable length, 1 to 3 digits)
+                                                           Positioning system status:
+ <Status>       Character            -      A              V = Invalid
+                                                           A = Autonomous
+                                                           Mode indicator:
+                                                           A = Autonomous mode. Satellite system
+                                                           used in non-differential mode in position
+ <ModeInd>      Character            -      A              fix
+                                                           E = Estimated (dead reckoning) mode.
+                                                           N = No fix. Satellite system not used in
+                                                           position fix, or fix not valid
+
+ <Checksum>     Hexadecimal          -      *45            Checksum.
+
+ <CR><LF>       String               -      -              Carriage return and line feed.
+
+
+Example:
+
+$GNGLL,3149.29103,N,11706.92916,E,071556.000,A,A*45
+
+
+
+ NOTE
+
+<TalkerID> is GP in both QZSS and GPS satellite configurations, see Table 16: GNSS Numbering for
+more information about satellite identifiers.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                               19 / 41
+                                                                           GNSS Module Series
+
+
+
+2.2.7. TXT
+
+Text Transmission.
+
+Type:
+
+Output.
+
+Synopsis:
+
+$<TalkerID>TXT,<TotalNumSen>,<SenNum>,<TextID>,<TextMsg>*<Checksum><CR><LF>
+
+Parameter:
+
+
+ Field               Format              Unit    Example    Description
+
+ $                   -                   -       $          Each NMEA message starts with $.
+
+                                                            Talker identifier.
+ <TalkerID>          String              -       GP
+                                                            Always "GP”.
+
+ TXT                 String              -       TXT        Text Transmission.
+
+                                                            Total number of sentences.
+ <TotalNumSen>       Numeric             -       01
+                                                            Range: 01–99.
+                                                            Sentence number.
+ <SenNum>            Numeric             -       01
+                                                            Range: 01–99.
+                                                            Text identifier:
+                                                            00 = Error message
+ <TextID>            Numeric             -       02         01 = Warning message
+                                                            02 = General information
+                                                            03 = User Information
+
+ <TextMsg>           String              -       MA=CASIC   Text message.
+
+ <Checksum>          Hexadecimal         -       *27        Checksum.
+
+ <CR><LF>            String              -       -          Carriage return and line feed.
+
+
+Example:
+
+$GPTXT,01,01,02,MA=CASIC*27
+$GPTXT,01,01,01,ANTENNA OPEN*25
+
+
+
+2.2.8. ZDA
+
+Time & Time. UTC, day, month, year and local time zone.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                         20 / 41
+                                                                                GNSS Module Series
+
+
+Type:
+
+Output.
+
+Synopsis:
+
+$<TalkerID>ZDA,<UTC>,<Day>,<Month>,<Year>,<LocalHour>,<LocalMin>*<Checksum><CR><LF>
+
+
+Parameter:
+
+
+ Field          Format            Unit        Example        Description
+
+ $              -                 -           $              Each NMEA message starts with $.
+
+                                                             Talker identifier.
+ <TalkerID>     String            -           GN
+                                                             See Table 2: NMEA TalkerID.
+                                                             Time & Time. UTC, day, month, year and
+ ZDA            String            -           ZDA
+                                                             local time zone.
+                                                             Position fix UTC:
+                                                             hh: Hours (00–23)
+                                                             mm: Minutes (00–59)
+ <UTC>          hhmmss.sss        -           053712.000
+                                                             ss: Seconds (00–59)
+                                                             sss: Decimal fraction of seconds (variable
+                                                             length, 1–3 digits)
+
+ <Day>          Numeric           day         21             Day of month. Range: 01–31.
+
+ <Month>        Numeric           Month       10             Month. Range: 01–12.
+
+ <Year>         Numeric           Year        2021           Year.
+
+ <LocalHour>    Numeric           -           00             Not supported. Default value: 00.
+
+ <LocalMin>     Numeric           -           00             Not supported. Default value: 00.
+
+ <Checksum>     Hexadecimal       -           *49            Checksum.
+
+ <CR><LF>       String            -           -              Carriage return and line feed.
+
+
+Example:
+
+$GNZDA,053712.000,21,10,2021,00,00*49
+
+
+
+ NOTE
+
+<TalkerID> is GP in QZSS satellite configurations, see Table 16: GNSS Numbering for more information.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                 21 / 41
+                                                                             GNSS Module Series
+
+
+
+2.3. PCAS Messages
+
+This chapter explains the PCAS messages (proprietary NMEA messages defined by the chipset supplier)
+supported by L76K module.
+
+
+
+2.3.1. PCAS01
+
+Sets NMEA port baudrate.
+
+Type:
+
+Set.
+
+Synopsis:
+
+$PCAS01,<CMD>*<Checksum><CR><LF>
+
+Parameter:
+
+
+ Field           Format                Unit       Description
+
+                                                  Baud rate:
+                                                  0 = 4800
+                                                  1 = 9600
+ <CMD>           Numeric               bps        2 = 19200
+                                                  3 = 38400
+                                                  4 = 57600
+                                                  5 = 115200
+
+
+Example:
+
+$PCAS01,1*1D
+
+
+
+2.3.2. PCAS02
+
+Sets positioning frequency.
+
+Type:
+
+Set.
+
+Synopsis:
+
+$PCAS02,<Interval>*<Checksum><CR><LF>
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                            22 / 41
+                                                                                  GNSS Module Series
+
+
+Parameter:
+
+
+ Field           Format                  Unit        Description
+
+                                                     Positioning interval:
+                                                     1000 = Set the positioning frequency to 1 Hz
+ <Interval>      Numeric                 ms
+                                                     500 = Set the positioning frequency to 2 Hz
+                                                     200 = Set the positioning frequency to 5 Hz
+
+
+Example:
+
+$PCAS02,1000*2E
+
+
+
+ NOTE
+
+It is required to set the type of NMEA sentences output to single and change the baud rate to 115200 bps
+when the <Interval> is less than 1000.
+
+
+
+2.3.3. PCAS03
+
+Sets the NMEA sentence output type and frequencies.
+
+Type:
+
+Set.
+
+Synopsis:
+
+$PCAS03,<nGGA>,<nGLL>,<nGSA>,<nGSV>,<nRMC>,<nVTG>,<nZDA>,<nANT>,<Res>,<Res>,<Res
+>,<Res>,<Res>,<Res>*<Checksum><CR><LF>
+
+Parameter:
+
+
+ Field           Format                  Unit        Description
+
+                                                     GGA sentence output frequency:
+                                                     Output once every N (1–9) position fix.
+ <nGGA>          Numeric                 -
+                                                     “0” indicates no output.
+                                                     Null means keeping the previous configuration.
+                                                     GLL sentence output frequency:
+                                                     Output once every N (1–9) position fix.
+ <nGLL>          Numeric                 -
+                                                     “0” indicates no output.
+                                                     Null means keeping the previous configuration.
+                                                     GSA sentence output frequency:
+ <nGSA>          Numeric                 -           Output once every N (1–9) position fix.
+                                                     “0” indicates no output.
+
+
+
+L76K_GNSS_Protocol_Specification                                                                 23 / 41
+                                                                              GNSS Module Series
+
+
+                                                  Null means keeping the previous configuration.
+
+                                                  GSV sentence output frequency:
+                                                  Output once every N (1–9) position fix.
+ <nGSV>         Numeric                -
+                                                  “0” indicates no output.
+                                                  Null means keeping the previous configuration.
+                                                  RMC sentence output frequency:
+                                                  Output once every N (1–9) position fix.
+ <nRMC>         Numeric                -
+                                                  “0” indicates no output.
+                                                  Null means keeping the previous configuration.
+                                                  VTG sentence output frequency:
+                                                  Output once every N (1–9) position fix.
+ <nVTG>         Numeric                -
+                                                  “0” indicates no output.
+                                                  Null means keeping the previous configuration.
+                                                  ZDA sentence output frequency:
+                                                  Output once every N (1–9) position fix.
+ <nZDA>         Numeric                -
+                                                  “0” indicates no output.
+                                                  Null means keeping the previous configuration.
+                                                  ANT sentence output frequency:
+                                                  Output once every N (1–9) position fix.
+ <nANT>         Numeric                -
+                                                  “0” indicates no output.
+                                                  Null means keeping the previous configuration.
+
+ <Res>          Numeric                -          Always “0”.
+
+ <Res>          Numeric                -          Always “0”.
+
+ <Res>          Numeric                -          Reserved.
+
+ <Res>          Numeric                -          Reserved.
+
+ <Res>          Numeric                -          Always “0”.
+
+ <Res>          Numeric                -          Always “0”.
+
+
+Example:
+
+$PCAS03,1,1,1,1,1,1,1,1,0,0,,,0,0*02
+
+
+
+ NOTE
+
+The ANT information of NMEA proprietary messages is included in the NMEA standard TXT sentence.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                             24 / 41
+                                                                                  GNSS Module Series
+
+
+
+2.3.4. PCAS04
+
+Configures the receiver to start searching for satellites.
+
+Type:
+
+Set.
+
+Synopsis:
+
+$PCAS04,<Mode>*<Checksum><CR><LF>
+
+Parameter:
+
+
+ Field            Format                   Unit         Description
+
+                                                        GNSS satellite configuration:
+                                                        1 = GPS
+                                                        2 = BeiDou
+                                                        3 = GPS + BeiDou (default)
+ <Mode>           Numeric                  -
+                                                        4 = GLONASS
+                                                        5 = GPS + GLONASS
+                                                        6 = BeiDou + GLONASS
+                                                        7 = GPS + BeiDou + GLONASS
+
+
+Example:
+
+$PCAS04,3*1A
+
+
+
+ NOTE
+
+The QZSS is enabled by default, but it does not support configuration.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                              25 / 41
+                                                                             GNSS Module Series
+
+
+
+2.3.5. PCAS10
+
+Restarts the module.
+
+Type:
+
+Input.
+
+Synopsis:
+
+$PCAS10,<Flag>*<Checksum><CR><LF>
+
+Parameter:
+
+
+ Field          Format    Unit      Description
+
+                                    Restart mode:
+                                    0 = Hot Start
+ <Flag>         Numeric   -         1 = Warm Start
+                                    2 = Cold Start
+                                    3 = Cold start and restore factory setting.
+
+
+Example:
+
+$PCAS10,0*1C
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                         26 / 41
+                                                                                        GNSS Module Series
+
+
+
+
+3 CASIC Protocol
+This chapter explains the the chipset supplier CASIC proprietary protocol supported by L76K module.
+
+
+
+3.1. Structure of CASIC Protocol Messages
+
+
+         The header of the frame,                        Sentence
+           fixed as 0xBA 0xCE                          number:1 byte
+                                         Sentence type:1           Variable length, all 4 bytes
+                              2 bytes                                multiples of 4
+                                              byte
+
+
+
+
+                Header          Len          Class            ID         Payload      Checksum
+
+
+
+                                        The range for checksum calculation
+
+
+
+                            Figure 2: Structure of CASIC Protocol Messages
+
+
+
+Table 3: Structure of CASIC Protocol Messages
+
+
+ Field           Description
+
+ Header          CASIC protocol frame header consisting of 2 bytes: 0xBA, 0xCE.
+
+ Len             Payload length (Not including Header, Len, Class, ID and Checksum).
+
+ Class           Message type, which is the basic subset to which the current sentence belongs.
+
+ ID              Message ID.
+
+ Payload         Message payload, with a variable number of bytes, is a multiple of 4.
+
+                 Checksum is the last field in the statement that sums up all the data from Len to Payload
+ Checksum
+                 (Four bytes per word).
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                    27 / 41
+                                                                                  GNSS Module Series
+
+
+Checksum sample code:
+
+Checksum = (ID << 24) + (Class << 16) + Len;
+for (i = 0; i < (Len / 4); i++)
+{
+Checksum = Checksum + Payload [i];
+}
+
+
+
+ NOTE
+
+If the command is used for querying or getting parameters, the payload is empty and the payload length is
+0.
+
+
+
+3.1.1. Data Type
+
+Table 4: Data Type
+
+
+ Abbreviation         Type                            Length (Byte)        Note
+
+ U1                   Unsigned character              1                    -
+
+ I1                   Signed character                1                    Complement
+
+ U2                   Unsigned short integer          2                    -
+
+ I2                   Signed short integer            2                    Complement
+
+ U4                   Unsigned long integer           4                    -
+
+ I4                   Signed long integer             4                    Complement
+
+ R4                   IEEE754 float                   4                    -
+
+ R8                   IEEE754 double                  8                    -
+
+
+
+3.1.2. Message Overview
+
+Table 5: Message Overview
+
+ Message                                                  ID
+
+ ACK-NACK                                                 0x05 0x00
+
+ ACK-ACK                                                  0x05 0x01
+
+ CFG-PRT                                                  0x06 0x00
+
+
+
+L76K_GNSS_Protocol_Specification                                                                  28 / 41
+                                                                                GNSS Module Series
+
+
+
+ CFG-MSG                                               0x06 0x01
+
+ CFG-RST                                               0x06 0x02
+
+ CFG-RATE                                              0x06 0x04
+
+ NMEA-GGA                                              0x4E 0x00
+
+ NMEA-GLL                                              0x4E 0x01
+
+ NMEA-GSA                                              0x4E 0x02
+
+ NMEA-GSV                                              0x4E 0x03
+
+ NMEA-RMC                                              0x4E 0x04
+
+ NMEA-VTG                                              0x4E 0x05
+
+ NMEA-ZDA                                              0x4E 0x08
+
+
+
+
+3.2. CASIC Messages
+
+3.2.1. ACK
+
+
+3.2.1.1. ACK-NACK (0x05 0x00)
+
+
+This response indicates incorrect reception.
+
+Type:
+
+Output.
+
+Structure:
+
+
+ Header         Len (Byte)       ID                 Payload                     Checksum
+
+                                                    See Table 6: ACK-NACK
+ 0xBA 0xCE      4                0x05 0x00                                      4 bytes
+                                                    Message Payload
+
+
+
+Table 6: ACK-NACK Message Payload
+
+
+ Byte Offset   Data Type     Scaling    Name    Unit    Description
+
+ 0             U1            -          ClsID   -       The type of the message received incorrectly.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                               29 / 41
+                                                                                 GNSS Module Series
+
+
+                                                         The number of the message received
+ 1             U1             -         MsgID       -
+                                                         incorrectly.
+
+ 2             U2             -         Res         -    Reserved.
+
+
+
+
+3.2.1.2. ACK-ACK (0x05 0x01)
+
+
+This response indicates correct reception.
+
+Type:
+
+Output.
+
+Structure:
+
+
+ Header          Len (Byte)       ID                Payload                       Checksum
+
+                                                    See
+ 0xBA 0xCE       4                0x05 0x01         Table 7: ACK-ACK Message      4 bytes
+                                                    Payload
+
+
+
+Table 7: ACK-ACK Message Payload
+
+
+ Byte Offset    Data Type     Scaling   Name    Unit      Description
+
+ 0              U1            -         ClsID   -         The type of the message received correctly.
+
+                                                          The number of the message received
+ 1              U1            -         MsgID   -
+                                                          correctly.
+
+ 2              U2            -         Res     -         Reserved.
+
+
+
+3.2.2. CFG
+
+
+3.2.2.1. CFG-PRT (0x06 0x00)
+
+
+Sets/Gets serial port operation mode.
+
+Type:
+
+Set/Get.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                30 / 41
+                                                                                      GNSS Module Series
+
+
+Structure:
+
+
+ Header        Len (Byte)            ID                  Payload                       Checksum
+
+                                                         See Table 8: CFG-PRT
+ 0xBA 0xCE     Payload Length        0x06 0x00                                         4 bytes
+                                                         Message Payload
+
+
+
+Table 8: CFG-PRT Message Payload
+
+
+ Byte Offset   Data Type         Scaling   Name          Unit      Description
+
+ 0             U1                -         PortID        -         UART ID.
+
+                                                                   Protocol control mask. Each port
+                                                                   simultaneously       supports    multiple
+ 1             U1                -         ProtoMask     -         protocols. If the corresponding bit is 1, it
+                                                                   means that the protocol is enabled. See
+                                                                   Table 9: ProtoMaskfor more information.
+                                                                   UART working mode mask; See Table
+ 2             U2                -         Mode          -
+                                                                   10: Mode Flag Bits for more information.
+
+ 4             U4                -         BaudRate      bps       Baud rate.
+
+
+
+Table 9: ProtoMask
+
+
+ Mask                       Description
+
+ Bit 0                      1 = Binary protocol input
+
+ Bit 1                      1 = Text protocol input
+
+ Bit 4                      1 = Binary protocol output
+
+ Bit 5                      1 = Text protocol output
+
+
+
+Table 10: Mode Flag Bits
+
+
+ Mask                       Value                                     Description
+
+ [6:7]                      00                                        5 bits
+
+                            01                                        6 bits
+
+                            10                                        7 bits
+
+
+
+L76K_GNSS_Protocol_Specification                                                                       31 / 41
+                                                                                 GNSS Module Series
+
+
+
+                            11                                   8 bits.
+
+ [9:11]                     10x                                  None.
+
+                            001                                  Odd.
+
+                            000                                  Even
+
+                            x1x                                  Reserved
+
+ [12:13]                    00                                   1 stop bit
+
+                            01                                   1.5 stop bits
+
+                            10                                   2 stop bits
+
+                            11                                   Reserved
+
+
+Example:
+
+//Get:
+//Send:
+BA CE 00 00 06 00 00 00 06 00
+
+//Respond:
+BA CE 08 00 06 00 01 07 C0 08 00 C2 01 00 09 C9 C7 08 // Current UART1 configuration (invalid).
+BA CE 08 00 06 00 00 FF C0 08 80 25 00 00 88 24 C7 08 // Current UART0 configuration.
+
+//ACK:
+BA CE 04 00 05 01 06 00 00 00 0A 00 05 01
+
+//Set:
+//Send:
+//Configured the current UART port baud rate to 9600 bps:
+BA CE 08 00 06 00 FF 33 C0 08 80 25 00 00 87 59 C6 08
+
+//ACK:
+BA CE 04 00 05 01 06 00 00 00 0A 00 05 01
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                             32 / 41
+                                                                                  GNSS Module Series
+
+
+
+3.2.2.2. CFG-MSG (0x06 0x01)
+
+
+Sets/Gets the frequency of NMEA sentences to be sent.
+
+Type:
+
+Set/Get.
+
+Structure:
+
+
+ Header             Len (Byte)         ID                Payload                  Checksum
+
+                                                         See Table 11: CFG-MSG
+ 0xBA 0xCE          Payload Length     0x06 0x01                                  4 bytes
+                                                         Message Payload
+
+
+
+Table 11: CFG-MSG Message Payload
+
+
+ Byte Offset   Data Type     Scaling   Name       Unit    Description
+
+                                                          Message type. See Table 5: Message
+ 0             U1            -         ClsID      -
+                                                          Overview.
+                                                          Message number. See Table 5: Message
+ 1             U1            -         MsgID      -
+                                                          Overview.
+                                                          Frequency of NMEA sentences. Range 0–9.
+                                                          0: No output
+ 2             U2            -         Rate       -       N: Output once every N (1–9) position fix.
+                                                          0xFFFF: Immediate output once, equivalent to
+                                                          query output.
+
+
+Example:
+
+//Get:
+//Send:
+BA CE 00 00 06 01 00 00 06 01
+
+//Respond:
+BA CE 04 00 06 01 03 11 00 00 07 11 06 01
+
+//ACK:
+BA CE 04 00 05 01 06 01 00 00 0A 01 05 01
+
+//Set:
+//Send:
+//Configured the GGA sentence output frequency:
+BA CE 04 00 06 01 4E 00 01 00 52 00 07 01
+
+
+
+L76K_GNSS_Protocol_Specification                                                                33 / 41
+                                                                                 GNSS Module Series
+
+
+
+
+//ACK:
+BA CE 04 00 05 01 06 01 00 00 0A 01 05 01
+
+
+
+3.2.2.3. CFG-RST (0x06 0x02)
+
+
+Restarts the module or cleans up the saved data structures.
+
+Type:
+
+Command.
+
+Structure:
+
+
+ Header             Len (Bytes)     ID                Payload                     Checksum
+
+                                                      See Table 12: CFG-RST
+ 0xBA 0xCE          4               0x06 0x02                                     4 bytes
+                                                      Message Payload
+
+
+
+Table 12: CFG-RST Message Payload
+
+
+ Byte Offset   Data Type     Scaling     Name          Unit     Description
+
+                                                                Clear the contents of battery-backed
+                                                                RAM. Each bit of the mask represents
+                                                                one section of RAM.
+                                                                Bit 0 = Ephemeris
+                                                                Bit 1 = Almanac
+                                                                Bit 2 = Health information
+                                                                Bit 3 = Lonospheric parameter
+ 0             U2            -           NavBbrMask    -
+                                                                Bit 4 = Receive positioning information
+                                                                Bit 5 = Clock drift (clock frequency
+                                                                offset)
+                                                                Bit 6 = Crystal vibration parameters
+                                                                Bit 7 = UTC fixes parameters
+                                                                Bit 8 = RTC
+                                                                Bit 9 = Configuration information
+                                                                Reset mode.
+                                                                0 = Immediate hardware reset
+                                                                (Achieved via Watchdog)
+ 2             U1            -           ResetMode     -
+                                                                1 = Software reset
+                                                                2 = Software reset (GPS only)
+                                                                4 = Hardware reset after power off
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                 34 / 41
+                                                                                 GNSS Module Series
+
+
+                                                                (Achieved via Watchdog)
+
+                                                                Start mode.
+                                                                0 = Hot start
+ 3              U1             -          StartMode     -       1 = Warm start
+                                                                2 = Cold start
+                                                                3 = Factory data reset
+
+
+Example:
+
+//Configuration:
+//Send:
+//Clear configuration information:
+BA CE 04 00 06 02 FF 01 00 00 03 02 06 02
+
+//ACK:
+BA CE 04 00 05 01 06 02 00 00 0A 02 05 01
+
+
+
+3.2.2.4. CFG-RATE (0x06 0x04)
+
+
+Sets/Gets the time interval for positioning.
+
+Type:
+
+Set/Get.
+
+Structure:
+
+
+ Header              Len (Byte)      ID               Payload                     Checksum
+
+                                                      See Table 13: CFG-RATE
+ 0xBA 0xCE           4               0x06 0x04                                    4 bytes
+                                                      Message Payload
+
+
+
+Table 13: CFG-RATE Message Payload
+
+
+ Byte Offset    Data Type      Scaling    Name          Unit    Description
+
+                                                                Time interval between two positions.
+                                                                200
+ 0              U2             -          Interval      ms
+                                                                500
+                                                                1000
+
+ 2              U2             -          Res           -       Reserved.
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                                35 / 41
+                                            GNSS Module Series
+
+
+Example:
+
+//Get:
+//Send:
+BA CE 00 00 06 04 00 00 06 04
+
+//Respond:
+BA CE 04 00 06 04 E8 03 00 00 EC 03 06 04
+
+//ACK
+BA CE 04 00 05 01 06 04 00 00 0A 04 05 01
+
+//Set:
+//Send:
+//The fix rate is 2 Hz.
+BA CE 04 00 06 04 F4 01 00 00 F8 01 06 04
+
+//ACK:
+BA CE 04 00 05 01 06 04 00 00 0A 04 05 01
+
+
+
+
+L76K_GNSS_Protocol_Specification                        36 / 41
+                                                                               GNSS Module Series
+
+
+
+
+4 Appendix A References
+Table 14: Related Documents
+
+
+ Document Name
+
+ [1] Quectel_L76K_Hardware_Design
+
+ [2] Quectel_L76K_EVB_User_Guide
+
+ [3] Quectel_L76K_Reference_Design
+
+
+
+Table 15: Terms and Abbreviations
+
+
+ Abbreviation            Description
+
+ 2D                      2 Dimension
+
+ 3D                      3 Dimension
+
+ ACK                     Acknowledgement
+
+ ANT                     Antenna
+
+ BeiDou                  BeiDou Navigation Satellite System
+
+ CASIC                   China Aerospace Science & Industry Corporation
+
+ CFG                     Configure
+
+ COG                     Course over Ground
+
+ COGM                    Course over Ground (in Magnetic North Course Direction)
+
+ COGT                    Course over Ground (in True North Course Direction)
+
+ C/N0                    Carrier-to-Noise-Density Ratio
+
+ DGPS                    Differential Global Positioning System
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                           37 / 41
+                                                                          GNSS Module Series
+
+
+
+DOP                    Dilution of Precision
+
+GGA                    Global Positioning System Fix Data
+
+GLL                    Geographic Position - Latitude and Longitude
+
+GLONASS                Global Navigation Satellite System (Russian)
+
+GNS                    Global Network Service
+
+GNSS                   Global Navigation Satellite System
+
+GPS                    Global Positioning System
+
+GSA                    GPS DOP and Active Satellites
+
+GSV                    GNSS Satellites in View
+
+HDOP                   Horizontal Dilution of Precision
+
+NACK                   Negative Acknowledgement
+
+NMEA                   NMEA (National Marine Electronics Association) 0183 Interface Standard
+
+PDOP                   Position Dilution of Precision
+
+PPS                    Pulse Per Second
+
+QZSS                   Quasi-Zenith Satellite System
+
+RMC                    Recommended Minimum Specific GNSS Data
+
+RTC                    Real-Time Kinematic
+
+SBAS                   Satellite-Based Augmentation System
+
+SNR                    Signal-to-Noise Ratio
+
+SOG                    Speed over Ground
+
+SPS                    Standard Positioning Service
+
+TXT                    Text Transmission
+
+UART                   Universal Asynchronous Receiver/Transmitter
+
+UTC                    Coordinated Universal Time
+
+VDOP                   Vertical Dilution of Precision
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                         38 / 41
+                                                           GNSS Module Series
+
+
+
+VTG                    Course Over Ground & Ground Speed
+
+WGS84                  World Geodetic System 1984
+
+ZDA                    Time & Date
+
+
+
+
+L76K_GNSS_Protocol_Specification                                       39 / 41
+                                                               GNSS Module Series
+
+
+
+
+5 Appendix B GNSS Numbering
+Table 16: GNSS Numbering
+
+
+GNSS Type        System ID         Satellite ID   Signal ID
+
+GPS              1                 1–32           1 = L1 C/A
+
+GLONASS          2                 65–88          1 = L1
+
+BeiDou           4                 1–63           1 = B1
+
+QZSS             5                 193–197        1 = L1
+
+
+
+
+L76K_GNSS_Protocol_Specification                                           40 / 41
+                                                                        GNSS Module Series
+
+
+
+
+6 Appendix C Default Configuration
+Table 17: Default Configurations
+
+ Item                              Default
+
+ NMEA Port Baud Rate               9600 bps
+
+ Datum Reference                   WGS84
+
+ Rate of Position Fixing           1 Hz
+
+ DGPS                              Disable
+
+ NMEA Standard Messages            RMC, GGA, GSV, GSA, VTG, GLL, TXT, and ZDA
+
+ GNSS Configuration                GPS + BeiDou
+
+
+
+
+L76K_GNSS_Protocol_Specification                                                    41 / 41
+

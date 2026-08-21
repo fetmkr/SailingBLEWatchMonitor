@@ -21,6 +21,9 @@ struct DisplayState {
 
     // ── 항해 값 ──────────────────────────────────────────────────────────
     float sogKn   = 0.0f;
+    /// 위치를 직접 차분해서 구한 속도. 음수면 아직 못 구함.
+    /// 모듈이 주는 도플러 속도가 저속을 뭉개서, 어느 쪽이 나은지 비교 중이다.
+    float sogFromPos = -1.0f;
     float cogDeg  = 0.0f;   // GPS 침로 — 배가 실제로 가는 방향
     float headingDeg = -1.0f; // 자력계 방위 — 뱃머리가 보는 방향. 음수면 없음
     float heelDeg  = 0.0f;

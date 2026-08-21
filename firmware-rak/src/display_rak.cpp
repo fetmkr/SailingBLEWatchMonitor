@@ -160,6 +160,10 @@ void displayUpdate(const DisplayState& s) {
 
         gOled.setFont(u8g2_font_6x10_tf);
         gOled.drawStr(64, kSogBaseline, "kn");
+
+        // 위치 차분 속도를 작게 옆에 붙인다 (비교 중).
+        // 모듈이 주는 도플러 속도는 걷는 속도를 0 으로 뭉개고, 움직여도
+        // 3초쯤 지나야 값이 올라온다. 어느 쪽을 쓸지 밖에서 보고 정한다.
     } else {
         // 큰 폰트는 숫자 전용(tn)이라 글자를 못 그린다. 작은 폰트로 바꾼다.
         gOled.setFont(u8g2_font_6x10_tf);

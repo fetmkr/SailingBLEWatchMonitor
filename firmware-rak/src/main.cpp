@@ -40,6 +40,10 @@ using sail::Telemetry;
 
 // ── 모듈 신원 ────────────────────────────────────────────────────────────
 static Preferences gPrefs;
+
+// 다듬기 세기와 잡음 바닥. 설정에서 먼저 읽으므로 여기 둔다.
+static uint8_t gDampLevel  = 2;      // 0~5. 아래 kDampTau 의 칸 번호
+static float   gDeadbandKn = 0.10f;  // 이보다 작은 속도는 0 으로 내린다
 static char        gUserName[sail::kMaxUserNameLen + 1] = {0}; // "hojun"
 static char        gFullName[sail::kMaxFullNameLen + 1] = {0}; // "SAIL-hojun"
 static uint8_t     gModuleID = 1;
@@ -172,6 +176,8 @@ static void loadSettings() {
     gNotifyPeriodMs = gPrefs.getUInt("notify_ms", sail::kNotifyPeriodMs);
     gSensorPowerPin = (int)gPrefs.getInt("pwr_pin", rak::kSensorPowerA);
     gHeelOffsetDeg  = gPrefs.getFloat("heel_off", 0.0f);
+    gDampLevel      = gPrefs.getUChar("damp", 2);
+    gDeadbandKn     = gPrefs.getFloat("dead_kn", 0.10f);
     gGyrOffX        = gPrefs.getFloat("gyr_x", 0.0f);
     gGyrOffY        = gPrefs.getFloat("gyr_y", 0.0f);
     gGyrOffZ        = gPrefs.getFloat("gyr_z", 0.0f);
@@ -405,6 +411,11 @@ static constexpr uint32_t kGpsBaud = 115200;
 
 static uint8_t gGpsHz = 10; // 실제로 건 갱신율 (진단 출력용)
 
+// CASIC 바이너리 쪽은 아래에 정의돼 있다. gpsBegin() 이 먼저 나와서 앞선언한다.
+static void casicSend(uint8_t cls, uint8_t id, const uint8_t* payload, uint16_t len);
+static bool casicQuery(uint8_t cls, uint8_t id, uint8_t* out, uint16_t cap, uint16_t* len);
+static const char* dyModelName(uint8_t m);
+
 // 체크섬을 붙여 한 줄 보낸다. ($ 와 * 사이 문자들의 XOR)
 static void gpsSend(const char* body) {
     uint8_t ck = 0;
@@ -462,13 +473,258 @@ static void gpsBegin() {
     //   요청 10 Hz → 초당 문장 19.6개 (GGA+RMC 두 종류이므로 9.8회), 체크섬 실패 0
     // 문장 두 종류만 켜 두고 115200 을 쓰기 때문에 대역이 남는다.
     gpsSetRate(10);
+
+    // NAV-PV 를 1 Hz 로 계속 내보내게 한다 (측위 10회당 1번).
+    //
+    // NMEA 로 만들어지기 전의 속도를 보려는 것이다. RMC 가 0 인데 이쪽이
+    // 살아 있으면 다듬기가 어디서 걸리는지 알 수 있다. 80바이트에 초당 한 번이라
+    // 115200bps 에서 부담이 없다.
+    {
+        const uint8_t on[4] = {0x01, 0x03, 10, 0};
+        casicSend(0x06, 0x01, on, 4);
+        delay(80);
+    }
+
+    // 저장해 둔 움직임 종류(dyModel)가 있으면 다시 건다.
+    // 255 면 저장한 적이 없다는 뜻 — 모듈 기본값(4 선박)을 그대로 둔다.
+    const uint8_t want = gPrefs.getUChar("gps_dyn", 255);
+    if (want <= 7) {
+        uint8_t  p[44];
+        uint16_t len = 0;
+        if (casicQuery(0x06, 0x07, p, sizeof(p), &len) && len >= 44 && p[4] != want) {
+            const uint32_t mask = (1UL << 0);
+            memcpy(p + 0, &mask, 4);
+            p[4] = want;
+            casicSend(0x06, 0x07, p, 44);
+            delay(120);
+            Serial.printf("[GPS] 움직임 종류를 %u(%s) 로 다시 걸었습니다\n",
+                          want, dyModelName(want));
+        }
+    }
+}
+
+// ── 밖에 나갔다 와서 확인하기 위한 기록 ──────────────────────────────────
+//
+// 노트북을 들고 나갈 수는 없다. 그래서 위성을 잡았을 때 무엇이 왔는지
+// 보드가 스스로 기억해 둔다. 돌아와서 `fix` 를 치면 그대로 보여준다.
+static char     gLastFixRmc[100] = {0}; // fix 가 있었던 마지막 RMC 원문
+static uint32_t gLastFixAtMs     = 0;
+static float    gMaxSogKn        = 0.0f; // fix 중에 본 가장 큰 속도 (도플러)
+static float    gMaxSogFromPos   = 0.0f; // 같은 구간, 위치 차분 쪽
+static float    gMaxSogPv        = 0.0f; // 같은 구간, NAV-PV(NMEA 거치기 전) 쪽
+static uint32_t gFixSeenCount    = 0;    // fix 상태로 판정된 횟수
+
+// ── 위치 차분 속도 ──────────────────────────────────────────────────────
+//
+// ★ 모듈이 주는 속도(도플러)는 느린 구간을 0 으로 뭉갠다.
+//   실측: 밖에서 걸을 때(2~3 kn) 계속 0, 뛰니까 8.76 kn 이 나왔다.
+//   L76K 문서의 PCAS/CASIC 명령 어디에도 이 동작을 끄는 설정이 없다.
+//
+// 요트에서는 정박·미풍 구간이 0~2 kn 이라 그냥 둘 수 없다. 그래서 위치를
+// 직접 차분해서 속도를 따로 구하고, 둘을 나란히 본다.
+//
+// 두 방식은 성질이 다르다 (USV 논문 PMC8659471 과 같은 이야기)
+//   도플러   분산이 작다. 대신 저속을 뭉갠다.
+//   위치차분 평균이 정확하다. 대신 분산이 크고 정지 중에도 드리프트가 뜬다.
+//
+// ★ 실측으로 결론이 났다 (2026-08-22). 걷는 동안 위치 차분 쪽에 30.31 kn 이
+//   찍혔다. 도플러는 같은 구간에서 7.98 kn 이었다. 위치 차분은 못 쓴다.
+//   화면에서 뺐고, 시리얼 진단(`fix`)에만 남겨 둔다.
+//
+//   저속이 0 으로 나오던 진짜 원인은 dyModel 이었다. 움직임 종류를 맞추니
+//   도플러가 저속도 제대로 구분한다.
+static double   gPrevLat = 0, gPrevLon = 0;
+static uint32_t gPrevPosMs = 0;
+static float    gSogFromPos = -1.0f; // 음수면 아직 못 구함
+
+// 위치가 갱신될 때마다 부른다. 1초 간격으로만 계산한다 —
+// 10 Hz 위치를 그대로 차분하면 GPS 오차가 그대로 속도 노이즈가 된다.
+static void updatePositionSpeed() {
+    if (!gGps.location.isValid()) return;
+
+    const uint32_t now = millis();
+    const double lat = gGps.location.lat();
+    const double lon = gGps.location.lng();
+
+    if (gPrevPosMs == 0) {
+        gPrevLat = lat; gPrevLon = lon; gPrevPosMs = now;
+        return;
+    }
+
+    const double dt = (now - gPrevPosMs) / 1000.0;
+    if (dt < 1.0) return;
+
+    const double meters = TinyGPSPlus::distanceBetween(gPrevLat, gPrevLon, lat, lon);
+    const double mps    = meters / dt;
+    gSogFromPos = (float)(mps * 1.943844); // m/s → knot
+
+    gPrevLat = lat; gPrevLon = lon; gPrevPosMs = now;
 }
 
 // loop() 에서 계속 부른다. 들어온 바이트를 파서에 먹인다.
+// NAV-PV 로 받은 값. NMEA 를 거치기 전의 속도다.
+static float    gPvSpeedKn  = -1.0f; // 음수면 아직 없음
+static float    gPvCogDeg   = -1.0f;
+static float    gPvAccKn    = -1.0f; // 모듈이 밝힌 자기 속도 오차
+static bool     gPvVelValid = false;
+static uint32_t gPvAtMs     = 0;
+
 static void gpsPoll() {
+    static char   line[100];
+    static size_t n = 0;
+
+    // ── 바이너리 프레임 골라내기 ─────────────────────────────────────────
+    // NMEA 는 전부 아스키(0x80 미만)라 0xBA 가 나올 수 없다. 그래서 0xBA 를
+    // 만나면 바이너리 프레임이 시작된 것으로 봐도 안전하다.
+    static int      bs = 0;   // 0=NMEA 읽는 중
+    static uint16_t blen = 0, bneed = 0, bn = 0;
+    static uint8_t  bcls = 0, bid = 0;
+    static uint8_t  bbody[96];
+
     while (Serial1.available()) {
-        gGps.encode((char)Serial1.read());
+        const uint8_t u = (uint8_t)Serial1.read();
+        const char    c = (char)u;
+
+        if (bs != 0) {
+            switch (bs) {
+                case 1: bs = (u == 0xCE) ? 2 : (u == 0xBA ? 1 : 0); break;
+                case 2: blen = u;                  bs = 3; break;
+                case 3: blen |= (uint16_t)u << 8;  bs = 4; break;
+                case 4: bcls = u;                  bs = 5; break;
+                case 5:
+                    bid   = u;
+                    bneed = (blen > sizeof(bbody)) ? sizeof(bbody) : blen;
+                    bn    = 0;
+                    bs    = (bneed > 0) ? 6 : 7;
+                    break;
+                case 6:
+                    bbody[bn++] = u;
+                    if (bn >= bneed) { bn = 0; bs = 7; }
+                    break;
+                case 7:
+                    if (++bn >= 4) { // 체크섬까지 다 받았다
+                        if (bcls == 0x01 && bid == 0x03 && bneed >= 80) {
+                            float sp, hd, ac;
+                            memcpy(&sp, bbody + 64, 4);
+                            memcpy(&hd, bbody + 68, 4);
+                            memcpy(&ac, bbody + 72, 4);
+                            gPvVelValid = (bbody[5] != 0);
+                            gPvSpeedKn  = sp * 1.943844f;
+                            gPvCogDeg   = hd;
+                            gPvAccKn    = (ac > 0.0f) ? sqrtf(ac) * 1.943844f : -1.0f;
+                            gPvAtMs     = millis();
+                            if (gPvVelValid && gPvSpeedKn > gMaxSogPv) gMaxSogPv = gPvSpeedKn;
+                        }
+                        bs = 0;
+                    }
+                    break;
+            }
+            continue;
+        }
+        if (u == 0xBA) { bs = 1; continue; }
+
+        gGps.encode(c);
+
+        // 파서에 먹이는 것과 별개로 원문도 한 줄씩 모은다.
+        // 값이 이상할 때 "모듈이 실제로 뭘 보냈나" 를 봐야 하기 때문이다.
+        if (c == '\n' || c == '\r') {
+            if (n > 6) {
+                line[n] = '\0';
+                // RMC 를 다 읽은 시점이라 파서 상태가 갱신되어 있다.
+                if (strstr(line, "RMC") != nullptr && gGps.location.isValid()) {
+                    strncpy(gLastFixRmc, line, sizeof(gLastFixRmc) - 1);
+                    gLastFixRmc[sizeof(gLastFixRmc) - 1] = '\0';
+                    gLastFixAtMs = millis();
+                }
+            }
+            n = 0;
+        } else if (n < sizeof(line) - 1) {
+            line[n++] = c;
+        }
     }
+}
+
+// ── 다듬기 (damping) ─────────────────────────────────────────────────────
+//
+// 왜 필요한가
+//   도플러 속도는 원래 정확하다. 정지 중에 0.1 kn 이 뜨는 건 고장이 아니라
+//   도플러의 이론 잡음이다 — 0.1 kn 은 초당 5 cm 이고, Inside GNSS 가 "raw
+//   Doppler 는 초당 몇 cm 수준" 이라고 못 박는다. Velocitek ProStart V2 가
+//   파는 물건의 사양도 ±0.1 kn 이다. 우리가 그 수준에서 돌고 있다.
+//   다만 초당 10번 오는 값이 그만큼 떨려서 화면 숫자가 가만있질 않는다.
+//
+// 왜 세기를 고르게 하는가
+//   세게 다듬으면 숫자는 안정되지만 택 할 때 반응이 늦는다. 어느 쪽이 나은지는
+//   바람과 물결에 따라 다르다. 실제 요트 계기들이 그래서 사용자에게 맡긴다.
+//     "잔잔한 바람과 평평한 물에서는 다듬기가 필요 없다(0단계). 바람이 세고
+//      물결이 거칠면 다듬기가 큰 흔들림을 없애 준다" — Velocitek 안내
+//   그래서 우리도 숫자를 박지 않고 단계로 둔다. `smooth` 명령으로 고른다.
+//
+// 어떻게 다듬는가
+//   1차 IIR 이다. 새 값을 통째로 받지 않고 조금씩만 반영한다.
+//     다듬은값 += (원본 - 다듬은값) * dt / (시상수 + dt)
+//   COG 는 각도라 359 도와 1 도가 이웃이다. 숫자를 그냥 평균 내면 180 도
+//   근처로 튄다. 그래서 방향을 단위벡터(cos, sin)로 바꿔 각각 다듬고 다시
+//   각도로 되돌린다.
+static constexpr float kDampTau[6] = {0.0f, 0.3f, 0.6f, 1.2f, 2.5f, 5.0f}; // 초
+static float    gSogDamped   = -1.0f;  // 음수면 아직 없음
+static float    gCogCos = 0.0f, gCogSin = 0.0f;
+static float    gCogDamped   = -1.0f;
+static uint32_t gDampAtMs    = 0;
+
+// 잡음 바닥 아래는 0 으로 보여준다.
+//
+// 도플러의 이론 잡음이 초당 몇 cm, 노트로 0.1 언저리다. 그보다 작은 값은
+// 배가 정말 그만큼 움직인 건지 잡음인지 우리가 구별할 수 없다. 구별 못 하는
+// 값을 소수점까지 띄우면 읽는 사람이 없는 의미를 붙이게 된다.
+//
+// ★ 지어낸 값을 쓰는 것과는 다르다. "이보다 작은 건 못 잰다" 는 사실을
+//   그대로 보여주는 것이다. fix 가 없을 때 숫자를 아예 안 그리는 것과 같은 뜻이다.
+static float sogOut() {
+    const float v = (gSogDamped >= 0.0f) ? gSogDamped : (float)gGps.speed.knots();
+    return (v < gDeadbandKn) ? 0.0f : v;
+}
+
+static void dampingReset() {
+    gSogDamped = -1.0f;
+    gCogDamped = -1.0f;
+    gDampAtMs  = 0;
+}
+
+static void dampingUpdate(float rawSog, float rawCog, uint32_t nowMs) {
+    const float tau = kDampTau[gDampLevel <= 5 ? gDampLevel : 2];
+
+    // 0 단계거나 처음이면 원본을 그대로 쓴다.
+    if (tau <= 0.0f || gDampAtMs == 0 || gSogDamped < 0.0f) {
+        gSogDamped = rawSog;
+        gCogDamped = rawCog;
+        gCogCos    = cosf(rawCog * DEG_TO_RAD);
+        gCogSin    = sinf(rawCog * DEG_TO_RAD);
+        gDampAtMs  = nowMs;
+        return;
+    }
+
+    const float dt = (nowMs - gDampAtMs) / 1000.0f;
+    if (dt <= 0.0f) return;
+    gDampAtMs = nowMs;
+
+    // 오래 끊겼다가 돌아온 값은 이어 붙이면 안 된다. 새로 시작한다.
+    if (dt > 2.0f) {
+        gSogDamped = rawSog;
+        gCogCos    = cosf(rawCog * DEG_TO_RAD);
+        gCogSin    = sinf(rawCog * DEG_TO_RAD);
+        gCogDamped = rawCog;
+        return;
+    }
+
+    const float a = dt / (tau + dt);
+    gSogDamped += (rawSog - gSogDamped) * a;
+
+    gCogCos += (cosf(rawCog * DEG_TO_RAD) - gCogCos) * a;
+    gCogSin += (sinf(rawCog * DEG_TO_RAD) - gCogSin) * a;
+    float deg = atan2f(gCogSin, gCogCos) * RAD_TO_DEG;
+    if (deg < 0.0f) deg += 360.0f;
+    gCogDamped = deg;
 }
 
 // 지금 GPS 값을 믿어도 되는지 판정한다.
@@ -479,7 +735,21 @@ static void gpsPoll() {
 static void gpsUpdateFix() {
     bool ok = gGps.location.isValid() && gGps.location.age() < kGpsStaleMs &&
               gGps.speed.isValid() && gGps.speed.age() < kGpsStaleMs;
-    if (ok) gEverHadFix = true;
+    if (ok) {
+        gEverHadFix = true;
+        gFixSeenCount++;
+        const float kn = (float)gGps.speed.knots();
+        if (kn > gMaxSogKn) gMaxSogKn = kn;
+        updatePositionSpeed();
+        if (gSogFromPos > gMaxSogFromPos) gMaxSogFromPos = gSogFromPos;
+        dampingUpdate(kn, (float)gGps.course.deg(), millis());
+    } else {
+        dampingReset();
+        // fix 를 놓쳤으면 이전 위치를 버린다. 안 버리면 다시 잡았을 때
+        // 그동안 움직인 거리가 통째로 한 번의 속도가 되어 엉뚱한 값이 튄다.
+        gPrevPosMs  = 0;
+        gSogFromPos = -1.0f;
+    }
     gGpsFix = ok;
 }
 
@@ -519,6 +789,26 @@ static void doFix() {
         Serial.printf("  HDOP          %.1f (작을수록 정확)\n",
                       gGps.hdop.isValid() ? gGps.hdop.hdop() : 99.9);
     }
+    // ── 밖에 나갔다 온 뒤에 볼 기록 ──────────────────────────────────────
+    Serial.println("──────────────────────────────────────────");
+    Serial.printf("  fix 판정 횟수  %lu\n", (unsigned long)gFixSeenCount);
+    Serial.printf("  본 최고 속도   RMC %.2f kn / NAV-PV %.2f kn / 위치차분 %.2f kn\n",
+                  gMaxSogKn, gMaxSogPv, gMaxSogFromPos);
+    if (gPvAtMs != 0) {
+        Serial.printf("  지금 NAV-PV    %.2f kn (오차 ±%.2f)  침로 %.1f  유효 %s  %lu초 전\n",
+                      gPvSpeedKn, gPvAccKn, gPvCogDeg,
+                      gPvVelValid ? "예" : "아니오",
+                      (unsigned long)((millis() - gPvAtMs) / 1000));
+    }
+    if (gLastFixRmc[0] != '\0') {
+        Serial.printf("  마지막 fix RMC (%.0f초 전)\n",
+                      (millis() - gLastFixAtMs) / 1000.0f);
+        Serial.printf("    %s\n", gLastFixRmc);
+        Serial.println("    필드 순서: 시각,상태,위도,N/S,경도,E/W,속도,침로,날짜");
+        Serial.println("                                          ↑ 7번째가 속도(kn)");
+    } else {
+        Serial.println("  아직 fix 된 적이 없어 기억해 둔 RMC 가 없습니다");
+    }
     Serial.println("──────────────────────────────────────────");
 
     if (gGps.charsProcessed() == 0) {
@@ -536,6 +826,393 @@ static void doFix() {
 
 // 파싱하지 않은 원시 바이트를 그대로 보여준다. NMEA 문장이 눈에 보이면
 // GPS 가 말하고 있다는 뜻이다.
+// ── CASIC 바이너리 메시지 ────────────────────────────────────────────────
+//
+// NMEA($PCAS...) 로는 못 보고 못 건드리는 것들이 바이너리 쪽에 있다.
+// 두 가지가 특히 중요하다.
+//   1. 우리가 건 설정이 실제로 걸렸는지 **되물어볼 수 있다.**
+//      지금까지는 보내기만 하고 확인한 적이 없었다.
+//   2. 저속을 정지로 뭉개는 문턱값(staticHoldTh)이 여기 있다.
+//
+//   틀 (문서 §2.2)
+//     0xBA 0xCE | 길이(U2,LE) | class(U1) | id(U1) | 내용 | 체크섬(U4,LE)
+//
+//   체크섬 (문서 §2.2 알고리즘 그대로)
+//     ckSum = (class << 24) + (id << 16) + len;
+//     for (i = 0; i < len/4; i++) ckSum += payload[i];   // 4바이트씩 리틀엔디안
+//
+//   CFG 를 보내면 수신기가 반드시 답한다 (문서 §2.5)
+//     ACK-ACK  0x05 0x01  받아들였다
+//     ACK-NACK 0x05 0x00  거절했다
+//
+// 문서: docs/gps/CASIC_protocol_en.pdf (Hangzhou Zhongke Microelectronics)
+//       L76K 문서(docs/gps/Quectel_L76K_*.pdf)에는 이 내용이 통째로 없다.
+//       칩이 모듈 문서보다 훨씬 많은 걸 알아듣는다.
+// ★ 문서 두 개가 체크섬 공식을 서로 다르게 적어 놨다. 하나는 오타다.
+//   L76K  (우리 모듈 정본) : Checksum = (ID    << 24) + (Class << 16) + Len
+//   CASIC (칩 원본)        : ckSum    = (class << 24) + (id    << 16) + len
+// 어느 쪽이 맞는지는 답이 오는 쪽이 정답이다. 둘 다 해 보고 되는 쪽을 기억한다.
+static bool gCasicIdFirst = true; // 우리 모듈 문서(L76K) 방식부터
+
+static void casicSend(uint8_t cls, uint8_t id, const uint8_t* payload, uint16_t len) {
+    const uint8_t hdr[6] = {0xBA, 0xCE,
+                            (uint8_t)(len & 0xFF), (uint8_t)(len >> 8),
+                            cls, id};
+
+    const uint8_t hi = gCasicIdFirst ? id  : cls;
+    const uint8_t lo = gCasicIdFirst ? cls : id;
+    uint32_t ck = ((uint32_t)hi << 24) + ((uint32_t)lo << 16) + len;
+    for (uint16_t i = 0; i + 3 < len; i += 4) {
+        uint32_t w;
+        memcpy(&w, payload + i, 4); // ESP32 도 리틀엔디안이라 그대로 맞는다
+        ck += w;
+    }
+
+    Serial1.write(hdr, 6);
+    if (len > 0) Serial1.write(payload, len);
+    const uint8_t ckb[4] = {(uint8_t)(ck), (uint8_t)(ck >> 8),
+                            (uint8_t)(ck >> 16), (uint8_t)(ck >> 24)};
+    Serial1.write(ckb, 4);
+    Serial1.flush();
+}
+
+// 바이너리 응답 한 개를 기다린다. wantId 가 0xFF 면 그 class 의 아무거나 받는다.
+//
+// NMEA 문장이 초당 2000바이트씩 같이 흘러들어오므로 0xBA 0xCE 를 찾아가며 읽는다.
+// 지나가는 NMEA 는 버리지 않고 파서에 먹인다 — 기다리는 동안 위치가 멎으면 안 된다.
+static bool casicWait(uint32_t waitMs, uint8_t wantCls, uint8_t wantId,
+                      uint8_t* out, uint16_t outCap, uint16_t* outLen,
+                      uint8_t* gotId) {
+    const uint32_t start = millis();
+    int      state = 0;
+    uint16_t len = 0, need = 0, n = 0;
+    uint8_t  cls = 0, id = 0;
+    uint8_t  body[128];
+
+    while (millis() - start < waitMs) {
+        while (Serial1.available()) {
+            const uint8_t c = (uint8_t)Serial1.read();
+            switch (state) {
+                case 0: if (c == 0xBA) state = 1; else gGps.encode((char)c); break;
+                case 1: state = (c == 0xCE) ? 2 : (c == 0xBA ? 1 : 0); break;
+                case 2: len = c;                 state = 3; break;
+                case 3: len |= (uint16_t)c << 8; state = 4; break;
+                case 4: cls = c;                 state = 5; break;
+                case 5:
+                    id   = c;
+                    need = (len > sizeof(body)) ? sizeof(body) : len;
+                    n    = 0;
+                    state = (need > 0) ? 6 : 7;
+                    break;
+                case 6:
+                    body[n++] = c;
+                    if (n >= need) { n = 0; state = 7; }
+                    break;
+                case 7: // 체크섬 4바이트를 다 받으면 한 개 완성
+                    if (++n >= 4) {
+                        if (cls == wantCls && (wantId == 0xFF || id == wantId)) {
+                            if (gotId)  *gotId  = id;
+                            const uint16_t cp = (need > outCap) ? outCap : need;
+                            if (out && cp) memcpy(out, body, cp);
+                            if (outLen) *outLen = cp;
+                            return true;
+                        }
+                        state = 0;
+                    }
+                    break;
+            }
+        }
+        feedWatchdog();
+        delay(2);
+    }
+    return false;
+}
+
+// 설정을 보내고 ACK 를 확인한다. 짐작하지 않는다.
+static bool casicSetAcked(uint8_t cls, uint8_t id,
+                          const uint8_t* payload, uint16_t len, const char* what) {
+    while (Serial1.available()) gGps.encode((char)Serial1.read()); // 밀린 것 비우기
+    casicSend(cls, id, payload, len);
+
+    uint8_t ackId = 0;
+    if (!casicWait(2000, 0x05, 0xFF, nullptr, 0, nullptr, &ackId)) {
+        Serial.printf("  %s — 응답 없음. 이 칩이 모르는 설정입니다\n", what);
+        return false;
+    }
+    if (ackId == 0x01) {
+        Serial.printf("  %s — ACK. 받아들였습니다\n", what);
+        return true;
+    }
+    Serial.printf("  %s — NACK. 거절당했습니다\n", what);
+    return false;
+}
+
+// 조회는 길이 0 으로 보낸다 (문서 §2.11).
+static bool casicQuery(uint8_t cls, uint8_t id, uint8_t* out, uint16_t cap, uint16_t* len) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        while (Serial1.available()) gGps.encode((char)Serial1.read());
+        casicSend(cls, id, nullptr, 0);
+        if (casicWait(1500, cls, id, out, cap, len, nullptr)) return true;
+        gCasicIdFirst = !gCasicIdFirst; // 반대 공식으로 한 번 더
+    }
+    return false;
+}
+
+// CFG-NAVX 의 dyModel 값 이름 (문서 §2.11.8 Remark[2])
+static const char* dyModelName(uint8_t m) {
+    switch (m) {
+        case 0: return "Portable 일반 휴대";
+        case 1: return "Static   정지";
+        case 2: return "Walking  보행";
+        case 3: return "Car      자동차";
+        case 4: return "Nautical 선박";
+        case 5: return "Flight   항공 <1g";
+        case 6: return "Flight   항공 <2g";
+        case 7: return "Flight   항공 <4g";
+        default: return "알 수 없는 값";
+    }
+}
+
+// 지금 걸려 있는 설정을 전부 되물어서 보여준다.
+//
+// ★ 여기 나오는 값은 우리가 "보냈다" 가 아니라 모듈이 "이렇게 되어 있다" 고
+//   답한 값이다. 둘이 다를 수 있다. 실제로 확인해 본 적이 없었다.
+static void gpsCfgDump() {
+    uint8_t  buf[64];
+    uint16_t len = 0;
+
+    Serial.println("──────────────────────────────────────────");
+    Serial.println("  모듈이 답한 실제 설정 (CASIC 바이너리 조회)");
+    Serial.println("──────────────────────────────────────────");
+
+    // ── 통신 속도 ────────────────────────────────────────────────────────
+    if (casicQuery(0x06, 0x00, buf, sizeof(buf), &len) && len >= 8) {
+        uint32_t baud; memcpy(&baud, buf + 4, 4);
+        Serial.printf("  통신 속도     %lu bps", (unsigned long)baud);
+        Serial.printf("   %s\n", baud == kGpsBaud ? "— 우리가 건 값과 같습니다"
+                                                  : "★ 우리가 건 값과 다릅니다");
+        Serial.printf("  포트 %u  프로토콜마스크 0x%02X (B1 텍스트입력 B5 텍스트출력)\n",
+                      buf[0], buf[1]);
+    } else {
+        Serial.println("  통신 속도     조회 실패 (CFG-PRT 무응답)");
+    }
+
+    // ── 갱신율 ───────────────────────────────────────────────────────────
+    if (casicQuery(0x06, 0x04, buf, sizeof(buf), &len) && len >= 4) {
+        uint16_t interval; memcpy(&interval, buf + 0, 2);
+        Serial.printf("  측위 간격     %u ms", (unsigned)interval);
+        if (interval > 0) Serial.printf(" (= %.1f Hz)", 1000.0f / interval);
+        Serial.printf("   %s\n", interval == 100 ? "— 10 Hz 로 걸렸습니다"
+                                                 : "★ 10 Hz 가 아닙니다");
+    } else {
+        Serial.println("  측위 간격     조회 실패 (CFG-RATE 무응답)");
+    }
+
+    // ── 항법 엔진 ────────────────────────────────────────────────────────
+    if (casicQuery(0x06, 0x07, buf, sizeof(buf), &len) && len >= 44) {
+        float    staticTh; memcpy(&staticTh, buf + 40, 4);
+        uint32_t mask;     memcpy(&mask,     buf + 0,  4);
+        const uint8_t nav = buf[13];
+
+        // ★ 선박 모드(4)가 아니라 휴대 모드(0)를 쓴다. 실측 결과다.
+        //   4(선박)로 두면 느린 움직임을 정지로 보고 0 으로 뭉갠다.
+        //   요트는 정박·미풍이 0~2 kn 이라 그 구간을 잃으면 안 된다.
+        Serial.printf("  움직임 종류   %u  %s%s\n", buf[4], dyModelName(buf[4]),
+                      buf[4] == 0 ? "   — 우리가 고른 값" : "   ★ 우리는 0(휴대)을 쓴다");
+        Serial.printf("  정지 문턱값   %.2f m/s (= %.2f kn)%s\n",
+                      staticTh, staticTh * 1.943844f,
+                      staticTh > 0.0f ? "   ★ 이 아래 속도는 0 으로 뭉갠다" : "   — 꺼져 있다");
+        Serial.printf("  쓰는 위성     %s%s%s  (GPS/BDS/GLONASS 중)\n",
+                      (nav & 1) ? "GPS " : "", (nav & 2) ? "BeiDou " : "",
+                      (nav & 4) ? "GLONASS" : "");
+        Serial.printf("  최소 신호     %u dB-Hz   위성 %u~%u개   최소 고도각 %d도\n",
+                      buf[8], buf[6], buf[7], (int8_t)buf[11]);
+        Serial.printf("  mask          0x%08lX\n", (unsigned long)mask);
+
+        // 해석이 맞는지 눈으로 확인할 수 있게 원본 44바이트를 그대로 찍는다.
+        // 필드 위치를 잘못 잡으면 그럴듯한 값이 나와도 전부 헛것이다.
+        Serial.print("  원본 44바이트 ");
+        for (uint16_t i = 0; i < len; i++) {
+            if (i && i % 16 == 0) Serial.print("\n                ");
+            Serial.printf("%02X ", buf[i]);
+        }
+        Serial.println();
+    } else {
+        Serial.println("  항법 엔진     조회 실패 (CFG-NAVX 무응답)");
+    }
+    Serial.printf("  (체크섬 공식은 %s 문서 방식이 먹혔습니다)\n",
+                  gCasicIdFirst ? "L76K" : "CASIC");
+    Serial.println("──────────────────────────────────────────");
+}
+
+// NMEA 로 만들어지기 전의 속도를 직접 본다 (NAV-PV, 문서 §2.7.4).
+//
+// ★ 무엇을 가리려는 것인가
+//   RMC 의 속도가 0 인데 여기 velN/velE 가 살아 있으면, 다듬기는 NMEA 문장을
+//   만드는 단계에 있다는 뜻이다. 둘 다 0 이면 항법 엔진 안에서 눌린 것이다.
+//   짐작으로 못 가르는 것을 값으로 가른다.
+//
+// sAcc 는 분산(m/s)^2 이라 제곱근을 씌워야 m/s 가 된다. 모듈이 자기 속도를
+// 얼마나 믿는지 알려주는 값이다.
+static void gpsNavPv(int samples) {
+    Serial.println("──────────────────────────────────────────");
+    Serial.println("  RMC 속도 vs NAV-PV 속도 (NMEA 거치기 전)");
+    Serial.println("──────────────────────────────────────────");
+
+    for (int i = 0; i < samples; i++) {
+        uint8_t  p[80];
+        uint16_t len = 0;
+
+        // NAV 메시지는 길이 0 조회로는 안 나온다 (실측). 대신 CFG-MSG 로
+        // 갱신율 0xFFFF 를 주면 "즉시 한 번만 출력" 이고 조회와 같다
+        // (문서 §2.11.2 Remark[1]).
+        const uint8_t poll[4] = {0x01, 0x03, 0xFF, 0xFF};
+        while (Serial1.available()) gGps.encode((char)Serial1.read());
+        casicSend(0x06, 0x01, poll, 4);
+
+        if (!casicWait(2000, 0x01, 0x03, p, sizeof(p), &len, nullptr) || len < 80) {
+            Serial.printf("  NAV-PV 응답 없음 (%u 바이트)\n", (unsigned)len);
+            break;
+        }
+
+        float velN, velE, velU, speed2D, heading, sAcc, pDop;
+        memcpy(&pDop,    p + 12, 4);
+        memcpy(&velN,    p + 48, 4);
+        memcpy(&velE,    p + 52, 4);
+        memcpy(&velU,    p + 56, 4);
+        memcpy(&speed2D, p + 64, 4);
+        memcpy(&heading, p + 68, 4);
+        memcpy(&sAcc,    p + 72, 4);
+
+        const float rmcKn = gGps.speed.isValid() ? (float)gGps.speed.knots() : -1.0f;
+        const float pvKn  = speed2D * 1.943844f;
+        const float sAccMs = (sAcc > 0.0f) ? sqrtf(sAcc) : 0.0f;
+
+        Serial.printf("  RMC %6s kn | NAV-PV %6.2f kn | N%+6.2f E%+6.2f U%+6.2f m/s"
+                      " | 침로 %5.1f | 오차 ±%.2f kn | 위성 %u | pDop %.1f | 유효 위치%u 속도%u\n",
+                      rmcKn >= 0 ? String(rmcKn, 2).c_str() : " --- ",
+                      pvKn, velN, velE, velU, heading,
+                      sAccMs * 1.943844f, p[7], pDop, p[4], p[5]);
+
+        feedWatchdog();
+        delay(900);
+    }
+    Serial.println("──────────────────────────────────────────");
+}
+
+// CFG-NAVX 에서 항목 몇 개만 바꾼다.
+//
+// 지금 값을 먼저 읽어서 나머지는 그대로 두고, mask 에 세운 항목만 고친다.
+// mask 가 1 인 항목만 적용된다 (문서 §2.11.8 Remark[1]).
+//   B0  dyModel        움직임 종류
+//   B13 staticHoldTh   정지로 볼 속도
+//
+// ★ ACK 가 왔다고 믿지 않는다. 반드시 되읽어서 값이 바뀌었는지 확인한다.
+static void gpsCfgSetNavx(bool setModel, uint8_t model,
+                          bool setStatic, float staticTh) {
+    uint8_t  p[44];
+    uint16_t len = 0;
+
+    Serial.println("──────────────────────────────────────────");
+    if (!casicQuery(0x06, 0x07, p, sizeof(p), &len) || len < 44) {
+        Serial.println("  지금 값을 못 읽었습니다. 아무것도 바꾸지 않습니다.");
+        Serial.println("──────────────────────────────────────────");
+        return;
+    }
+
+    float beforeTh; memcpy(&beforeTh, p + 40, 4);
+    Serial.printf("  바꾸기 전   dyModel %u (%s)   staticHoldTh %.2f m/s\n",
+                  p[4], dyModelName(p[4]), beforeTh);
+
+    uint32_t mask = 0;
+    if (setModel)  { mask |= (1UL << 0);  p[4] = model; }
+    if (setStatic) { mask |= (1UL << 13); memcpy(p + 40, &staticTh, 4); }
+    memcpy(p + 0, &mask, 4);
+
+    if (!casicSetAcked(0x06, 0x07, p, 44, "CFG-NAVX")) {
+        Serial.println("──────────────────────────────────────────");
+        return;
+    }
+
+    if (casicQuery(0x06, 0x07, p, sizeof(p), &len) && len >= 44) {
+        float afterTh; memcpy(&afterTh, p + 40, 4);
+        Serial.printf("  바꾼 뒤     dyModel %u (%s)   staticHoldTh %.2f m/s\n",
+                      p[4], dyModelName(p[4]), afterTh);
+        const bool okModel  = !setModel  || p[4] == model;
+        const bool okStatic = !setStatic || afterTh == staticTh;
+        if (okModel && okStatic) {
+            Serial.println("  ✓ 값이 실제로 바뀌었습니다");
+            // 밖에서 노트북 없이 쓰려면 껐다 켜도 유지돼야 한다.
+            // 보드에 적어 두고 부팅할 때마다 다시 건다.
+            if (setModel) {
+                gPrefs.putUChar("gps_dyn", model);
+                Serial.println("  보드에 적어 뒀습니다. 껐다 켜도 이 모드로 다시 겁니다.");
+            }
+        } else {
+            Serial.println("  ★ ACK 는 왔는데 값이 안 바뀌었습니다 — 이 칩은 이 항목을 안 받습니다");
+        }
+    }
+    Serial.println("──────────────────────────────────────────");
+}
+
+// GPS 모듈에 NMEA 명령을 하나 보내고, 응답을 3초 동안 본다.
+//
+// ★ 명령이 먹혔는지는 ACK 로만 알 수 있다. 전에 $PMTK251 을 보내고
+//   "무시당했다" 고 적었는데, 그건 통신 속도가 안 바뀐 걸 보고 짐작한
+//   것이었지 응답을 본 게 아니었다.
+//     MTK   → $PMTK001,<명령번호>,<결과>   결과 3 이 성공, 0 이 거절
+//     CASIC → 0xBA 0xCE ... 로 시작하는 바이너리 ACK
+//
+// 늘 오는 위치 문장(GGA/RMC 등)은 걸러내고 나머지만 보여준다.
+static void gpsSendAndWatch(const char* body) {
+    uint8_t ck = 0;
+    for (const char* p = body; *p; ++p) ck ^= (uint8_t)*p;
+
+    Serial.println("──────────────────────────────────────────");
+    Serial.printf("  보냅니다   $%s*%02X\n", body, ck);
+    Serial.println("  3초 동안 응답을 봅니다 (위치 문장은 걸러냅니다)");
+    Serial.println("──────────────────────────────────────────");
+
+    gpsSend(body);
+
+    char     line[140];
+    size_t   n     = 0;
+    int      shown = 0;
+    uint32_t start = millis();
+
+    while (millis() - start < 3000) {
+        while (Serial1.available()) {
+            const char c = (char)Serial1.read();
+            gGps.encode(c); // 보는 동안에도 파서는 계속 먹인다
+            if (c == '\n' || c == '\r') {
+                if (n > 0) {
+                    line[n] = 0;
+                    const bool routine =
+                        line[0] == '$' &&
+                        (strstr(line, "GGA") || strstr(line, "RMC") ||
+                         strstr(line, "GSV") || strstr(line, "GSA") ||
+                         strstr(line, "VTG") || strstr(line, "GLL"));
+                    if (!routine) {
+                        Serial.printf("  <<  %s\n", line);
+                        shown++;
+                    }
+                    n = 0;
+                }
+            } else if (n < sizeof(line) - 1) {
+                line[n++] = c;
+            }
+        }
+        feedWatchdog();
+        delay(2);
+    }
+
+    if (shown == 0) {
+        Serial.println("  응답 없음 — 모듈이 이 명령을 모릅니다.");
+        Serial.println("  (문장은 계속 들어오고 있으니 통신 자체는 멀쩡합니다)");
+    }
+    Serial.println("──────────────────────────────────────────");
+}
+
 static void peekGps(uint32_t seconds, bool slotD) {
     Serial.println("──────────────────────────────────────────");
     Serial.printf("  UART1 (RX GPIO%d / TX GPIO%d) %lubps — %us 동안 원시 데이터\n",
@@ -964,8 +1641,9 @@ static Telemetry buildTelemetry(uint32_t nowMs) {
     t.sogValid = gGpsFix;
     t.cogValid = gGpsFix;
     if (gGpsFix) {
-        t.sogKn  = (float)gGps.speed.knots();
-        t.cogDeg = (float)gGps.course.deg();
+        // 다듬은 값을 내보낸다. 세기는 `smooth` 로 고른다 (0 이면 원본 그대로).
+        t.sogKn  = sogOut();
+        t.cogDeg = (gCogDamped >= 0.0f) ? gCogDamped : (float)gGps.course.deg();
     }
 
     // 어느 축을 힐로 볼지는 보드를 배에 어떻게 다느냐에 달렸다. 지금은 roll 을
@@ -1110,6 +1788,13 @@ static void printHelp() {
     Serial.println("  gps           UART1 원시 NMEA 5초 (GPS 가 슬롯 A)");
     Serial.println("  gps d         같은 것 (GPS 가 슬롯 D — IO6 로 리셋 해제)");
     Serial.println("  gpshz <1|2|5|10> GPS 갱신율 (기본 5). 실제로 걸렸는지 세어 줍니다");
+    Serial.println("  gpscfg        모듈에 실제로 걸린 설정을 되물어봅니다");
+    Serial.println("  smooth <0~5>  속도·침로 다듬기 세기 (0 원본, 기본 2)");
+    Serial.println("  dead <kn>     잡음 바닥. 이보다 작은 속도는 0 (기본 0.10)");
+    Serial.println("  navpv         NMEA 거치기 전 속도를 RMC 와 나란히 (navpv l 은 길게)");
+    Serial.println("  gpscfg mode <0~7>  움직임 종류 (0휴대 1정지 2보행 3자동차 4선박)");
+    Serial.println("  gpscfg static <m/s> 정지로 볼 속도 문턱값");
+    Serial.println("  nmea <본문>   NMEA 명령을 보내고 응답을 봅니다 (체크섬 자동)");
     Serial.println("  batt          배터리 전압 실측");
     Serial.println("  level         ★ 지금 자세를 힐 0° 로 삼기 (배가 평형일 때)");
     Serial.println("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)");
@@ -1193,6 +1878,81 @@ static void handleCommand(String line) {
 
     if (line == "gps")                 { peekGps(5, /*slotD=*/false); return; }
     if (line == "gps d" || line == "gps D") { peekGps(5, /*slotD=*/true); return; }
+
+    // gpscfg      — 모듈에 실제로 걸린 설정을 되물어본다
+    // gpscfg sea  — 요트용으로 바꾼다 (움직임=선박, 정지 문턱=0)
+    if (line == "gpscfg") { gpsCfgDump(); return; }
+    // navpv  — NMEA 거치기 전 속도를 RMC 와 나란히 본다
+    // dead <kn>  잡음 바닥. 이보다 작은 속도는 0 으로 보여준다.
+    if (line.startsWith("dead")) {
+        String a = line.substring(4); a.trim();
+        if (a.length() > 0) {
+            const float v = a.toFloat();
+            if (v < 0.0f || v > 2.0f) { Serial.println("  0 ~ 2.0 kn 사이로 주세요"); return; }
+            gDeadbandKn = v;
+            gPrefs.putFloat("dead_kn", gDeadbandKn);
+        }
+        Serial.println("──────────────────────────────────────────");
+        Serial.printf("  잡음 바닥  %.2f kn — 이보다 작으면 0 으로 보여줍니다\n", gDeadbandKn);
+        Serial.println("  도플러의 이론 잡음이 초당 몇 cm(=0.1 kn 언저리)라서 기본값이 0.10 입니다.");
+        Serial.println("  Velocitek ProStart V2 가 파는 물건의 사양도 ±0.1 kn 입니다.");
+        if (gGpsFix) Serial.printf("  지금  다듬은 값 %.2f  →  보여주는 값 %.2f kn\n",
+                                   gSogDamped, sogOut());
+        Serial.println("──────────────────────────────────────────");
+        return;
+    }
+
+    // smooth <0~5>  다듬기 세기. 0 이면 원본 그대로.
+    if (line.startsWith("smooth")) {
+        String a = line.substring(6); a.trim();
+        if (a.length() > 0) {
+            const int lv = a.toInt();
+            if (lv < 0 || lv > 5) { Serial.println("  0~5 중에서 고르세요"); return; }
+            gDampLevel = (uint8_t)lv;
+            gPrefs.putUChar("damp", gDampLevel);
+            dampingReset();
+        }
+        Serial.println("──────────────────────────────────────────");
+        Serial.printf("  다듬기 세기  %u단계  (시상수 %.1f초)\n",
+                      gDampLevel, kDampTau[gDampLevel]);
+        Serial.println("  0 없음 / 1 0.3초 / 2 0.6초 / 3 1.2초 / 4 2.5초 / 5 5초");
+        Serial.println("  잔잔하면 낮게, 물결이 거칠면 높게. 요트 계기들이 쓰는 방식이다.");
+        if (gGpsFix) {
+            Serial.printf("  지금  원본 %.2f kn %5.1f°  →  다듬은 값 %.2f kn %5.1f°\n",
+                          gGps.speed.knots(), gGps.course.deg(), gSogDamped, gCogDamped);
+        }
+        Serial.println("──────────────────────────────────────────");
+        return;
+    }
+
+    if (line == "navpv")   { gpsNavPv(8);  return; }
+    if (line == "navpv l") { gpsNavPv(40); return; }
+
+    // gpscfg mode <0~7>   움직임 종류를 바꾼다 (4=선박, 2=보행, 0=휴대)
+    if (line.startsWith("gpscfg mode ")) {
+        const int m = line.substring(12).toInt();
+        if (m < 0 || m > 7) { Serial.println("  0~7 중에서 고르세요"); return; }
+        gpsCfgSetNavx(true, (uint8_t)m, false, 0.0f);
+        return;
+    }
+    // gpscfg static <m/s>  정지로 볼 속도를 바꾼다
+    if (line.startsWith("gpscfg static ")) {
+        const float th = line.substring(14).toFloat();
+        gpsCfgSetNavx(false, 0, true, th);
+        return;
+    }
+
+    // nmea <본문>  — 체크섬은 알아서 붙인다. 예: nmea PMTK386,0
+    if (line.startsWith("nmea ")) {
+        String body = line.substring(5);
+        body.trim();
+        if (body.startsWith("$")) body = body.substring(1);
+        const int star = body.indexOf('*');
+        if (star >= 0) body = body.substring(0, star);
+        if (body.length() == 0) { Serial.println("  보낼 내용이 없습니다"); return; }
+        gpsSendAndWatch(body.c_str());
+        return;
+    }
 
     // 붙어 있는 것을 한 번에 훑는다. 보드를 처음 구웠을 때 이것부터 친다.
     if (line == "check") {
@@ -1454,7 +2214,7 @@ void loop() {
         ds.bleNotifying = gSubscribed;
         ds.battPct      = gLatest.battPct;
 
-        ds.sogKn      = gLatest.sogKn;
+        ds.sogKn      = gLatest.sogKn; // 다듬고 잡음 바닥까지 적용된 값
         ds.cogDeg     = gLatest.cogDeg;
         ds.headingDeg = headingDeg();
         ds.heelDeg    = gLatest.heelDeg;
@@ -1495,6 +2255,12 @@ void loop() {
             gConnected ? "CONNECTED" : "ADVERTISING",
             gConnected ? (gSubscribed ? " (notify ON)" : " (notify OFF)") : "");
         printGpsLine();
+        // 두 방식을 나란히 본다. 어느 쪽을 쓸지 정하기 전까지는 재기만 한다.
+        if (gGpsFix) {
+            Serial.printf("   속도 비교  도플러 %5.2f kn  |  위치차분 %s kn\n",
+                          gGps.speed.knots(),
+                          gSogFromPos >= 0 ? String(gSogFromPos, 2).c_str() : " --- ");
+        }
         printImuLine();
     }
 
