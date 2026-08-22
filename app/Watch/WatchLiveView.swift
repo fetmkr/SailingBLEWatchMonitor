@@ -205,12 +205,10 @@ private struct MainPage: View {
 
                 // Always On 에서는 속도만 남긴다.
                 if !isDim {
-                    // 요트 계기처럼 뱃머리 방향(HDG)을 둔다. 멈춰 있거나 느릴 때
-                    // GPS 침로는 빙빙 돌지만 방위는 안 흔들린다. 침로도 보고
-                    // 싶으면 상세 페이지에 나란히 있다.
-                    let bearing = ble.sample?.primaryBearing
+                    // 이 자리는 항상 HDG 다. 값이 없으면 대시를 보여주지,
+                    // 다른 값으로 바꿔 채우지 않는다. COG 는 2페이지에 있다.
                     HStack(spacing: 0) {
-                        bigPair(bearing?.text ?? "—", bearing?.label ?? "HDG")
+                        bigPair(ble.sample?.headingText ?? "—", "HDG")
                         bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL")
                     }
                     Spacer(minLength: 0)

@@ -1676,15 +1676,29 @@ static NimBLEAdvertisementData buildScanData(const Telemetry& tm, uint8_t seq) {
 }
 
 // 연결 상태에 맞춰 광고를 (재)시작한다.
-//   미연결 → ADV_IND       (connectable + scannable)
-//   연결중 → ADV_SCAN_IND  (non-connectable + scannable, scan response 유지)
+//   자리 남음 → ADV_IND       (connectable + scannable)
+//   정원 참   → ADV_SCAN_IND  (non-connectable + scannable, scan response 유지)
+//
+// ★ 예전에는 한 대만 붙으면 바로 연결 불가로 바꿨다. 그래서 워치가 먼저
+//   붙으면 아이폰이 광고밖에 못 읽었다. 광고에는 9축과 방위가 안 실려서
+//   아이폰 화면이 COG 로 떨어졌다 (실제로 겪었다).
+//
+//   NimBLE 은 3대까지 받는다 (nimconfig.h 의 CONFIG_BT_NIMBLE_MAX_CONNECTIONS).
+//   정원이 찰 때까지는 계속 연결을 받는다. 아이폰과 워치가 둘 다 붙어야
+//   둘 다 제대로 된 값을 본다.
+static uint8_t connectedCount() {
+    NimBLEServer* srv = NimBLEDevice::getServer();
+    return srv ? (uint8_t)srv->getConnectedCount() : 0;
+}
+
 static void applyAdvertising() {
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->stop();
 
     // 주의: setConnectableMode/setDiscoverableMode 는 내부 m_advData 의 Flags 를
     //       건드리므로 반드시 setAdvertisementData() 보다 먼저 호출해야 한다.
-    adv->setConnectableMode(gConnected ? BLE_GAP_CONN_MODE_NON : BLE_GAP_CONN_MODE_UND);
+    const bool full = connectedCount() >= CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
+    adv->setConnectableMode(full ? BLE_GAP_CONN_MODE_NON : BLE_GAP_CONN_MODE_UND);
     adv->setDiscoverableMode(BLE_GAP_DISC_MODE_GEN); // NON 이 아니어야 ADV_SCAN_IND 가 된다
     adv->enableScanResponse(true);
     adv->setMinInterval(sail::kAdvIntervalUnits);
@@ -1697,10 +1711,11 @@ static void applyAdvertising() {
         Serial.println("[BLE] !! advertising start 실패");
         return;
     }
-    Serial.printf("[BLE] advertising 시작 — %s (%s, interval %ums)\n",
+    Serial.printf("[BLE] advertising 시작 — %s (%s, 연결 %u/%d, interval %ums)\n",
                   gFullName,
-                  gConnected ? "ADV_SCAN_IND / non-connectable"
-                             : "ADV_IND / connectable",
+                  full ? "ADV_SCAN_IND / non-connectable"
+                       : "ADV_IND / connectable",
+                  connectedCount(), CONFIG_BT_NIMBLE_MAX_CONNECTIONS,
                   sail::kAdvIntervalMs);
 }
 
@@ -1725,12 +1740,15 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     }
 
     void onDisconnect(NimBLEServer* server, NimBLEConnInfo& info, int reason) override {
-        gConnected     = server->getConnectedCount() > 0;
-        gSubscribed    = false;
+        gConnected = server->getConnectedCount() > 0;
+        // 남은 연결이 없을 때만 구독을 지운다. 두 대가 붙어 있는데 한 대가
+        // 나갔다고 나머지 구독까지 없던 일로 만들면 notify 가 멎는다.
+        if (!gConnected) gSubscribed = false;
         gAdvNeedsApply = true; // loop() 가 즉시 connectable 광고로 되돌린다
         digitalWrite(rak::kLedBlue, LOW);
-        Serial.printf("[BLE] 연결 끊김 → %s (reason=%d) — 재광고 준비\n",
-                      info.getAddress().toString().c_str(), reason);
+        Serial.printf("[BLE] 연결 끊김 → %s (reason=%d, 남은 연결 %u) — 재광고 준비\n",
+                      info.getAddress().toString().c_str(), reason,
+                      server->getConnectedCount());
     }
 
     void onMTUChange(uint16_t mtu, NimBLEConnInfo& info) override {
@@ -1743,9 +1761,13 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 class TelemetryCallbacks : public NimBLECharacteristicCallbacks {
     void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
         (void)chr;
-        (void)info;
-        gSubscribed = (subValue & 0x0001) != 0; // bit0 = notify
-        Serial.printf("[BLE] notify 구독 %s\n", gSubscribed ? "ON" : "OFF");
+        const bool on = (subValue & 0x0001) != 0; // bit0 = notify
+        // 여러 대가 붙을 수 있다. 한 대라도 구독 중이면 계속 내보낸다.
+        // 마지막 한 대가 끊기는 건 onDisconnect 에서 정리한다.
+        if (on) gSubscribed = true;
+        Serial.printf("[BLE] notify 구독 %s ← %s (연결 %u)\n",
+                      on ? "ON" : "OFF", info.getAddress().toString().c_str(),
+                      NimBLEDevice::getServer()->getConnectedCount());
     }
 };
 

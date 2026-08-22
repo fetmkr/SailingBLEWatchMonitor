@@ -64,14 +64,12 @@ struct LiveView: View {
 
                     // 방위 · 힐
                     //
-                    // 요트 계기처럼 뱃머리 방향(HDG)을 크게 둔다. 멈춰 있거나
-                    // 느릴 때 GPS 침로는 빙빙 돌지만 방위는 안 흔들린다.
-                    // 자력계가 없는 보드면 라벨이 COG 로 바뀐다.
+                    // 이 자리는 항상 HDG 다. 값이 없으면 대시를 보여주지,
+                    // 다른 값으로 바꿔 채우지 않는다. COG 는 상세 화면에 있다.
                     HStack(alignment: .top, spacing: 0) {
-                        let bearing = ble.sample?.primaryBearing
-                        smallerValue(bearing?.label ?? "HDG",
-                                     bearing?.text ?? "—",
-                                     sub: bearing?.degrees.map { compassPoint($0) } ?? " ",
+                        smallerValue("HDG",
+                                     ble.sample?.headingText ?? "—",
+                                     sub: ble.sample?.headingDegrees.map { compassPoint($0) } ?? " ",
                                      warn: false)
                         Divider().frame(height: 90)
                         smallerValue("HEEL",

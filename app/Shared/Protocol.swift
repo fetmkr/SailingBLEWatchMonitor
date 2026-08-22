@@ -298,24 +298,6 @@ extension TelemetrySample {
     var headingDegrees: Double? { extra?.headingDegrees }
     var headingText: String { headingDegrees.map { String(format: "%.0f°", $0) } ?? "—" }
 
-    /// 메인 화면에 크게 띄울 방향 하나.
-    ///
-    /// 요트 계기는 **뱃머리 방향(HDG)** 을 크게 보여준다. 배가 멈춰 있거나
-    /// 느리면 GPS 침로(COG)는 위치 오차에 지배당해 빙빙 돈다. 정박 중이나
-    /// 미풍일 때 특히 그렇다. 자력계 방위는 그때도 안 흔들린다.
-    ///
-    /// 자력계가 없는 보드(Feather TFT, 12바이트)에서는 방위가 아예 없다.
-    /// 그때는 침로를 대신 보여주되 **라벨을 바꿔서** 무엇을 보고 있는지 알린다.
-    /// 같은 라벨로 다른 값을 보여주면 읽는 사람이 속는다.
-    ///
-    /// 둘 다 보고 싶으면 상세 화면에 나란히 있다.
-    var primaryBearing: (label: String, text: String, degrees: Double?) {
-        if let heading = headingDegrees {
-            return ("HDG", headingText, heading)
-        }
-        return ("COG", cogText, cogDegrees)
-    }
-
     /// GPS 값이 있는가. 화면에서 숫자를 그릴지 말지 판단할 때 쓴다.
     var hasGpsFix: Bool { sogKnots != nil }
 }
