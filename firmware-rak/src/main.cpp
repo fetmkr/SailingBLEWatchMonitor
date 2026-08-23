@@ -90,14 +90,14 @@ static float gGyrOffX = 0.0f, gGyrOffY = 0.0f, gGyrOffZ = 0.0f;
 //     힐 = asin(그 축의 g / 중력 크기)
 //
 // 배가 평형이면 그 축은 수평이라 0 g 를 읽고, 옆으로 누울수록 중력이 그
-// 축으로 흘러 들어온다. 지금 기본은 X 축이다.
+// 축으로 흘러 들어온다. 실제로 달아 보고 고른 축은 **Y** 다.
 //
 // ★ 한계: asin 이라 ±90° 까지만 맞다. 90° 를 넘으면 배가 이미 넘어간 것이라
 //   그 뒤의 정확한 각도는 볼 이유가 없다.
 //
 // 어느 축인지, 부호가 어느 쪽인지는 `heel` 명령으로 바꾸고 NVS 에 남긴다.
 // 다는 방법이 또 바뀌어도 다시 굽지 않아도 된다.
-static uint8_t gHeelAxis = 0;      // 0 = X, 1 = Y, 2 = Z
+static uint8_t gHeelAxis = 1;      // 0 = X, 1 = Y, 2 = Z
 static float   gHeelSign = 1.0f;   // -1 이면 좌우가 뒤집혀 있다는 뜻
 
 // "지금 이 자세가 평형" 이라고 알려주는 기준각. 배를 물에 띄우고 평형일 때
@@ -213,7 +213,7 @@ static void loadSettings() {
     gSensorPowerPin = (int)gPrefs.getInt("pwr_pin", rak::kSensorPowerA);
     // 힐 기준각의 키가 heel_off → heel_off2 로 바뀌었다. 옛 키에 남아 있는
     // 값은 roll 기준이라 지금 계산법에서는 뜻이 다르다. 그냥 안 읽는다.
-    gHeelAxis       = gPrefs.getUChar("heel_axis", 0);
+    gHeelAxis       = gPrefs.getUChar("heel_axis", 1); // 기본 Y — 위 "힐" 항목 참고
     gHeelSign       = gPrefs.getChar("heel_sgn", 1) < 0 ? -1.0f : 1.0f;
     gHeelOffsetDeg  = gPrefs.getFloat("heel_off2", 0.0f);
     gDampLevel      = gPrefs.getUChar("damp", 2);
