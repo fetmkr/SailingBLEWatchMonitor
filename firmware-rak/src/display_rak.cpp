@@ -38,7 +38,7 @@ bool gOk = false;
 //
 //        0                                      127
 //    0   ┌──────────────────────────────────────┐
-//    7   │ random()               BLE*     94%  │  5x7
+//    7   │ random()      BLE*  3.89V     94%  │  5x7
 //    9   ├──────────────────────────────────────┤
 //   27   │                             ██SIM██  │  6x10 반전 (SIM 일 때만)
 //   30   │  6.38 kn                             │  logisoso18 — 제일 크게
@@ -139,12 +139,19 @@ void displayUpdate(const DisplayState& s) {
     gOled.setFont(u8g2_font_5x7_tf);
     drawChecked(2, kTopBaseline, s.userName, "이름");
 
-    // 별표는 앱이 notify 를 구독 중이라는 뜻.
-    const char* ble = s.bleConnected ? (s.bleNotifying ? "BLE*" : "BLE") : "ADV";
-    gOled.drawStr(rightX5(9), kTopBaseline, ble);
-
+    // 오른쪽 끝부터 [잔량%] [전압] [BLE] 순으로 붙인다.
+    // 전압을 같이 놓는 이유는 display_rak.h 의 battVolts 주석 참고.
     snprintf(buf, sizeof(buf), "%3d%%", (int)(s.battPct + 0.5f));
     gOled.drawStr(rightX5(4), kTopBaseline, buf);
+
+    if (s.battVolts > 0.0f) {
+        snprintf(buf, sizeof(buf), "%.2fV", s.battVolts);
+        gOled.drawStr(rightX5(10), kTopBaseline, buf);
+    }
+
+    // 별표는 앱이 notify 를 구독 중이라는 뜻.
+    const char* ble = s.bleConnected ? (s.bleNotifying ? "BLE*" : "BLE") : "ADV";
+    gOled.drawStr(rightX5(15), kTopBaseline, ble);
 
     gOled.drawHLine(0, kLineY, kW);
 

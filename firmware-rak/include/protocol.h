@@ -165,9 +165,15 @@ inline void encodeTelemetryPacket(const Telemetry& t, uint8_t out[kTelemetryLen]
 //  [19..24]  6   i16le×3  acc XYZ    g × 1000
 //  [25..30]  6   i16le×3  gyr XYZ    °/s × 10
 //  [31..36]  6   i16le×3  mag XYZ    µT × 10
+//  [37..38]  2   u16le    batt mV    배터리 전압 (mV). 0 = 아직 못 잼
 //  ------  ----  -------  ---------  --------------------------------------
-//  total    37
-static constexpr size_t kTelemetryExtLen = 37;
+//  total    39
+//
+// ※ [37..38] 은 나중에 덧붙였다. 앞 37바이트는 한 글자도 안 바뀌었으므로
+//   옛 앱은 그대로 돈다 (PROTOCOL.md §7 "길면 앞부분만 파싱").
+//   그래서 앱 쪽은 "37 이상이면 9축, 39 이상이면 전압까지" 로 읽는다.
+static constexpr size_t kTelemetryExtBaseLen = 37; // 9축까지
+static constexpr size_t kTelemetryExtLen     = 39; // + 배터리 전압
 
 struct TelemetryExtra {
     bool    gpsFix       = false;
@@ -180,6 +186,13 @@ struct TelemetryExtra {
     float   accX = 0, accY = 0, accZ = 0; // g
     float   gyrX = 0, gyrY = 0, gyrZ = 0; // °/s
     float   magX = 0, magY = 0, magZ = 0; // µT
+
+    /// 배터리 전압 (V). 0 이하면 아직 못 잰 것으로 보낸다.
+    ///
+    /// 퍼센트만으로는 배터리를 판단할 수 없다. 리튬폴리머는 3.8~3.9 V 에서
+    /// 곡선이 거의 평평해서, 전압이 0.05 V 떨어지면 퍼센트가 20 씩 내려간다.
+    /// 그래서 둘을 나란히 보여준다.
+    float   battVolts = 0.0f;
 };
 
 // 실수를 int16 칸에 넣는다. 범위를 벗어나면 자른다.
@@ -234,6 +247,11 @@ inline void encodeTelemetryExt(const Telemetry& t, const TelemetryExtra& e,
     putI16LE(&out[31], clampToI16(e.magX * 10.0f));
     putI16LE(&out[33], clampToI16(e.magY * 10.0f));
     putI16LE(&out[35], clampToI16(e.magZ * 10.0f));
+
+    long mv = lroundf(e.battVolts * 1000.0f);
+    if (mv < 0) mv = 0;
+    if (mv > 65535) mv = 65535;
+    putU16LE(&out[37], (uint16_t)mv);
 }
 
 // Manufacturer Specific Data. Company ID(2) + 페이로드(9) = 11바이트. PROTOCOL.md §4.3

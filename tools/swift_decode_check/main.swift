@@ -167,6 +167,50 @@ do {
     }
 }
 
+// 확장 패킷의 배터리 전압 — 뒤에 덧붙인 필드라 있을 수도, 없을 수도 있다.
+//
+// 골든 벡터는 12바이트와 광고 9바이트만 다룬다. 확장 패킷의 꼬리는 여기서 본다.
+// 펌웨어 쪽 proto_test.cpp 가 "3.888 V → [37..38] 에 3888" 을 확인하므로,
+// 두 시험을 합치면 전선 위의 약속이 양쪽에서 맞는다.
+do {
+    // [0..11] 기본 + [12..36] 9축 (값은 0 이어도 상관없다) + [37..38] 전압
+    var ext = Data([0x01, 0x01, 0,0,0,0, 0x29,0x02, 0x4E,0x0C, 0xF4, 0x57])
+    ext.append(Data(repeating: 0, count: 25))          // → 37바이트
+    if let s = TelemetrySample.decodeTelemetryPacket(ext) {
+        if s.extra == nil { failures.append("  37바이트인데 확장 필드가 안 읽힘") }
+        if s.batteryVolts != nil {
+            failures.append("  37바이트인데 전압이 나옴: \(s.batteryVolts!)")
+        }
+        if s.batteryText != "87%" {
+            failures.append("  전압 없을 때 표시가 퍼센트만이 아님: \(s.batteryText)")
+        }
+        print("  [ OK ] 37바이트 확장 패킷 → 9축은 읽고 전압은 없음")
+    } else {
+        failures.append("  37바이트 확장 패킷 디코딩이 nil")
+    }
+
+    ext.append(contentsOf: [0x30, 0x0F])               // 3888 mV LE → 39바이트
+    if let s = TelemetrySample.decodeTelemetryPacket(ext) {
+        if s.batteryVolts != 3.888 {
+            failures.append("  전압 \(String(describing: s.batteryVolts)) ≠ 3.888")
+        }
+        if s.batteryText != "87% · 3.89V" {
+            failures.append("  배터리 표시가 어긋남: \(s.batteryText)")
+        }
+        print("  [ OK ] 39바이트 확장 패킷 → 3.888 V, 표시 \"\(s.batteryText)\"")
+    } else {
+        failures.append("  39바이트 확장 패킷 디코딩이 nil")
+    }
+
+    // 0 mV 는 "아직 못 잼" 이다. 0.00 V 로 보여주면 안 된다.
+    var noVolt = ext
+    noVolt[noVolt.count - 2] = 0
+    noVolt[noVolt.count - 1] = 0
+    if let s = TelemetrySample.decodeTelemetryPacket(noVolt), s.batteryVolts != nil {
+        failures.append("  0 mV 가 값으로 읽힘: \(s.batteryVolts!)")
+    }
+}
+
 expectNil("짧은 gatt(11바이트)", TelemetrySample.decodeTelemetryPacket(Data(repeating: 1, count: 11)))
 expectNil("버전 불일치 gatt",
           TelemetrySample.decodeTelemetryPacket(Data([0x02, 0x01, 0,0,0,0, 0,0, 0,0, 0, 0])))

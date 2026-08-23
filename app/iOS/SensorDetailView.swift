@@ -60,7 +60,7 @@ struct SensorDetailView: View {
                 .font(.subheadline.weight(.medium))
             Spacer()
             if let s = sample {
-                Text("\(s.batteryPercent)%")
+                Text(s.batteryText)
                     .font(.subheadline.monospacedDigit())
                     .foregroundStyle(s.batteryPercent <= 20 ? Color.sailWarn : .secondary)
             }

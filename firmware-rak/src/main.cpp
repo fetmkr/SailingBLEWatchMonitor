@@ -76,15 +76,33 @@ static float    gImuTempC = 0.0f;
 // 자이로 0점 (원시값). 자세히는 아래 "자이로 0점" 항목 참고.
 static float gGyrOffX = 0.0f, gGyrOffY = 0.0f, gGyrOffZ = 0.0f;
 
-// ── 힐 0점 ───────────────────────────────────────────────────────────────
+// ── 힐 ───────────────────────────────────────────────────────────────────
 //
-// 센서가 내놓는 각도는 보드를 어느 방향으로 달았느냐에 따라 통째로 치우친다.
-// 실제로 책상에 뒤집어 놓았더니 roll 이 -178° 로 나왔다. 그대로 쓰면 힐이
-// 항상 뒤집힌 값이 되고, 프로토콜의 힐은 -128~127 범위라 잘려 나간다.
+// 힐은 배가 좌우로 얼마나 누웠는지다. 보드가 어느 축으로 그걸 느끼는지는
+// 보드를 어떻게 달았느냐에 달려 있다.
 //
-// 그래서 "지금 이 자세가 평형" 이라고 알려주는 기준각을 따로 둔다.
-// 배를 물에 띄우고 평형일 때 `level` 명령을 치면 그때 각도를 0 으로 삼는다.
-// NVS 에 저장되므로 재부팅해도, 다시 구워도 남는다.
+// 밖에서 재 보니 방위(HDG)가 맞으려면 보드를 세워서 달아야 했다. 그렇게
+// 세우면 예전에 쓰던 roll = atan2(가속Y, 가속Z) 은 힐과 상관없는 회전을
+// 재게 된다. 세운 자세에서는 Z 가 눕고 Y 가 서기 때문이다.
+//
+// 그래서 힐을 **가속도 한 축**에서 바로 구한다. 기울기계가 쓰는 그 방법이다.
+//
+//     힐 = asin(그 축의 g / 중력 크기)
+//
+// 배가 평형이면 그 축은 수평이라 0 g 를 읽고, 옆으로 누울수록 중력이 그
+// 축으로 흘러 들어온다. 지금 기본은 X 축이다.
+//
+// ★ 한계: asin 이라 ±90° 까지만 맞다. 90° 를 넘으면 배가 이미 넘어간 것이라
+//   그 뒤의 정확한 각도는 볼 이유가 없다.
+//
+// 어느 축인지, 부호가 어느 쪽인지는 `heel` 명령으로 바꾸고 NVS 에 남긴다.
+// 다는 방법이 또 바뀌어도 다시 굽지 않아도 된다.
+static uint8_t gHeelAxis = 0;      // 0 = X, 1 = Y, 2 = Z
+static float   gHeelSign = 1.0f;   // -1 이면 좌우가 뒤집혀 있다는 뜻
+
+// "지금 이 자세가 평형" 이라고 알려주는 기준각. 배를 물에 띄우고 평형일 때
+// `level` 을 치면 그때 각도를 0 으로 삼는다. NVS 에 저장되므로 재부팅해도,
+// 다시 구워도 남는다.
 static float gHeelOffsetDeg = 0.0f;
 
 // 각도를 -180 ~ +180 안으로 접는다.
@@ -94,8 +112,26 @@ static float wrap180(float deg) {
     return deg;
 }
 
+static const char* heelAxisName() {
+    static char buf[4];
+    snprintf(buf, sizeof(buf), "%c%c", gHeelSign < 0.0f ? '-' : '+',
+             gHeelAxis == 0 ? 'X' : (gHeelAxis == 1 ? 'Y' : 'Z'));
+    return buf;
+}
+
+// 기준각을 빼기 전의 날각도. `level` 이 이 값을 기준으로 삼는다.
+static float rawHeelDeg() {
+    const float a = (gHeelAxis == 0) ? gAcc.x : (gHeelAxis == 1 ? gAcc.y : gAcc.z);
+    const float mag = sqrtf(gAcc.x * gAcc.x + gAcc.y * gAcc.y + gAcc.z * gAcc.z);
+    if (mag < 0.2f) return 0.0f; // 자유낙하 수준이면 중력 방향을 알 수 없다
+    float s = gHeelSign * a / mag;
+    if (s > 1.0f) s = 1.0f;
+    if (s < -1.0f) s = -1.0f;
+    return asinf(s) * 180.0f / (float)M_PI;
+}
+
 static float currentHeelDeg() {
-    return wrap180(gRollDeg - gHeelOffsetDeg);
+    return wrap180(rawHeelDeg() - gHeelOffsetDeg);
 }
 
 // ── 값의 출처 ────────────────────────────────────────────────────────────
@@ -175,7 +211,11 @@ static void loadSettings() {
     String saved    = gPrefs.getString("name", "");
     gNotifyPeriodMs = gPrefs.getUInt("notify_ms", sail::kNotifyPeriodMs);
     gSensorPowerPin = (int)gPrefs.getInt("pwr_pin", rak::kSensorPowerA);
-    gHeelOffsetDeg  = gPrefs.getFloat("heel_off", 0.0f);
+    // 힐 기준각의 키가 heel_off → heel_off2 로 바뀌었다. 옛 키에 남아 있는
+    // 값은 roll 기준이라 지금 계산법에서는 뜻이 다르다. 그냥 안 읽는다.
+    gHeelAxis       = gPrefs.getUChar("heel_axis", 0);
+    gHeelSign       = gPrefs.getChar("heel_sgn", 1) < 0 ? -1.0f : 1.0f;
+    gHeelOffsetDeg  = gPrefs.getFloat("heel_off2", 0.0f);
     gDampLevel      = gPrefs.getUChar("damp", 2);
     gDeadbandKn     = gPrefs.getFloat("dead_kn", 0.10f);
     gGyrOffX        = gPrefs.getFloat("gyr_x", 0.0f);
@@ -1401,8 +1441,8 @@ static void printImuLine() {
     } else {
         Serial.print(" | 자력계 없음");
     }
-    Serial.printf(" | roll %+6.1f° pitch %+6.1f° → 힐 %+6.1f°\n",
-                  gRollDeg, gPitchDeg, currentHeelDeg());
+    Serial.printf(" | roll %+6.1f° pitch %+6.1f° → 힐 %+6.1f° (가속 %s)\n",
+                  gRollDeg, gPitchDeg, currentHeelDeg(), heelAxisName());
 }
 
 // 지금 자세를 평형(힐 0°)으로 삼는다. 배를 물에 띄우고 평형일 때 쓴다.
@@ -1412,13 +1452,14 @@ static void doLevel() {
         return;
     }
     imuUpdate();
-    gHeelOffsetDeg = gRollDeg;
+    gHeelOffsetDeg = rawHeelDeg();
     gPrefs.begin("sail", false);
-    gPrefs.putFloat("heel_off", gHeelOffsetDeg);
+    gPrefs.putFloat("heel_off2", gHeelOffsetDeg);
     gPrefs.end();
 
     Serial.println("──────────────────────────────────────────");
     Serial.printf("  지금 자세를 평형으로 삼았습니다.\n");
+    Serial.printf("  힐을 재는 축 가속 %s\n", heelAxisName());
     Serial.printf("  기준각 %+.1f°  →  지금 힐 %+.1f°\n",
                   gHeelOffsetDeg, currentHeelDeg());
     Serial.println("  NVS 에 저장했습니다. 다시 구워도 남습니다.");
@@ -1601,7 +1642,11 @@ static void checkSensors() {
 //   HEEL      IMU 가 살아 있으면 GPS 와 무관하게 늘 값이 있다
 //   BATT      항상 있다 (1 Hz 로 갱신되는 캐시)
 
-static float gBattPct = 100.0f; // 1 Hz 로 갱신
+static float gBattPct   = 100.0f; // 1 Hz 로 갱신
+// 잔량(%) 옆에 전압을 같이 내보낸다. 3.8~3.9 V 구간은 방전 곡선이 거의
+// 평평해서, 전압이 조금만 떨어져도 퍼센트가 크게 내려앉는다. 퍼센트만 보면
+// 배터리가 갑자기 닳는 것처럼 보인다. 둘을 나란히 봐야 판단이 선다.
+static float gBattVolts = 0.0f;
 
 // BLE 로 함께 내보낼 확장 필드를 모은다.
 //
@@ -1629,6 +1674,7 @@ static sail::TelemetryExtra buildExtra() {
     e.accX = gAcc.x; e.accY = gAcc.y; e.accZ = gAcc.z;
     e.gyrX = gGyr.x; e.gyrY = gGyr.y; e.gyrZ = gGyr.z;
     e.magX = gMag.x; e.magY = gMag.y; e.magZ = gMag.z;
+    e.battVolts = gBattVolts;
     return e;
 }
 
@@ -1645,8 +1691,8 @@ static Telemetry buildTelemetry(uint32_t nowMs) {
         t.cogDeg = (gCogDamped >= 0.0f) ? gCogDamped : (float)gGps.course.deg();
     }
 
-    // 어느 축을 힐로 볼지는 보드를 배에 어떻게 다느냐에 달렸다. 지금은 roll 을
-    // 쓴다. 실제로 달아 보고 pitch 가 맞으면 여기 한 줄만 바꾸면 된다.
+    // 어느 축을 힐로 볼지는 보드를 배에 어떻게 다느냐에 달렸다.
+    // `heel` 명령으로 고르고 NVS 에 남는다. 위 "힐" 항목 참고.
     t.heelValid = gImuOk;
     if (gImuOk) t.heelDeg = currentHeelDeg();
 
@@ -1818,6 +1864,7 @@ static void printHelp() {
     Serial.println("  nmea <본문>   NMEA 명령을 보내고 응답을 봅니다 (체크섬 자동)");
     Serial.println("  batt          배터리 전압 실측");
     Serial.println("  level         ★ 지금 자세를 힐 0° 로 삼기 (배가 평형일 때)");
+    Serial.println("  heel [x|y|z]  힐을 어느 가속도 축에서 볼지 (앞에 - 로 뒤집기)");
     Serial.println("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)");
     Serial.println("  help          이 도움말");
     Serial.println("──────────────────────────────────────────");
@@ -1840,6 +1887,49 @@ static void handleCommand(String line) {
     if (line == "fix")                 { doFix();      return; }
     if (line == "calib")               { doCalib();    return; }
     if (line == "level")               { doLevel();    return; }
+
+    // 힐을 어느 가속도 축에서 볼지. 보드를 다는 방법이 바뀌면 여기만 고친다.
+    if (line == "heel" || line.startsWith("heel ")) {
+        String arg = line.substring(4);
+        arg.trim();
+        if (arg.length() > 0) {
+            float sign = 1.0f;
+            if (arg.startsWith("-")) { sign = -1.0f; arg = arg.substring(1); }
+            else if (arg.startsWith("+")) { arg = arg.substring(1); }
+            arg.toLowerCase();
+
+            int axis = -1;
+            if (arg == "x") axis = 0;
+            else if (arg == "y") axis = 1;
+            else if (arg == "z") axis = 2;
+            if (axis < 0) {
+                Serial.println("[IMU] heel x | heel y | heel z (앞에 - 를 붙이면 좌우 뒤집기)");
+                return;
+            }
+
+            gHeelAxis = (uint8_t)axis;
+            gHeelSign = sign;
+            // 축을 바꾸면 옛 기준각은 다른 축에서 잡은 값이라 뜻이 없다.
+            gHeelOffsetDeg = 0.0f;
+            gPrefs.begin("sail", false);
+            gPrefs.putUChar("heel_axis", gHeelAxis);
+            gPrefs.putChar("heel_sgn", sign < 0.0f ? -1 : 1);
+            gPrefs.putFloat("heel_off2", 0.0f);
+            gPrefs.end();
+            Serial.println("  기준각은 0 으로 되돌렸습니다. 평형일 때 level 을 다시 치세요.");
+        }
+
+        imuUpdate();
+        Serial.println("──────────────────────────────────────────");
+        Serial.printf("  힐을 재는 축   가속 %s\n", heelAxisName());
+        Serial.printf("  기준각         %+.1f°\n", gHeelOffsetDeg);
+        Serial.printf("  지금 가속      %+.2f %+.2f %+.2f g\n", gAcc.x, gAcc.y, gAcc.z);
+        Serial.printf("  지금 힐        %+.1f°  (기준각 빼기 전 %+.1f°)\n",
+                      currentHeelDeg(), rawHeelDeg());
+        Serial.println("──────────────────────────────────────────");
+        Serial.println("  배가 평형일 때 그 축이 0 g 에 가까워야 맞는 축입니다.");
+        return;
+    }
 
     // GPS 갱신율. 밖에서 값이 굼뜨면 올리고, 문장이 깨지면 내린다.
     if (line.startsWith("gpshz ")) {
@@ -2103,7 +2193,8 @@ void setup() {
 
     // 배터리 ADC. 분압 뒤 최대 2.52 V 라 12 dB 감쇠 범위 안에 들어온다.
     analogSetPinAttenuation(rak::kBattAdcPin, ADC_11db);
-    gBattPct = batteryPercent(readBatteryVolts(nullptr));
+    gBattVolts = readBatteryVolts(nullptr);
+    gBattPct   = batteryPercent(gBattVolts);
 
 
     // ── 센서 붙이기 ─────────────────────────────────────────────────────
@@ -2188,8 +2279,9 @@ void loop() {
     //    2.5 MΩ 분압이라 값이 몇 % 씩 흔들린다. 천천히 따라가게 눌러 준다.
     if (now - lastBatt >= 1000) {
         lastBatt = now;
-        float fresh = batteryPercent(readBatteryVolts(nullptr));
-        gBattPct    = gBattPct * 0.8f + fresh * 0.2f;
+        const float freshV = readBatteryVolts(nullptr);
+        gBattVolts  = gBattVolts * 0.8f + freshV * 0.2f;
+        gBattPct    = gBattPct * 0.8f + batteryPercent(freshV) * 0.2f;
 
         // 같은 주기로 센서가 아직 붙어 있는지도 확인한다.
         // 사라졌으면 끄고 나머지로 계속 간다. 돌아오면 다시 붙는다.
@@ -2234,6 +2326,7 @@ void loop() {
         ds.bleConnected = gConnected;
         ds.bleNotifying = gSubscribed;
         ds.battPct      = gLatest.battPct;
+        ds.battVolts    = gBattVolts;
 
         ds.sogKn      = gLatest.sogKn; // 다듬고 잡음 바닥까지 적용된 값
         ds.cogDeg     = gLatest.cogDeg;
@@ -2270,9 +2363,9 @@ void loop() {
         else                   snprintf(heelTxt, sizeof(heelTxt), "%6s", "---");
 
         Serial.printf(
-            "[%7.1fs] %s | SOG %s kn | COG %s° | HEEL %s° | BATT %3d%% | seq %3u | %s%s\n",
+            "[%7.1fs] %s | SOG %s kn | COG %s° | HEEL %s° | BATT %3d%% %.2fV | seq %3u | %s%s\n",
             now / 1000.0f, gFullName, sogTxt, cogTxt, heelTxt,
-            (int)sail::encodeBatt(gLatest.battPct), gSeq,
+            (int)sail::encodeBatt(gLatest.battPct), gBattVolts, gSeq,
             gConnected ? "CONNECTED" : "ADVERTISING",
             gConnected ? (gSubscribed ? " (notify ON)" : " (notify OFF)") : "");
         printGpsLine();

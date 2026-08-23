@@ -30,9 +30,12 @@ enum SailProtocol {
 
     /// GATT characteristic 페이로드 길이 (모든 보드가 최소 이만큼은 보낸다)
     static let telemetryLength = 12
-    /// 확장 페이로드 길이 (PROTOCOL.md §3.1). RAK3112 보드는 이 길이로 보낸다.
+    /// 확장 페이로드에서 9축까지의 길이 (PROTOCOL.md §3.1).
     /// Feather TFT 보드는 9축이 없어 12바이트만 보낸다 — 둘 다 정상이다.
     static let telemetryExtLength = 37
+    /// 배터리 전압까지 붙은 길이. 뒤에 덧붙인 필드라 옛 펌웨어는 37만 보낸다.
+    /// 그래서 "37 이상이면 9축, 39 이상이면 전압까지" 로 읽는다.
+    static let telemetryExtVoltsLength = 39
     /// Manufacturer Data 중 Company ID(2바이트)를 제외한 페이로드 길이
     static let manufacturerPayloadLength = 9
 
@@ -143,6 +146,13 @@ struct TelemetryExtra: Equatable {
     var gyro: Vector3
     /// 자기장 (µT)
     var mag: Vector3
+
+    /// 배터리 전압 (V). `nil` 이면 옛 펌웨어라 안 보낸 것이다.
+    ///
+    /// 퍼센트만으로는 배터리를 판단할 수 없다. 리튬폴리머는 3.8~3.9 V 구간에서
+    /// 방전 곡선이 거의 평평해서, 전압이 조금만 떨어져도 퍼센트가 크게
+    /// 내려앉는다. 그래서 둘을 나란히 보여준다.
+    var batteryVolts: Double?
 }
 
 // MARK: - 텔레메트리 샘플
@@ -223,6 +233,14 @@ extension TelemetrySample {
             let gyro  = vec(10.0)   // deg/s
             let mag   = vec(10.0)   // µT
 
+            // 뒤에 덧붙인 필드다. 옛 펌웨어는 여기까지 안 보내므로 없을 수 있다.
+            // 0 은 "아직 못 잼" 이라는 뜻이라 값으로 쓰지 않는다.
+            var volts: Double? = nil
+            if data.count >= SailProtocol.telemetryExtVoltsLength {
+                let mv = r.u16()
+                if mv > 0 { volts = Double(mv) / 1000.0 }
+            }
+
             extra = TelemetryExtra(
                 gpsFix:         flags & 0x01 != 0,
                 imuOK:          flags & 0x02 != 0,
@@ -231,7 +249,8 @@ extension TelemetrySample {
                 hdop:           hdopRaw == 255 ? nil : Double(hdopRaw) / 10.0,
                 headingDegrees: hdgRaw == 0xFFFF ? nil : Double(hdgRaw) / 10.0,
                 pitchDegrees:   Double(pitchRaw) / 10.0,
-                accel: accel, gyro: gyro, mag: mag
+                accel: accel, gyro: gyro, mag: mag,
+                batteryVolts: volts
             )
         }
 
@@ -293,6 +312,18 @@ extension TelemetrySample {
     var sogText: String  { sogKnots.map { String(format: "%.2f", $0) } ?? "—.—" }
     var cogText: String  { cogDegrees.map { String(format: "%.1f°", $0) } ?? "—" }
     var heelText: String { heelDegrees.map { String(format: "%+d°", $0) } ?? "—" }
+
+    /// 배터리 전압. 확장 패킷(RAK3112)에만 있다.
+    var batteryVolts: Double? { extra?.batteryVolts }
+
+    /// "64% · 3.89V" — 전압을 못 받았으면 퍼센트만.
+    ///
+    /// 퍼센트 혼자서는 배터리 상태를 못 읽는다. 3.8~3.9 V 구간은 방전 곡선이
+    /// 거의 평평해서 퍼센트가 뚝뚝 떨어지는데, 실제로는 아직 한참 남아 있다.
+    var batteryText: String {
+        guard let v = batteryVolts else { return "\(batteryPercent)%" }
+        return String(format: "%d%% · %.2fV", batteryPercent, v)
+    }
 
     /// 자력계가 주는 **뱃머리 방향**. 확장 패킷(RAK3112)에만 있다.
     var headingDegrees: Double? { extra?.headingDegrees }

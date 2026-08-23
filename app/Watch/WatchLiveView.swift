@@ -391,7 +391,7 @@ private struct SettingsPage: View {
             row("연결", ble.connLastAt == nil ? "—" : String(format: "%.1f Hz", ble.connRateHz))
             row("광고", ble.advLastAt == nil ? "—" : String(format: "%.1f Hz", ble.advRateHz))
             row("RSSI", ble.rssi.map { "\($0)" } ?? "—")
-            row("배터리", ble.sample.map { "\($0.batteryPercent)%" } ?? "—")
+            row("배터리", ble.sample.map { $0.batteryText } ?? "—")
 
             Button {
                 ble.forceReconnect()

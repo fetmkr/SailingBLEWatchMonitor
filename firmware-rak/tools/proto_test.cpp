@@ -150,6 +150,7 @@ static void testExtendedEncoding() {
     e.accX = 0.123f;  e.accY = -0.456f; e.accZ = 0.987f;
     e.gyrX = 12.3f;   e.gyrY = -45.6f;  e.gyrZ = 0.0f;
     e.magX = -31.8f;  e.magY = 6.1f;    e.magZ = -23.8f;
+    e.battVolts = 3.888f;
 
     uint8_t base[sail::kTelemetryLen];
     sail::encodeTelemetryPacket(t, base);
@@ -170,6 +171,16 @@ static void testExtendedEncoding() {
     check(i16At(&p[19]) == 123,       "가속 X 0.123 g → 123");
     check(i16At(&p[25]) == 123,       "자이로 X 12.3 °/s → 123");
     check(i16At(&p[31]) == -318,      "자력 X -31.8 µT → -318");
+    check(u16At(&p[37]) == 3888,      "배터리 3.888 V → 3888 mV");
+    check(sail::kTelemetryExtBaseLen == 37,
+          "9축까지는 37바이트 — 옛 앱이 읽던 자리는 그대로");
+
+    // 전압을 못 쟀으면 0. 앱이 "값 없음" 으로 읽어야 한다.
+    e.battVolts = 0.0f;
+    sail::encodeTelemetryExt(t, e, p);
+    check(u16At(&p[37]) == 0,         "전압 못 잼 → 0");
+    e.battVolts = 3.888f;
+    sail::encodeTelemetryExt(t, e, p);
 
     // 자력계가 없으면 방위는 무효 표식이어야 한다.
     e.magOk = false;

@@ -43,7 +43,7 @@ struct SettingsView: View {
                                    value: ble.advLastAt == nil ? "—"
                                         : String(format: "%.2f Hz", ble.advRateHz))
                     LabeledContent("RSSI", value: ble.rssi.map { "\($0) dBm" } ?? "—")
-                    LabeledContent("배터리", value: ble.sample.map { "\($0.batteryPercent)%" } ?? "—")
+                    LabeledContent("배터리", value: ble.sample.map { $0.batteryText } ?? "—")
                     LabeledContent("모듈 uptime",
                                    value: ble.sample?.uptimeSeconds.map { String(format: "%.0f초", $0) } ?? "—")
                     LabeledContent("마지막 수신",

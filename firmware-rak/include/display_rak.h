@@ -18,6 +18,9 @@ struct DisplayState {
     bool  bleConnected   = false;
     bool  bleNotifying   = false;
     float battPct        = 100.0f;
+    /// 배터리 전압 (V). 0 이하면 아직 못 잰 것이라 안 그린다.
+    /// 퍼센트만 보면 3.8~3.9 V 구간에서 잔량이 뚝뚝 떨어지는 것처럼 보인다.
+    float battVolts      = 0.0f;
 
     // ── 항해 값 ──────────────────────────────────────────────────────────
     float sogKn   = 0.0f;
