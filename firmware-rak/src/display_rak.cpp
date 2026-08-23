@@ -137,7 +137,18 @@ void displayUpdate(const DisplayState& s) {
 
     // ── 상태줄 ───────────────────────────────────────────────────────────
     gOled.setFont(u8g2_font_5x7_tf);
-    drawChecked(2, kTopBaseline, s.userName, "이름");
+    // 기록 중이면 이름 대신 REC 와 지난 시간. 배에서 제일 궁금한 게 이거다.
+    if (s.recording) {
+        char rec[24];
+        snprintf(rec, sizeof(rec), "REC %02u:%02u",
+                 (unsigned)(s.recSeconds / 60), (unsigned)(s.recSeconds % 60));
+        gOled.drawBox(0, kTopBaseline - 7, 5 * (int)strlen(rec) + 3, 9);
+        gOled.setDrawColor(0);
+        gOled.drawStr(2, kTopBaseline, rec);
+        gOled.setDrawColor(1); // 안 되돌리면 다음 그리기가 다 뒤집힌다
+    } else {
+        drawChecked(2, kTopBaseline, s.userName, "이름");
+    }
 
     // 오른쪽 끝부터 [잔량%] [전압] [BLE] 순으로 붙인다.
     // 전압을 같이 놓는 이유는 display_rak.h 의 battVolts 주석 참고.

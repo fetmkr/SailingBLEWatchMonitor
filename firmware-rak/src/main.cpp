@@ -34,6 +34,7 @@
 
 #include "board_rak.h"
 #include "display_rak.h"
+#include "hlog.h"
 #include "protocol.h"
 
 using sail::Telemetry;
@@ -42,6 +43,14 @@ using sail::Telemetry;
 static Preferences gPrefs;
 
 // 다듬기 세기와 잡음 바닥. 설정에서 먼저 읽으므로 여기 둔다.
+static float gBattPct   = 100.0f; // 1 Hz 로 갱신
+// 잔량(%) 옆에 전압을 같이 내보낸다. 3.8~3.9 V 구간은 방전 곡선이 거의
+// 평평해서, 전압이 조금만 떨어져도 퍼센트가 크게 내려앉는다. 퍼센트만 보면
+// 배터리가 갑자기 닳는 것처럼 보인다. 둘을 나란히 봐야 판단이 선다.
+// ★ 기록에는 전압 원시값만 남긴다. 퍼센트는 곡선에서 나온 파생값이라
+//   곡선을 고치면 옛 데이터의 뜻이 달라진다 (로그포맷 명세 §7).
+static float gBattVolts = 0.0f;
+
 static uint8_t gDampLevel  = 2;      // 0~5. 아래 kDampTau 의 칸 번호
 static float   gDeadbandKn = 0.10f;  // 이보다 작은 속도는 0 으로 내린다
 static char        gUserName[sail::kMaxUserNameLen + 1] = {0}; // "hojun"
@@ -473,6 +482,10 @@ static void doScan() {
 static constexpr uint32_t kGpsBaud = 115200;
 
 static uint8_t gGpsHz = 10; // 실제로 건 갱신율 (진단 출력용)
+// 모듈에 실제로 걸려 있는 움직임 종류. gpscfg 로 되물어볼 때마다 갱신한다.
+// 255 면 아직 안 물어봤다는 뜻이다. 기록 헤더에 이 값이 들어간다 —
+// 나중에 "왜 이 세션만 저속이 뭉개졌지" 를 따질 때 이게 없으면 못 찾는다.
+static uint8_t gGpsDyModel = 255;
 
 // CASIC 바이너리 쪽은 아래에 정의돼 있다. gpsBegin() 이 먼저 나와서 앞선언한다.
 static void casicSend(uint8_t cls, uint8_t id, const uint8_t* payload, uint16_t len);
@@ -629,6 +642,7 @@ static void updatePositionSpeed() {
 static float    gPvSpeedKn  = -1.0f; // 음수면 아직 없음
 static float    gPvCogDeg   = -1.0f;
 static float    gPvAccKn    = -1.0f; // 모듈이 밝힌 자기 속도 오차
+static float    gPvHAccM    = -1.0f; // 모듈이 밝힌 수평 위치 오차 (m)
 static bool     gPvVelValid = false;
 static uint32_t gPvAtMs     = 0;
 
@@ -667,10 +681,12 @@ static void gpsPoll() {
                 case 7:
                     if (++bn >= 4) { // 체크섬까지 다 받았다
                         if (bcls == 0x01 && bid == 0x03 && bneed >= 80) {
-                            float sp, hd, ac;
+                            float sp, hd, ac, ha;
+                            memcpy(&ha, bbody + 40, 4); // 수평 위치 정확도 (m²)
                             memcpy(&sp, bbody + 64, 4);
                             memcpy(&hd, bbody + 68, 4);
                             memcpy(&ac, bbody + 72, 4);
+                            gPvHAccM    = (ha > 0.0f) ? sqrtf(ha) : -1.0f;
                             gPvVelValid = (bbody[5] != 0);
                             gPvSpeedKn  = sp * 1.943844f;
                             gPvCogDeg   = hd;
@@ -1080,6 +1096,7 @@ static void gpsCfgDump() {
         // ★ 선박 모드(4)가 아니라 휴대 모드(0)를 쓴다. 실측 결과다.
         //   4(선박)로 두면 느린 움직임을 정지로 보고 0 으로 뭉갠다.
         //   요트는 정박·미풍이 0~2 kn 이라 그 구간을 잃으면 안 된다.
+        gGpsDyModel = buf[4];   // 실제로 걸려 있는 값을 기억해 둔다
         Serial.printf("  움직임 종류   %u  %s%s\n", buf[4], dyModelName(buf[4]),
                       buf[4] == 0 ? "   — 우리가 고른 값" : "   ★ 우리는 0(휴대)을 쓴다");
         Serial.printf("  정지 문턱값   %.2f m/s (= %.2f kn)%s\n",
@@ -1209,6 +1226,7 @@ static void gpsCfgSetNavx(bool setModel, uint8_t model,
             // 보드에 적어 두고 부팅할 때마다 다시 건다.
             if (setModel) {
                 gPrefs.putUChar("gps_dyn", model);
+                gGpsDyModel = model;
                 Serial.println("  보드에 적어 뒀습니다. 껐다 켜도 이 모드로 다시 겁니다.");
             }
         } else {
@@ -1342,7 +1360,7 @@ static bool imuBegin() {
 
     gImu.enableGyrDLPF();
     gImu.setGyrDLPF(MPU9250_DLPF_6); // 가장 조용한 설정
-    gImu.setSampleRateDivider(5);
+    gImu.setSampleRateDivider(9);    // 1000/(1+9) = 100 Hz (FIFO 주기)
 
     gMagOk = gImu.initMagnetometer();
     return true;
@@ -1424,11 +1442,87 @@ static bool calibrateGyro() {
     return true;
 }
 
-// 최신 9축 값을 전역에 담는다. 10 Hz 로 부른다.
-static void imuUpdate() {
+// 가속도·자이로만 읽는다. 100 Hz 로 부른다.
+//
+// 파도·펌핑·태킹 같은 동역학은 10 Hz 로는 뭉개진다. 실제 요트 계기가
+// 50~100 Hz 로 돈다 (README 의 계기 비교표).
+static void imuFast() {
     if (!gImuOk) return;
     gAcc = gImu.getGValues();
     gGyr = gImu.getGyrValues();
+}
+
+// ── 등간격 100 Hz — 칩 안의 FIFO 를 쓴다 ─────────────────────────────────
+//
+// 우리가 직접 100 Hz 로 읽으면 간격이 고르지 않다. 화면 한 장 그리는 데
+// I2C 가 33 ms 묶이고 (실측), 그동안 못 읽는다. 몰아서 읽어 놓고 "10 ms
+// 간격" 이라고 적으면 데이터에 거짓말을 넣는 것이다.
+//
+// 그래서 **칩이 스스로 재게 한다.** MPU-9250 은 자기 클럭으로 정해진 주기에
+// 값을 떠서 512바이트 FIFO 에 쌓는다. 우리는 한가할 때 퍼 오기만 하면 된다.
+// 언제 퍼 오든 값들 사이 간격은 칩이 만든 그대로 10 ms 다.
+//
+//   설정   SMPLRT_DIV = 9  →  1000 Hz / (1+9) = **정확히 100 Hz**
+//   한 벌  가속 6바이트 + 자이로 6바이트 = 12바이트
+//   FIFO   512바이트 = 42벌 = 420 ms 치. 화면이 33 ms 묶어도 넉넉하다
+//
+// 시각은 10 ms 씩 더해 나가되, 실제 시각과 200 ms 넘게 벌어지면 다시 맞춘다.
+// 칩 클럭과 보드 클럭이 조금씩 다르기 때문이다.
+static void logWriteImu(uint32_t nowMs); // 아래 "기록 (hlog)" 항목
+
+static bool     gFifoOn      = false;
+static uint32_t gImuTickMs   = 0;   // 다음 한 벌의 시각
+static uint32_t gFifoOverrun = 0;   // FIFO 가 넘칠 뻔한 횟수. 0 이어야 정상
+static uint32_t gFifoSets    = 0;   // 퍼 온 벌 수 (진단용)
+
+static void imuFifoBegin() {
+    if (!gImuOk) return;
+    gImu.setSampleRateDivider(9);              // 1000/(1+9) = 100 Hz
+    gImu.enableFifo(true);
+    gImu.setFifoMode(MPU9250_CONTINUOUS);
+    gImu.resetFifo();
+    gImu.startFifo(MPU9250_FIFO_ACC_GYR);
+    gFifoOn = true;
+    gImuTickMs = millis();
+    Serial.println("[IMU] FIFO 켜짐 — 칩이 100 Hz 로 떠서 쌓습니다 (등간격)");
+}
+
+// FIFO 를 퍼 온다. 20 ms 마다 부르면 보통 두 벌씩 나온다.
+static void imuDrainFifo() {
+    if (!gImuOk || !gFifoOn) return;
+    int16_t sets = gImu.getNumberOfFifoDataSets();
+    if (sets <= 0) return;
+
+    const uint32_t nowMs = millis();
+
+    // 42벌이 꽉 차면 오래된 것부터 덮어써서 벌 경계가 어긋난다.
+    // 그 전에 비우고 시각을 다시 맞춘다. 조용히 넘기지 않고 센다.
+    if (sets >= 38) {
+        gImu.resetFifo();
+        gImuTickMs = nowMs;
+        ++gFifoOverrun;
+        return;
+    }
+
+    // 제일 오래된 벌의 시각. 여기서 200 ms 넘게 벌어졌으면 다시 맞춘다.
+    const uint32_t oldest = nowMs - (uint32_t)(sets - 1) * 10u;
+    const int32_t  gap    = (int32_t)(oldest - gImuTickMs);
+    if (gImuTickMs == 0 || gap > 200 || gap < -200) gImuTickMs = oldest;
+
+    for (int16_t i = 0; i < sets; ++i) {
+        gAcc = gImu.getGValuesFromFifo();       // 순서 중요: 가속 6바이트 먼저
+        gGyr = gImu.getGyrValuesFromFifo();     // 그다음 자이로 6바이트
+        if (hlog::recording()) logWriteImu(gImuTickMs);
+        gImuTickMs += 10;
+        ++gFifoSets;
+    }
+}
+
+// 자력계까지 포함한 갱신. 10 Hz 로 부른다.
+// 자력계(AK8963)는 100 Hz 로 못 따라오므로 여기서만 읽는다.
+static void imuUpdate() {
+    if (!gImuOk) return;
+    if (!gFifoOn) imuFast();   // FIFO 가 켜져 있으면 가속·자이로는 거기서 온다
     if (gMagOk) gMag = gImu.getMagValues();
     // 라이브러리의 getRoll()/getPitch() 는 안 쓴다. 보드를 세워 달아서
     // 그 각도는 힐·피치와 다른 회전을 잰다. 아래 "힐과 피치" 항목 참고.
@@ -1781,6 +1875,183 @@ static void doSdBench(uint32_t rows) {
     Serial.println("──────────────────────────────────────────");
 }
 
+
+// ── 기록 (hlog) ──────────────────────────────────────────────────────────
+//
+// 규격은 docs/spec/로그포맷_v1.0_draft_2026-08-24.md, 계획과 실측은 SDLOG.md.
+//
+// ★ 저장하는 값은 **다듬기 전 원본**이다. 앱에 보이는 속도는 다듬고 잡음
+//   바닥을 적용한 값인데, 그걸 저장하면 원본을 되살릴 수 없다. 잡음 바닥
+//   0.1 kn 때문에 진짜 저속 데이터가 조용히 0 이 되어 버린다.
+//   헤더의 sog_src 가 항상 0(도플러 원본)이어야 하는 이유다.
+
+// UTC 날짜·시각을 GPS 주 번호와 주중 밀리초로 바꾼다.
+//
+// ※ NMEA 가 주는 것은 UTC 다. 진짜 GPS 시각은 여기에 윤초(지금 18초)를
+//   더한 값이다. 그래서 헤더의 time_ref 에 1(UTC 환산)이라고 적어 둔다.
+//   나중에 진짜 GPS 시각을 주는 모듈로 바꾸면 0 으로 적으면 된다.
+static bool gpsWeekTow(uint16_t* week, uint32_t* tow) {
+    if (!gGps.date.isValid() || !gGps.time.isValid()) return false;
+    const int y = gGps.date.year(), m = gGps.date.month(), d = gGps.date.day();
+    if (y < 2000) return false;
+
+    // 1980-01-06 부터 며칠 지났나 (Howard Hinnant 의 days_from_civil)
+    int yy = y - (m <= 2 ? 1 : 0);
+    const int era = (yy >= 0 ? yy : yy - 399) / 400;
+    const unsigned yoe = (unsigned)(yy - era * 400);
+    const unsigned doy = (unsigned)((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const long days = (long)era * 146097 + (long)doe - 719468; // 1970-01-01 기준
+    const long gpsDays = days - 3657;                          // 1980-01-06 까지 3657일
+    if (gpsDays < 0) return false;
+
+    *week = (uint16_t)(gpsDays / 7);
+    const uint32_t dow = (uint32_t)(gpsDays % 7);
+    *tow = ((dow * 86400u) + gGps.time.hour() * 3600u +
+            gGps.time.minute() * 60u + gGps.time.second()) * 1000u +
+           gGps.time.centisecond() * 10u;
+    return true;
+}
+
+static void logWriteImu(uint32_t nowMs) {
+    hlog::ImuSample b;
+    b.localMs = nowMs;
+    // 1 mg/LSB
+    b.acc[0] = (int16_t)lroundf(gAcc.x * 1000.0f);
+    b.acc[1] = (int16_t)lroundf(gAcc.y * 1000.0f);
+    b.acc[2] = (int16_t)lroundf(gAcc.z * 1000.0f);
+    // 1/32 °/s/LSB
+    b.gyr[0] = (int16_t)lroundf(gGyr.x * 32.0f);
+    b.gyr[1] = (int16_t)lroundf(gGyr.y * 32.0f);
+    b.gyr[2] = (int16_t)lroundf(gGyr.z * 32.0f);
+    // 쿼터니언 네 칸 모두 0 = 자세 없음.
+    // MPU-9250 은 융합을 안 한다. 가속·자이로 원본이 100 Hz 로 남으므로
+    // 자세는 나중에 후처리로 뽑으면 된다. BNO085 로 바뀌면 여기가 채워진다.
+    hlog::writeImu(b);
+}
+
+static hlog::NavSample buildNav(uint32_t nowMs) {
+    hlog::NavSample a;
+    a.localMs = nowMs;
+
+    uint16_t wk; uint32_t tow;
+    if (gpsWeekTow(&wk, &tow)) { a.week = wk; a.itow = tow; }
+
+    if (gGpsFix && gGps.location.isValid()) {
+        a.lat = (int32_t)lround(gGps.location.lat() * 1e7);
+        a.lon = (int32_t)lround(gGps.location.lng() * 1e7);
+        a.fix = 1;
+    }
+
+    // ★ 다듬기 전 도플러 원본. sogOut() 을 쓰면 안 된다.
+    if (gGpsFix && gGps.speed.isValid()) {
+        const float kn = (float)gGps.speed.knots();
+        long mmps = lroundf(kn / 1.943844f * 1000.0f);
+        if (mmps < 0) mmps = 0;
+        if (mmps > 65534) mmps = 65534;
+        a.sog = (uint16_t)mmps;
+    }
+    if (gGpsFix && gGps.course.isValid()) {
+        long cd = lroundf((float)gGps.course.deg() * 100.0f) % 36000;
+        if (cd < 0) cd += 36000;
+        a.cog = (uint16_t)cd;
+    }
+
+    if (gGps.satellites.isValid()) a.numSv = (uint8_t)gGps.satellites.value();
+
+    // 수평 정확도. 모듈이 직접 알려 주는 값이 있으면 그걸 쓴다.
+    if (gPvHAccM >= 0.0f) {
+        long cm = lroundf(gPvHAccM * 100.0f);
+        a.hAcc = (uint16_t)(cm > 65534 ? 65534 : (cm < 0 ? 0 : cm));
+    }
+
+    a.battMv = (uint16_t)lroundf(gBattVolts * 1000.0f);
+
+    // 자력계 원본. 0.1 µT/LSB (헤더 mag_scale = 1)
+    if (gMagOk) {
+        a.mag[0] = (int16_t)lroundf(gMag.x * 10.0f);
+        a.mag[1] = (int16_t)lroundf(gMag.y * 10.0f);
+        a.mag[2] = (int16_t)lroundf(gMag.z * 10.0f);
+    }
+    return a;
+}
+
+static void logWriteNav(uint32_t nowMs) {
+    hlog::writeNav(buildNav(nowMs));
+}
+
+static void logWriteText(uint32_t nowMs) {
+    hlog::TextSample t;
+    t.attOk    = gImuOk;
+    t.heelDeg  = currentHeelDeg();
+    t.pitchDeg = currentPitchDeg();
+    t.hdgDeg   = headingDeg();
+    hlog::writeText(buildNav(nowMs), t);
+}
+
+static bool logStartNow() {
+    hlog::Header h;
+    esp_read_mac(h.mac, ESP_MAC_WIFI_STA);
+    h.fwVersion = 0x0100;
+    h.hwRev     = 1;
+    h.gnssType  = 2;                    // L76K 는 규격에 없다. 예약값으로 표시
+    h.imuType   = hlog::kImuMPU9250;
+    h.timeRef   = 1;                    // UTC 에서 환산 (윤초만큼 다름)
+    h.magScale  = 1;                    // 0.1 µT/LSB
+    h.gnssHz    = gGpsHz;
+    h.sogSrc    = 0;                    // 도플러 원본
+    h.quatSrc   = 1;                    // 융합 없음 — 가속·자이로 원본만
+    if (gGpsDyModel != 255) {
+        h.gnssDyn = gGpsDyModel;            // 모듈에서 실제로 읽은 값이 있으면 그것
+    } else {
+        gPrefs.begin("sail", true);
+        h.gnssDyn = gPrefs.getUChar("gps_dyn", 255);
+        gPrefs.end();
+    }
+    if (!hlog::start(h)) return false;
+
+    // 카드를 마운트하는 동안 FIFO 에 옛 값이 쌓인다. 그걸 그대로 쓰면
+    // 세션 첫머리에 "기록 시작 전" 값이 섞여 들어간다. 비우고 시작한다.
+    if (gFifoOn) {
+        gImu.resetFifo();
+        gImuTickMs = millis();
+        gFifoOverrun = 0;
+    }
+    return true;
+}
+
+// ── 한 바퀴에 얼마나 걸리나 (probe) ──────────────────────────────────────
+//
+// IMU 를 100 Hz 로 올렸는데 78 Hz 밖에 안 나왔다. 짐작하지 말고 어디서
+// 시간을 쓰는지 잰다. `loopstat` 으로 켜고 끈다.
+static bool     gLoopStat = false;
+static uint32_t gLoopCount = 0;
+static uint32_t gLoopMaxUs = 0;
+struct SecStat { uint32_t maxUs = 0; uint32_t sumUs = 0; };
+static SecStat gStGps, gStImu, gStNotify, gStDraw, gStLog;
+static inline void secDone(SecStat& st, uint32_t us) {
+    if (us > st.maxUs) st.maxUs = us;
+    st.sumUs += us;
+}
+static void loopStatPrint(uint32_t elapsedMs) {
+    if (!gLoopStat) return;
+    const float sec = elapsedMs / 1000.0f;
+    Serial.printf("   루프  %.0f바퀴/초  한 바퀴 최대 %.1fms\n",
+                  gLoopCount / sec, gLoopMaxUs / 1000.0f);
+    Serial.printf("   ├ GPS읽기 최대 %5.1fms  합 %5.1fms/초\n",
+                  gStGps.maxUs / 1000.0f, gStGps.sumUs / 1000.0f / sec);
+    Serial.printf("   ├ IMU읽기 최대 %5.1fms  합 %5.1fms/초\n",
+                  gStImu.maxUs / 1000.0f, gStImu.sumUs / 1000.0f / sec);
+    Serial.printf("   ├ notify  최대 %5.1fms  합 %5.1fms/초\n",
+                  gStNotify.maxUs / 1000.0f, gStNotify.sumUs / 1000.0f / sec);
+    Serial.printf("   ├ 화면    최대 %5.1fms  합 %5.1fms/초\n",
+                  gStDraw.maxUs / 1000.0f, gStDraw.sumUs / 1000.0f / sec);
+    Serial.printf("   └ 기록    최대 %5.1fms  합 %5.1fms/초\n",
+                  gStLog.maxUs / 1000.0f, gStLog.sumUs / 1000.0f / sec);
+    gLoopCount = 0; gLoopMaxUs = 0;
+    gStGps = gStImu = gStNotify = gStDraw = gStLog = SecStat();
+}
+
 // ── 멈추지 않기 위한 장치 ────────────────────────────────────────────────
 //
 // 센서 하나가 죽었다고 계기가 통째로 멈추면 안 된다. 바다에서는 그게 제일
@@ -1852,11 +2123,6 @@ static void checkSensors() {
 //   HEEL      IMU 가 살아 있으면 GPS 와 무관하게 늘 값이 있다
 //   BATT      항상 있다 (1 Hz 로 갱신되는 캐시)
 
-static float gBattPct   = 100.0f; // 1 Hz 로 갱신
-// 잔량(%) 옆에 전압을 같이 내보낸다. 3.8~3.9 V 구간은 방전 곡선이 거의
-// 평평해서, 전압이 조금만 떨어져도 퍼센트가 크게 내려앉는다. 퍼센트만 보면
-// 배터리가 갑자기 닳는 것처럼 보인다. 둘을 나란히 봐야 판단이 선다.
-static float gBattVolts = 0.0f;
 
 // BLE 로 함께 내보낼 확장 필드를 모은다.
 //
@@ -2062,6 +2328,7 @@ static void printHelp() {
     Serial.println("  scan          I2C — 화면 RAK1921(0x3C) / IMU RAK1905(0x68)");
     Serial.println("  sd            SD카드 마운트 + 쓰기 시험");
     Serial.println("  sdbench [줄수] SD 쓰기 속도·최대 멈춤 실측 (기본 3600줄)");
+    Serial.println("  rec           ★ 기록 상태. rec on / rec off / rec mark");
     Serial.println("  oled          화면을 나중에 꽂았을 때 다시 붙이기");
     Serial.println("  gps           UART1 원시 NMEA 5초 (GPS 가 슬롯 A)");
     Serial.println("  gps d         같은 것 (GPS 가 슬롯 D — IO6 로 리셋 해제)");
@@ -2096,6 +2363,70 @@ static void handleCommand(String line) {
     if (line == "batt")                { printBattery(); return; }
     if (line == "imu")                 { doImu();      return; }
     if (line == "sd")                  { doSd();       return; }
+    if (line == "loopstat") {
+        gLoopStat = !gLoopStat;
+        Serial.printf("[STAT] 루프 시간 출력 %s\n", gLoopStat ? "켬" : "끔");
+        return;
+    }
+
+    // 기록 시작·종료·표식. 명세의 "저장 버튼" 자리다 — 보드에 버튼이 없어서
+    // 지금은 시리얼로, 다음은 앱으로 한다.
+    if (line == "rec" || line.startsWith("rec ")) {
+        String arg = line.substring(3);
+        arg.trim();
+        arg.toLowerCase();
+
+        if (arg == "on" || arg == "start") {
+            if (logStartNow()) {
+                hlog::Status st; hlog::getStatus(&st);
+                Serial.printf("[REC] 시작 — %s\n", st.path);
+            } else {
+                hlog::Status st; hlog::getStatus(&st);
+                Serial.printf("[REC] 시작 못 함 — %s\n",
+                              st.lastError ? st.lastError : "알 수 없음");
+            }
+            return;
+        }
+        if (arg == "off" || arg == "stop") { hlog::stop(); return; }
+        if (arg == "mark")                 { hlog::mark(); return; }
+
+        hlog::Status st;
+        hlog::getStatus(&st);
+        Serial.println("──────────────────────────────────────────");
+        Serial.printf("  카드          %s\n", st.cardPresent ? "있음" : "없음");
+        if (!st.recording) {
+            Serial.println("  기록          멈춰 있음   (rec on 으로 시작)");
+            if (st.lastError) Serial.printf("  지난 오류     %s\n", st.lastError);
+            if (st.session)   Serial.printf("  지난 세션     %s  %u+%u줄\n",
+                                            st.path, (unsigned)st.navRows,
+                                            (unsigned)st.imuRows);
+        } else {
+            const uint32_t sec = (millis() - st.startedMs) / 1000;
+            Serial.printf("  기록 중       %s\n", st.path);
+            Serial.printf("  지난 시간     %u분 %u초\n", sec / 60, sec % 60);
+            Serial.printf("  NAV 줄        %u   (10 Hz 면 %u 쯤이어야 정상)\n",
+                          (unsigned)st.navRows, (unsigned)(sec * 10));
+            Serial.printf("  IMU 줄        %u   (100 Hz 면 %u 쯤)\n",
+                          (unsigned)st.imuRows, (unsigned)(sec * 100));
+            Serial.printf("  쓴 양         %.2f MB\n", st.bytes / 1048576.0);
+        }
+        Serial.println("  ─── 건강 상태 ───");
+        Serial.printf("  버린 줄       %u   %s\n", (unsigned)st.dropped,
+                      st.dropped ? "★ 구멍이 났습니다" : "(0 이어야 정상)");
+        Serial.printf("  기다린 횟수   %u   (버퍼가 찰 뻔한 횟수)\n",
+                      (unsigned)st.waited);
+        Serial.printf("  최대 멈춤     %u ms  (카드가 제일 오래 안 놓아준 시간)\n",
+                      (unsigned)st.maxStallMs);
+        Serial.printf("  버퍼 최고     %u %%\n", (unsigned)st.maxFillPct);
+        Serial.printf("  IMU FIFO      %s,  넘칠 뻔 %u번 %s\n",
+                      gFifoOn ? "켜짐(칩이 100Hz 로 뜸)" : "꺼짐",
+                      (unsigned)gFifoOverrun,
+                      gFifoOverrun ? "★ 그때 값이 비었습니다" : "(0 이어야 정상)");
+        Serial.println("──────────────────────────────────────────");
+        Serial.println("  rec on / rec off / rec mark");
+        return;
+    }
+
 
     // SD 쓰기 속도 실측. 기본 3600줄 = 10 Hz 로 6분치.
     if (line == "sdbench" || line.startsWith("sdbench ")) {
@@ -2396,6 +2727,7 @@ static void pollSerial() {
     }
 }
 
+
 // ── setup / loop ─────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
@@ -2433,12 +2765,19 @@ void setup() {
     gBattPct   = batteryPercent(gBattVolts);
 
 
+    // 기록기. 쓰기 작업을 코어 0 에 띄운다 (SDLOG.md §4)
+    gPrefs.begin("sail", false);
+    gPrefs.putUInt("boot_n", gPrefs.getUInt("boot_n", 0) + 1);
+    gPrefs.end();
+    hlog::begin();
+
     // ── 센서 붙이기 ─────────────────────────────────────────────────────
     gpsBegin();
     Serial.printf("[GPS] UART1 %lubps / %u Hz (RX GPIO%d / TX GPIO%d)\n",
                   (unsigned long)kGpsBaud, gGpsHz, rak::kUART1_RX, rak::kUART1_TX);
 
     if (imuBegin()) {
+        imuFifoBegin();
         Serial.printf("[IMU] MPU-9250 붙음 | 자력계 %s\n",
                       gMagOk ? "OK" : "응답 없음");
         applyGyrOffsets();   // 지난번에 잡아둔 0점을 먼저 넣고
@@ -2492,20 +2831,32 @@ void setup() {
 }
 
 void loop() {
+    const uint32_t loopT0 = micros();
     const uint32_t now = millis();
 
     static uint32_t lastNotify = 0;
     static uint32_t lastAdv    = 0;
     static uint32_t lastLog    = 0;
     static uint32_t lastImu    = 0;
+    static uint32_t lastImuFast = 0;
     static uint32_t lastBatt   = 0;
+    static uint32_t lastText   = 0;
 
     pollSerial();
 
     // GPS 는 쉬지 않고 읽는다. UART 버퍼가 넘치면 문장 중간이 잘려 나간다.
-    gpsPoll();
+    { const uint32_t t = micros(); gpsPoll(); secDone(gStGps, micros() - t); }
 
-    // 1) 10 Hz — IMU 갱신
+    // 1a) 10 ms 마다 FIFO 를 퍼 온다. 값을 뜨는 건 칩이 100 Hz 로 한다.
+    //     우리가 늦게 퍼 와도 값들 사이 간격은 칩이 만든 10 ms 그대로다.
+    if (now - lastImuFast >= 10) {
+        const uint32_t t = micros();
+        lastImuFast = now;
+        imuDrainFifo();
+        secDone(gStImu, micros() - t);
+    }
+
+    // 1b) 10 Hz — 자력계까지. 화면과 BLE 가 쓰는 값이다.
     if (now - lastImu >= 100) {
         lastImu = now;
         imuUpdate();
@@ -2522,12 +2873,35 @@ void loop() {
         // 같은 주기로 센서가 아직 붙어 있는지도 확인한다.
         // 사라졌으면 끄고 나머지로 계속 간다. 돌아오면 다시 붙는다.
         checkSensors();
+        hlog::healthCheck();
+    }
+
+    // 1d) 초록 LED — 기록 중이면 1초에 한 번 깜박인다 (기능명세 「조작」).
+    //     화면이 없는 실제 모듈에서는 이게 유일한 표시가 된다.
+    {
+        static bool ledOn = false;
+        const bool want = hlog::recording() && (now % 1000) < 80;
+        if (want != ledOn) { ledOn = want; digitalWrite(rak::kLedGreen, want); }
+    }
+
+    // 1c) 10초에 한 번 — 텍스트 사본 한 줄.
+    //     카드를 꽂자마자 파서 없이 눈으로 확인하는 용이다.
+    if (hlog::recording() && now - lastText >= 10000) {
+        lastText = now;
+        const uint32_t t = micros();
+        logWriteText(now);
+        secDone(gStLog, micros() - t);
     }
 
     // 3) gNotifyPeriodMs 주기 — 값 조립 + characteristic 갱신 + notify
+    // ★ 칸을 더해 나간다. `lastNotify = now` 로 두면 한 바퀴(2.8 ms)만큼씩
+    //   밀려서 9.85 Hz 가 나왔다 (실측). 많이 밀렸으면 지금부터 다시 센다.
     if (now - lastNotify >= gNotifyPeriodMs) {
-        lastNotify = now;
+        const uint32_t tN = micros();
+        lastNotify += gNotifyPeriodMs;
+        if (now - lastNotify >= gNotifyPeriodMs * 5) lastNotify = now;
         gpsUpdateFix();
+        if (hlog::recording()) logWriteNav(now);
         gLatest = buildTelemetry(now);
 
         // 12바이트 뒤에 9축과 GPS 상태를 덧붙여 보낸다. 옛 앱은 앞 12바이트만
@@ -2538,6 +2912,7 @@ void loop() {
         if (gConnected) {
             gTelemetryChr->notify(); // 구독자가 없으면 NimBLE 가 알아서 무시
         }
+        secDone(gStNotify, micros() - tN);
     }
 
     // 4) 광고 모드 전환 (연결/해제 직후, 또는 이름 변경 직후 한 번)
@@ -2552,10 +2927,18 @@ void loop() {
         refreshAdvPayload();
     }
 
-    // 6) 4 Hz — 화면. 사람 눈에는 이걸로 충분하고 더 빨리 그려도 의미가 없다.
-    //    128x64 를 한 장 보내는 데 I2C 400 kHz 에서 25 ms 쯤 걸린다.
+    // 6) 화면. 사람 눈에는 4 Hz 로 충분하다.
+    //
+    // ★ 기록 중에는 1 Hz 로 떨어뜨린다. 한 장 보내는 데 **실측 33.6 ms** 가
+    //   걸리고 그동안 I2C 가 묶여서 IMU 를 못 읽는다. 4 Hz 로 그리면 초당
+    //   134 ms 를 화면에 쓰고 IMU 가 100 Hz 를 못 채운다 (78 Hz 로 떨어졌다).
+    //   1 Hz 면 초당 34 ms 라 IMU 가 99 Hz 를 넘긴다.
+    //
+    //   실제 모듈에는 화면이 아예 없다 (기능명세 「내구성」: "화면이 없어
+    //   대회 중에도 장착 출전 가능"). 이 문제는 개발 보드에만 있다.
     static uint32_t lastDraw = 0;
-    if (now - lastDraw >= 250) {
+    const uint32_t drawPeriod = hlog::recording() ? 1000 : 250;
+    if (now - lastDraw >= drawPeriod) {
         lastDraw = now;
         sail::DisplayState ds;
         ds.userName     = gUserName;
@@ -2563,6 +2946,8 @@ void loop() {
         ds.bleNotifying = gSubscribed;
         ds.battPct      = gLatest.battPct;
         ds.battVolts    = gBattVolts;
+        ds.recording    = hlog::recording();
+        ds.recSeconds   = ds.recording ? (now - hlog::recStartedMs()) / 1000 : 0;
 
         ds.sogKn      = gLatest.sogKn; // 다듬고 잡음 바닥까지 적용된 값
         ds.cogDeg     = gLatest.cogDeg;
@@ -2582,7 +2967,9 @@ void loop() {
         ds.satellites = gGps.satellites.isValid() ? (int)gGps.satellites.value() : 0;
         ds.hdop       = gGps.hdop.isValid() ? (float)gGps.hdop.hdop() : -1.0f;
 
+        const uint32_t tD = micros();
         sail::displayUpdate(ds);
+        secDone(gStDraw, micros() - tD);
     }
 
     // 7) 1 Hz — 시리얼 로그.
@@ -2612,6 +2999,14 @@ void loop() {
                           gSogFromPos >= 0 ? String(gSogFromPos, 2).c_str() : " --- ");
         }
         printImuLine();
+        loopStatPrint(sail::kLogPeriodMs);
+    }
+
+    // 한 바퀴에 얼마나 걸렸나
+    {
+        const uint32_t dt = micros() - loopT0;
+        if (dt > gLoopMaxUs) gLoopMaxUs = dt;
+        ++gLoopCount;
     }
 
     feedWatchdog(); // 여기까지 왔으면 살아 있다는 뜻
