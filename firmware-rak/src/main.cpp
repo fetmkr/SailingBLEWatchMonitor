@@ -1569,10 +1569,21 @@ static void doSd() {
 
     // 4 MHz 로 시작한다. 붙고 나서 필요하면 올린다.
     if (!SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
-        Serial.println("  마운트 실패. 순서대로 의심하세요:");
-        Serial.println("    1) 카드가 안 꽂혔다");
-        Serial.println("    2) 카드가 FAT32 가 아니다");
-        Serial.println("    3) 모듈이 IO 슬롯이 아닌 곳에 꽂혔다 (IO 슬롯 전용)");
+        Serial.println("  마운트 실패.");
+        Serial.println("");
+        Serial.println("  ★ 진짜 이유는 바로 위의 [E] 로 시작하는 줄에 있습니다.");
+        Serial.println("    라이브러리가 FatFs 오류 번호를 그대로 찍어 줍니다.");
+        Serial.println("");
+        Serial.println("    (13) There is no valid FAT volume");
+        Serial.println("        → 카드는 읽히는데 FAT 가 아니다. 64GB 이상은 공장에서");
+        Serial.println("          exFAT 로 나오고 우리 빌드는 exFAT 를 안 읽는다.");
+        Serial.println("          맥에서 FAT32 로 다시 포맷하면 된다:");
+        Serial.println("            diskutil list");
+        Serial.println("            diskutil eraseDisk FAT32 SAIL MBRFormat /dev/diskN");
+        Serial.println("");
+        Serial.println("    (3) The physical drive cannot work / (1) hard error");
+        Serial.println("        → SPI 가 안 통한다. 카드가 덜 꽂혔거나 모듈이");
+        Serial.println("          IO 슬롯이 아닌 곳에 꽂혔다 (IO 슬롯 전용).");
         Serial.println("──────────────────────────────────────────");
         return;
     }
@@ -1596,6 +1607,112 @@ static void doSd() {
     }
 
     SD.end();
+    Serial.println("──────────────────────────────────────────");
+}
+
+// ── SD 쓰기 속도 실측 (sdbench) ──────────────────────────────────────────
+//
+// 계획(SDLOG.md §4)이 기대는 숫자를 짐작하지 않고 잰다. 알아야 할 것은 둘이다.
+//
+//   1) 평균 속도   — 초당 1.5 KB 를 감당하나
+//   2) **한 번 쓸 때 제일 오래 걸린 시간** — 이게 진짜 문제다.
+//      평균이 아무리 빨라도 가끔 200 ms 씩 멈추면 10 Hz notify 가 끊긴다.
+//
+// 그래서 실제 기록과 같은 모양으로 쓴다. 153바이트짜리 줄을 512바이트씩 모아
+// 한 번에 내보내고, 5초치마다 flush 한다.
+static void doSdBench(uint32_t rows) {
+    Serial.println("──────────────────────────────────────────");
+    Serial.printf("  SD 쓰기 실측 — %u줄 (10 Hz 로 %.0f초치)\n",
+                  (unsigned)rows, rows / 10.0f);
+
+    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
+    if (!SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+        Serial.println("  마운트 실패 — 먼저 sd 로 확인하세요.");
+        Serial.println("──────────────────────────────────────────");
+        return;
+    }
+    SD.mkdir("/SAIL");
+    SD.remove("/SAIL/BENCH.CSV");
+
+    File f = SD.open("/SAIL/BENCH.CSV", FILE_WRITE);
+    if (!f) {
+        Serial.println("  파일을 못 열었습니다.");
+        SD.end();
+        Serial.println("──────────────────────────────────────────");
+        return;
+    }
+
+    // 실제 기록 줄과 길이를 맞춘 본보기 (SDLOG.md §3 의 예시 그대로 153바이트)
+    static const char kSample[] =
+        "1234500,1787492994100,1,37.5123456,126.9123456,5.53,5.61,315.0,11,1.4,"
+        "0.05,-12.3,2.1,344,-0.034,0.012,-1.005,0.2,0.4,-0.1,3.0,-21.2,-16.7,"
+        "68,3.91,0,A3F2\n";
+    const size_t lineLen = strlen(kSample);
+
+    char     buf[1024];
+    size_t   used      = 0;
+    uint32_t maxWrite  = 0, maxFlush = 0;
+    uint32_t writes    = 0, flushes  = 0;
+    uint64_t bytes     = 0;
+    uint32_t sinceFlush = 0;
+
+    const uint32_t t0 = millis();
+    for (uint32_t i = 0; i < rows; ++i) {
+        memcpy(buf + used, kSample, lineLen);
+        used += lineLen;
+
+        if (used >= 512) {
+            const uint32_t a = millis();
+            f.write((const uint8_t*)buf, used);
+            const uint32_t dt = millis() - a;
+            if (dt > maxWrite) maxWrite = dt;
+            bytes += used;
+            used = 0;
+            ++writes;
+
+            // 5초치(50줄)마다 디스크에 못박는다. 전원이 끊겨도 여기까지는 남는다.
+            if (++sinceFlush >= 50) {
+                sinceFlush = 0;
+                const uint32_t b = millis();
+                f.flush();
+                const uint32_t df = millis() - b;
+                if (df > maxFlush) maxFlush = df;
+                ++flushes;
+            }
+        }
+        if ((i & 0xFF) == 0) feedWatchdog();
+    }
+    if (used > 0) { f.write((const uint8_t*)buf, used); bytes += used; }
+    f.flush();
+    const uint32_t elapsed = millis() - t0;
+    const uint32_t size    = f.size();
+    f.close();
+    SD.end();
+
+    const float sec  = elapsed / 1000.0f;
+    const float kbps = (bytes / 1024.0f) / (sec > 0 ? sec : 1);
+
+    Serial.println("  ─────────────────────────────────────");
+    Serial.printf("  쓴 양            %llu 바이트 (파일 %u)\n",
+                  (unsigned long long)bytes, (unsigned)size);
+    Serial.printf("  걸린 시간        %.2f 초\n", sec);
+    Serial.printf("  평균 속도        %.0f KB/초\n", kbps);
+    Serial.printf("  우리가 쓸 양     1.5 KB/초  →  여유 %.0f배\n", kbps / 1.5f);
+    Serial.println("  ─────────────────────────────────────");
+    Serial.printf("  한 번 쓰기       %u번,  제일 오래 %u ms\n",
+                  (unsigned)writes, (unsigned)maxWrite);
+    Serial.printf("  flush            %u번,  제일 오래 %u ms\n",
+                  (unsigned)flushes, (unsigned)maxFlush);
+    Serial.println("  ─────────────────────────────────────");
+    const uint32_t worst = maxWrite > maxFlush ? maxWrite : maxFlush;
+    if (worst < 100) {
+        Serial.printf("  제일 오래 멈춘 시간 %u ms — notify 주기 100 ms 안이다.\n",
+                      (unsigned)worst);
+    } else {
+        Serial.printf("  ★ 제일 오래 멈춘 시간 %u ms — notify 주기 100 ms 를 넘는다.\n",
+                      (unsigned)worst);
+        Serial.println("    메인 루프에서 직접 쓰면 안 된다. 쓰기 작업을 따로 띄운다.");
+    }
     Serial.println("──────────────────────────────────────────");
 }
 
@@ -1879,6 +1996,7 @@ static void printHelp() {
     Serial.println("  imu           9축 값 5초 출력 — 기울여 보세요");
     Serial.println("  scan          I2C — 화면 RAK1921(0x3C) / IMU RAK1905(0x68)");
     Serial.println("  sd            SD카드 마운트 + 쓰기 시험");
+    Serial.println("  sdbench [줄수] SD 쓰기 속도·최대 멈춤 실측 (기본 3600줄)");
     Serial.println("  oled          화면을 나중에 꽂았을 때 다시 붙이기");
     Serial.println("  gps           UART1 원시 NMEA 5초 (GPS 가 슬롯 A)");
     Serial.println("  gps d         같은 것 (GPS 가 슬롯 D — IO6 로 리셋 해제)");
@@ -1913,6 +2031,15 @@ static void handleCommand(String line) {
     if (line == "batt")                { printBattery(); return; }
     if (line == "imu")                 { doImu();      return; }
     if (line == "sd")                  { doSd();       return; }
+
+    // SD 쓰기 속도 실측. 기본 3600줄 = 10 Hz 로 6분치.
+    if (line == "sdbench" || line.startsWith("sdbench ")) {
+        long n = (line.length() > 8) ? line.substring(8).toInt() : 3600;
+        if (n < 100) n = 100;
+        if (n > 2000000) n = 2000000;
+        doSdBench((uint32_t)n);
+        return;
+    }
     if (line == "fix")                 { doFix();      return; }
     if (line == "calib")               { doCalib();    return; }
     if (line == "level")               { doLevel();    return; }
