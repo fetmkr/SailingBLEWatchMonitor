@@ -159,6 +159,8 @@ def main() -> int:
     print(f"  기록 주기     NAV {h['log_rate_a']} Hz / IMU {h['log_rate_b']} Hz")
     imu_name = {0: "BNO085", 1: "MPU-9250"}.get(h["imu_type"], f"?{h['imu_type']}")
     print(f"  IMU           {imu_name}   자세 {'융합값' if h['quat_src'] == 0 else '없음(가속·자이로 원본만)'}")
+    gnss_name = {0: "RYS8839", 1: "SE868SY-D", 2: "RTK(예약)", 0xFF: "모름(규격에 없는 모듈)"}
+    print(f"  GNSS 모듈     {gnss_name.get(h['gnss_type'], '?' + str(h['gnss_type']))}")
     print(f"  GNSS          동역학모델 {h['gnss_dyn']}, {h['gnss_hz']} Hz, "
           f"시각기준 {'GPS' if h['time_ref'] == 0 else 'UTC 환산'}")
     print(f"  속도 출처     {'도플러 원본' if h['sog_src'] == 0 else '★다듬은 값★'}")

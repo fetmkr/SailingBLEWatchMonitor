@@ -168,6 +168,12 @@ void mark();                         // 다음 NAV 줄에 마킹 표식
 bool recording();
 void getStatus(Status* out);
 void healthCheck();                  // 1 Hz. 카드가 빠졌는지 본다
+
+// 카드에 쓴 파일을 보드가 직접 되읽어 검사한다.
+// 카드를 뽑아 컴퓨터로 옮길 수 없을 때 쓴다. 파이썬 파서와 같은 것을 본다.
+//   session 0 이면 마지막 세션
+void verify(uint32_t session);
+void listFiles();
 uint32_t sinceTextMs();
 uint32_t recStartedMs();       // 기록 시작 시각 (화면이 지난 시간을 뽑는다)              // 마지막 텍스트 줄로부터 지난 시간
 

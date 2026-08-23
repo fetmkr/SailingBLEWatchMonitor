@@ -6,6 +6,8 @@
 #include <Preferences.h>
 #include <string.h>
 
+#include <esp_task_wdt.h>
+
 #include "board_rak.h"
 
 namespace hlog {
@@ -438,6 +440,145 @@ void getStatus(Status* out) {
     out->maxFillPct = gMaxFill;
     out->freeBytes  = gFreeBytes;
     out->lastError  = gLastError;
+}
+
+// ── 되읽어 검사하기 ──────────────────────────────────────────────────────
+//
+// 카드를 뽑아 컴퓨터에 꽂을 수 없을 때가 있다. 그러면 보드가 스스로 읽어서
+// 검사한다. tools/hlog_parse.py 와 같은 것을 본다.
+//
+//   헤더 CRC / 레코드 CRC / 못 읽은 바이트 / 실제 주기 / IMU 이웃 간격
+//
+// 제일 중요한 건 마지막 것이다. IMU 가 정말 10 ms 등간격인지.
+void verify(uint32_t session) {
+    if (gRecording) { Serial.println("[검사] 기록 중에는 못 합니다. rec off 먼저."); return; }
+    if (!cardPresent()) { Serial.println("[검사] 카드가 없습니다."); return; }
+
+    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
+    if (!SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+        Serial.println("[검사] 마운트 실패 — sd 명령으로 이유를 보세요.");
+        return;
+    }
+
+    char path[32];
+    if (session == 0) {
+        Preferences prefs;
+        prefs.begin("sail", true);
+        session = prefs.getUInt("sess_n", 0);
+        prefs.end();
+    }
+    snprintf(path, sizeof(path), "/LOGS/S%05u.HLG", (unsigned)session);
+
+    File f = SD.open(path, FILE_READ);
+    if (!f) { Serial.printf("[검사] %s 를 못 열었습니다.\n", path); SD.end(); return; }
+
+    const uint32_t total = f.size();
+    Serial.println("──────────────────────────────────────────");
+    Serial.printf("  %s   %u 바이트\n", path, (unsigned)total);
+
+    uint8_t hdr[kHeaderSize];
+    if (f.read(hdr, kHeaderSize) != (int)kHeaderSize) {
+        Serial.println("  헤더를 다 못 읽었습니다."); f.close(); SD.end(); return;
+    }
+    const uint16_t hwant = (uint16_t)hdr[126] | ((uint16_t)hdr[127] << 8);
+    const bool hok = (memcmp(hdr, "HHLG", 4) == 0) && (hwant == crc16(hdr, 126));
+    Serial.printf("  헤더           %s\n", hok ? "CRC 맞음" : "★ 깨졌습니다");
+    Serial.printf("  세션 %u  IMU %s  움직임종류 %u  %u/%u Hz\n",
+                  (unsigned)(hdr[18] | (hdr[19] << 8) | (hdr[20] << 16) | ((uint32_t)hdr[21] << 24)),
+                  hdr[kOffImuType] == kImuBNO085 ? "BNO085" : "MPU-9250",
+                  hdr[kOffGnssDyn], hdr[39], hdr[40]);
+
+    // 레코드를 훑는다. 한 번에 조금씩 읽어서 램을 아낀다.
+    uint32_t nav = 0, imu = 0, bad = 0;
+    uint32_t navFirst = 0, navLast = 0, imuFirst = 0, imuLast = 0;
+    uint32_t prevImuMs = 0;
+    uint32_t gap10 = 0, gapOther = 0, gapMax = 0;
+    uint8_t  rec[64];
+
+    while (f.available()) {
+        const int t = f.read();
+        if (t < 0) break;
+        const size_t size = (t == kTypeNav) ? kNavSize : ((t == kTypeImu) ? kImuSize : 0);
+        if (size == 0) { ++bad; continue; }   // 한 바이트 밀면서 다시 맞춘다
+
+        rec[0] = (uint8_t)t;
+        if (f.read(rec + 1, size - 1) != (int)(size - 1)) { ++bad; break; }
+        const uint16_t want = (uint16_t)rec[size - 2] | ((uint16_t)rec[size - 1] << 8);
+        if (want != crc16(rec, size - 2)) {
+            // CRC 가 틀리면 가짜다. 한 바이트만 밀고 다시 본다.
+            f.seek(f.position() - (size - 1));
+            ++bad;
+            continue;
+        }
+        uint32_t ms;
+        memcpy(&ms, rec + 1, 4);
+        if (t == kTypeNav) {
+            if (!nav) navFirst = ms;
+            navLast = ms; ++nav;
+        } else {
+            if (!imu) imuFirst = ms;
+            else {
+                const uint32_t g = ms - prevImuMs;
+                if (g == 10) ++gap10; else ++gapOther;
+                if (g > gapMax) gapMax = g;
+            }
+            prevImuMs = ms; imuLast = ms; ++imu;
+        }
+        if (((nav + imu) & 0x3FF) == 0) esp_task_wdt_reset();
+    }
+    f.close();
+    const uint64_t freeB = SD.totalBytes() - SD.usedBytes();
+    SD.end();
+
+    const uint32_t used = kHeaderSize + nav * kNavSize + imu * kImuSize;
+    Serial.println("  ─────────────────────────────────────");
+    Serial.printf("  NAV 레코드     %u\n", (unsigned)nav);
+    Serial.printf("  IMU 레코드     %u\n", (unsigned)imu);
+    Serial.printf("  못 읽은 바이트 %d  %s\n", (int)((int32_t)total - (int32_t)used),
+                  (total == used && bad == 0) ? "(깨끗함)" : "★");
+    Serial.printf("  CRC 틀린 자리  %u\n", (unsigned)bad);
+
+    if (nav > 1 && navLast > navFirst) {
+        Serial.printf("  NAV 실제 주기  %.2f Hz  (규격 %u)\n",
+                      (nav - 1) * 1000.0f / (navLast - navFirst), hdr[39]);
+    }
+    if (imu > 1 && imuLast > imuFirst) {
+        Serial.printf("  IMU 실제 주기  %.2f Hz  (규격 %u)\n",
+                      (imu - 1) * 1000.0f / (imuLast - imuFirst), hdr[40]);
+        const uint32_t gaps = gap10 + gapOther;
+        Serial.printf("  IMU 등간격     10 ms 가 %u/%u = %.2f%%  (제일 벌어진 것 %u ms)\n",
+                      (unsigned)gap10, (unsigned)gaps,
+                      gaps ? 100.0f * gap10 / gaps : 0.0f, (unsigned)gapMax);
+    }
+    Serial.printf("  카드 남은 자리 %llu MB\n", (unsigned long long)(freeB / 1048576ULL));
+    Serial.println("──────────────────────────────────────────");
+    Serial.println(((total == used) && bad == 0 && hok) ? "  ✅ 깨끗합니다" : "  ❌ 문제가 있습니다");
+}
+
+void listFiles() {
+    if (gRecording) { Serial.println("[목록] 기록 중에는 못 합니다."); return; }
+    if (!cardPresent()) { Serial.println("[목록] 카드가 없습니다."); return; }
+    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
+    if (!SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+        Serial.println("[목록] 마운트 실패."); return;
+    }
+    File dir = SD.open("/LOGS");
+    Serial.println("──────────────────────────────────────────");
+    uint32_t n = 0;
+    uint64_t sum = 0;
+    while (File e = dir.openNextFile()) {
+        Serial.printf("  %-16s %8u 바이트\n", e.name(), (unsigned)e.size());
+        sum += e.size();
+        ++n;
+        e.close();
+        if ((n & 0x1F) == 0) esp_task_wdt_reset();
+    }
+    dir.close();
+    Serial.printf("  파일 %u개, 합쳐서 %.2f MB\n", (unsigned)n, sum / 1048576.0);
+    Serial.printf("  카드 남은 자리 %llu MB\n",
+                  (unsigned long long)((SD.totalBytes() - SD.usedBytes()) / 1048576ULL));
+    SD.end();
+    Serial.println("──────────────────────────────────────────");
 }
 
 void healthCheck() {

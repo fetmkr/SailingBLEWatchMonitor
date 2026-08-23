@@ -561,20 +561,34 @@ static void gpsBegin() {
         delay(80);
     }
 
-    // 저장해 둔 움직임 종류(dyModel)가 있으면 다시 건다.
-    // 255 면 저장한 적이 없다는 뜻 — 모듈 기본값(4 선박)을 그대로 둔다.
-    const uint8_t want = gPrefs.getUChar("gps_dyn", 255);
-    if (want <= 7) {
+    // 움직임 종류(dyModel)를 모듈에 물어본다.
+    //
+    // 두 가지를 한 번에 한다.
+    //   1) 저장해 둔 값이 있으면 다르면 다시 건다 (255 면 저장한 적 없음)
+    //   2) 실제로 걸려 있는 값을 기억한다 → 기록 파일 머리글에 들어간다
+    //
+    // 2번이 없으면 헤더에 255(모름)가 찍힌다. dyModel 하나 때문에 저속을
+    // 통째로 날린 적이 있어서, 그 설정이 파일에 안 남으면 나중에 원인을
+    // 못 찾는다.
+    {
+        const uint8_t want = gPrefs.getUChar("gps_dyn", 255);
         uint8_t  p[44];
         uint16_t len = 0;
-        if (casicQuery(0x06, 0x07, p, sizeof(p), &len) && len >= 44 && p[4] != want) {
-            const uint32_t mask = (1UL << 0);
-            memcpy(p + 0, &mask, 4);
-            p[4] = want;
-            casicSend(0x06, 0x07, p, 44);
-            delay(120);
-            Serial.printf("[GPS] 움직임 종류를 %u(%s) 로 다시 걸었습니다\n",
-                          want, dyModelName(want));
+        if (casicQuery(0x06, 0x07, p, sizeof(p), &len) && len >= 44) {
+            gGpsDyModel = p[4];
+            if (want <= 7 && p[4] != want) {
+                const uint32_t mask = (1UL << 0);
+                memcpy(p + 0, &mask, 4);
+                p[4] = want;
+                casicSend(0x06, 0x07, p, 44);
+                delay(120);
+                gGpsDyModel = want;
+                Serial.printf("[GPS] 움직임 종류를 %u(%s) 로 다시 걸었습니다\n",
+                              want, dyModelName(want));
+            } else {
+                Serial.printf("[GPS] 움직임 종류 %u (%s)\n",
+                              gGpsDyModel, dyModelName(gGpsDyModel));
+            }
         }
     }
 }
@@ -1358,6 +1372,25 @@ static bool imuBegin() {
     //   배 위에서 부팅하면 그때 기울어져 있던 각도가 0 이 되어 힐이 통째로
     //   어긋난다. 0점이 필요하면 배가 평평할 때 `calib` 명령으로 잡는다.
 
+    // ── 재는 범위 ────────────────────────────────────────────────────────
+    //
+    // 라이브러리 init() 이 ±2 g / ±250 °/s 로 잡아 둔다. 요트에는 좁다.
+    // 딩기가 파도에 내리꽂히면 2 g 를 쉽게 넘고, 그러면 잘려서 기록된다.
+    //
+    // 넓혀도 손해가 없다. 로그 포맷이 정한 저장 단위가 원시 해상도보다
+    // 굵기 때문이다.
+    //
+    //            원시 한 칸        우리가 저장하는 단위
+    //   ±2 g      61 µg            1 mg      ← 이미 굵게 뭉개고 있다
+    //   ±16 g    488 µg            1 mg      ← 그래도 저장 단위가 더 굵다
+    //   ±250°/s  7.6 m°/s          31 m°/s
+    //   ±1000°/s 30.5 m°/s         31 m°/s   ← 딱 맞는다
+    //
+    // 자이로를 ±2000 으로 더 넓히지 않는 이유: 포맷의 자이로 칸이
+    // 1/32 °/s 단위 int16 이라 ±1024 °/s 까지밖에 못 담는다.
+    gImu.setAccRange(MPU9250_ACC_RANGE_16G);
+    gImu.setGyrRange(MPU9250_GYRO_RANGE_1000);
+
     gImu.enableGyrDLPF();
     gImu.setGyrDLPF(MPU9250_DLPF_6); // 가장 조용한 설정
     gImu.setSampleRateDivider(9);    // 1000/(1+9) = 100 Hz (FIFO 주기)
@@ -1994,7 +2027,10 @@ static bool logStartNow() {
     esp_read_mac(h.mac, ESP_MAC_WIFI_STA);
     h.fwVersion = 0x0100;
     h.hwRev     = 1;
-    h.gnssType  = 2;                    // L76K 는 규격에 없다. 예약값으로 표시
+    // 규격은 0=RYS8839, 1=SE868SY-D, 2=예약(RTK) 뿐이다. 우리 시제품의 L76K 는
+    // 없다. 2 로 적으면 "RTK 유닛" 이라는 거짓말이 되므로 0xFF(모름)로 둔다.
+    // freeze 전에 규격에 값을 하나 받아야 한다.
+    h.gnssType  = 0xFF;
     h.imuType   = hlog::kImuMPU9250;
     h.timeRef   = 1;                    // UTC 에서 환산 (윤초만큼 다름)
     h.magScale  = 1;                    // 0.1 µT/LSB
@@ -2329,6 +2365,7 @@ static void printHelp() {
     Serial.println("  sd            SD카드 마운트 + 쓰기 시험");
     Serial.println("  sdbench [줄수] SD 쓰기 속도·최대 멈춤 실측 (기본 3600줄)");
     Serial.println("  rec           ★ 기록 상태. rec on / rec off / rec mark");
+    Serial.println("  rec ls / rec check [번호]   파일 목록 / 되읽어 검사");
     Serial.println("  oled          화면을 나중에 꽂았을 때 다시 붙이기");
     Serial.println("  gps           UART1 원시 NMEA 5초 (GPS 가 슬롯 A)");
     Serial.println("  gps d         같은 것 (GPS 가 슬롯 D — IO6 로 리셋 해제)");
@@ -2389,6 +2426,12 @@ static void handleCommand(String line) {
         }
         if (arg == "off" || arg == "stop") { hlog::stop(); return; }
         if (arg == "mark")                 { hlog::mark(); return; }
+        if (arg == "ls" || arg == "list")  { hlog::listFiles(); return; }
+        if (arg == "check" || arg.startsWith("check ")) {
+            const long n = (arg.length() > 6) ? arg.substring(6).toInt() : 0;
+            hlog::verify((uint32_t)(n < 0 ? 0 : n));
+            return;
+        }
 
         hlog::Status st;
         hlog::getStatus(&st);
@@ -2424,6 +2467,8 @@ static void handleCommand(String line) {
                       gFifoOverrun ? "★ 그때 값이 비었습니다" : "(0 이어야 정상)");
         Serial.println("──────────────────────────────────────────");
         Serial.println("  rec on / rec off / rec mark");
+        Serial.println("  rec ls          카드에 있는 파일 목록");
+        Serial.println("  rec check [번호]  보드가 직접 되읽어 검사 (기본: 마지막 세션)");
         return;
     }
 
