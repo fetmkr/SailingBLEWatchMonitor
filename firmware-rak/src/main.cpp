@@ -69,41 +69,54 @@ static bool gMagOk = false; // 자력계(AK8963)까지 붙었나
 
 // 마지막으로 읽은 9축 값 (로그와 표시에 쓴다)
 static xyzFloat gAcc, gGyr, gMag;
-static float    gRollDeg  = 0.0f;
-static float    gPitchDeg = 0.0f;
 static float    gImuTempC = 0.0f;
 
 // 자이로 0점 (원시값). 자세히는 아래 "자이로 0점" 항목 참고.
 static float gGyrOffX = 0.0f, gGyrOffY = 0.0f, gGyrOffZ = 0.0f;
 
-// ── 힐 ───────────────────────────────────────────────────────────────────
+// ── 힐과 피치 ────────────────────────────────────────────────────────────
 //
-// 힐은 배가 좌우로 얼마나 누웠는지다. 보드가 어느 축으로 그걸 느끼는지는
-// 보드를 어떻게 달았느냐에 달려 있다.
+// 힐은 배가 좌우로 얼마나 누웠는지, 피치는 뱃머리가 얼마나 들렸는지다.
+// 보드가 어느 축으로 그걸 느끼는지는 보드를 어떻게 달았느냐에 달려 있다.
 //
 // 밖에서 재 보니 방위(HDG)가 맞으려면 보드를 세워서 달아야 했다. 그렇게
 // 세우면 예전에 쓰던 roll = atan2(가속Y, 가속Z) 은 힐과 상관없는 회전을
 // 재게 된다. 세운 자세에서는 Z 가 눕고 Y 가 서기 때문이다.
 //
-// 그래서 힐을 **가속도 한 축**에서 바로 구한다. 기울기계가 쓰는 그 방법이다.
+// 그래서 둘 다 **가속도 한 축**에서 바로 구한다. 기울기계가 쓰는 그 방법이다.
 //
-//     힐 = asin(그 축의 g / 중력 크기)
+//     각도 = asin(그 축의 g / 중력 크기)
 //
-// 배가 평형이면 그 축은 수평이라 0 g 를 읽고, 옆으로 누울수록 중력이 그
-// 축으로 흘러 들어온다. 실제로 달아 보고 고른 축은 **Y** 다.
+// 배가 평형이면 그 축은 수평이라 0 g 를 읽고, 기울수록 중력이 그 축으로 흘러
+// 들어온다. 실제로 달아 보고 고른 축은 **힐 Y, 피치 Z** 다.
+// 남은 X 가 위아래를 향하는 축이다.
+//
+// ── 부호 ─────────────────────────────────────────────────────────────────
+//
+// 해양 장비 관례를 따른다. NMEA 2000 의 자세 메시지(PGN 127257)가 정한 것과
+// 같다.
+//
+//     힐    우현(starboard)으로 누우면 양수, 좌현(port)이면 음수
+//     피치  뱃머리가 들리면 양수, 처박히면 음수
+//
+// 우리 프로토콜의 힐도 이 규칙이다 (PROTOCOL.md §2). 배에 달고 실제로 기울여
+// 확인하고, 반대로 나오면 `heel -y` / `pitch -z` 로 뒤집는다.
 //
 // ★ 한계: asin 이라 ±90° 까지만 맞다. 90° 를 넘으면 배가 이미 넘어간 것이라
 //   그 뒤의 정확한 각도는 볼 이유가 없다.
 //
-// 어느 축인지, 부호가 어느 쪽인지는 `heel` 명령으로 바꾸고 NVS 에 남긴다.
-// 다는 방법이 또 바뀌어도 다시 굽지 않아도 된다.
-static uint8_t gHeelAxis = 1;      // 0 = X, 1 = Y, 2 = Z
-static float   gHeelSign = 1.0f;   // -1 이면 좌우가 뒤집혀 있다는 뜻
+// 어느 축인지, 부호가 어느 쪽인지는 `heel` / `pitch` 명령으로 바꾸고 NVS 에
+// 남긴다. 다는 방법이 또 바뀌어도 다시 굽지 않아도 된다.
+static uint8_t gHeelAxis  = 1;     // 0 = X, 1 = Y, 2 = Z
+static float   gHeelSign  = 1.0f;  // -1 이면 좌우가 뒤집혀 있다는 뜻
+static uint8_t gPitchAxis = 2;
+static float   gPitchSign = 1.0f;  // -1 이면 앞뒤가 뒤집혀 있다는 뜻
 
 // "지금 이 자세가 평형" 이라고 알려주는 기준각. 배를 물에 띄우고 평형일 때
 // `level` 을 치면 그때 각도를 0 으로 삼는다. NVS 에 저장되므로 재부팅해도,
 // 다시 구워도 남는다.
-static float gHeelOffsetDeg = 0.0f;
+static float gHeelOffsetDeg  = 0.0f;
+static float gPitchOffsetDeg = 0.0f;
 
 // 각도를 -180 ~ +180 안으로 접는다.
 static float wrap180(float deg) {
@@ -112,27 +125,33 @@ static float wrap180(float deg) {
     return deg;
 }
 
-static const char* heelAxisName() {
-    static char buf[4];
-    snprintf(buf, sizeof(buf), "%c%c", gHeelSign < 0.0f ? '-' : '+',
-             gHeelAxis == 0 ? 'X' : (gHeelAxis == 1 ? 'Y' : 'Z'));
-    return buf;
-}
+// "+Y" 처럼 부호와 축 이름을 담는다. 부르는 쪽이 버퍼를 준다 —
+// 한 printf 안에서 힐과 피치를 같이 찍는 곳이 있어서 공용 버퍼를 쓰면 겹친다.
+struct AxisName {
+    char text[4];
+    AxisName(uint8_t axis, float sign) {
+        text[0] = (sign < 0.0f) ? '-' : '+';
+        text[1] = (axis == 0) ? 'X' : (axis == 1 ? 'Y' : 'Z');
+        text[2] = '\0';
+    }
+};
 
 // 기준각을 빼기 전의 날각도. `level` 이 이 값을 기준으로 삼는다.
-static float rawHeelDeg() {
-    const float a = (gHeelAxis == 0) ? gAcc.x : (gHeelAxis == 1 ? gAcc.y : gAcc.z);
+static float rawTiltDeg(uint8_t axis, float sign) {
+    const float a = (axis == 0) ? gAcc.x : (axis == 1 ? gAcc.y : gAcc.z);
     const float mag = sqrtf(gAcc.x * gAcc.x + gAcc.y * gAcc.y + gAcc.z * gAcc.z);
     if (mag < 0.2f) return 0.0f; // 자유낙하 수준이면 중력 방향을 알 수 없다
-    float s = gHeelSign * a / mag;
+    float s = sign * a / mag;
     if (s > 1.0f) s = 1.0f;
     if (s < -1.0f) s = -1.0f;
     return asinf(s) * 180.0f / (float)M_PI;
 }
 
-static float currentHeelDeg() {
-    return wrap180(rawHeelDeg() - gHeelOffsetDeg);
-}
+static float rawHeelDeg()  { return rawTiltDeg(gHeelAxis, gHeelSign); }
+static float rawPitchDeg() { return rawTiltDeg(gPitchAxis, gPitchSign); }
+
+static float currentHeelDeg()  { return wrap180(rawHeelDeg() - gHeelOffsetDeg); }
+static float currentPitchDeg() { return wrap180(rawPitchDeg() - gPitchOffsetDeg); }
 
 // ── 값의 출처 ────────────────────────────────────────────────────────────
 //
@@ -213,9 +232,12 @@ static void loadSettings() {
     gSensorPowerPin = (int)gPrefs.getInt("pwr_pin", rak::kSensorPowerA);
     // 힐 기준각의 키가 heel_off → heel_off2 로 바뀌었다. 옛 키에 남아 있는
     // 값은 roll 기준이라 지금 계산법에서는 뜻이 다르다. 그냥 안 읽는다.
-    gHeelAxis       = gPrefs.getUChar("heel_axis", 1); // 기본 Y — 위 "힐" 항목 참고
+    gHeelAxis       = gPrefs.getUChar("heel_axis", 1);  // 기본 힐 Y
     gHeelSign       = gPrefs.getChar("heel_sgn", 1) < 0 ? -1.0f : 1.0f;
     gHeelOffsetDeg  = gPrefs.getFloat("heel_off2", 0.0f);
+    gPitchAxis      = gPrefs.getUChar("pitch_axis", 2); // 기본 피치 Z
+    gPitchSign      = gPrefs.getChar("pitch_sgn", 1) < 0 ? -1.0f : 1.0f;
+    gPitchOffsetDeg = gPrefs.getFloat("pitch_off", 0.0f);
     gDampLevel      = gPrefs.getUChar("damp", 2);
     gDeadbandKn     = gPrefs.getFloat("dead_kn", 0.10f);
     gGyrOffX        = gPrefs.getFloat("gyr_x", 0.0f);
@@ -1407,8 +1429,8 @@ static void imuUpdate() {
     gAcc = gImu.getGValues();
     gGyr = gImu.getGyrValues();
     if (gMagOk) gMag = gImu.getMagValues();
-    gRollDeg  = gImu.getRoll();
-    gPitchDeg = gImu.getPitch();
+    // 라이브러리의 getRoll()/getPitch() 는 안 쓴다. 보드를 세워 달아서
+    // 그 각도는 힐·피치와 다른 회전을 잰다. 아래 "힐과 피치" 항목 참고.
 }
 
 // 자력계로 뱃머리 방위를 구한다. 못 구하면 음수.
@@ -1441,27 +1463,32 @@ static void printImuLine() {
     } else {
         Serial.print(" | 자력계 없음");
     }
-    Serial.printf(" | roll %+6.1f° pitch %+6.1f° → 힐 %+6.1f° (가속 %s)\n",
-                  gRollDeg, gPitchDeg, currentHeelDeg(), heelAxisName());
+    const AxisName hAx(gHeelAxis, gHeelSign), pAx(gPitchAxis, gPitchSign);
+    Serial.printf(" | 힐 %+6.1f° (가속 %s)  피치 %+6.1f° (가속 %s)\n",
+                  currentHeelDeg(), hAx.text, currentPitchDeg(), pAx.text);
 }
 
-// 지금 자세를 평형(힐 0°)으로 삼는다. 배를 물에 띄우고 평형일 때 쓴다.
+// 지금 자세를 평형(힐 0°, 피치 0°)으로 삼는다. 배를 물에 띄우고 평형일 때 쓴다.
 static void doLevel() {
     if (!gImuOk) {
         Serial.println("[IMU] 붙어 있지 않습니다.");
         return;
     }
     imuUpdate();
-    gHeelOffsetDeg = rawHeelDeg();
+    gHeelOffsetDeg  = rawHeelDeg();
+    gPitchOffsetDeg = rawPitchDeg();
     gPrefs.begin("sail", false);
     gPrefs.putFloat("heel_off2", gHeelOffsetDeg);
+    gPrefs.putFloat("pitch_off", gPitchOffsetDeg);
     gPrefs.end();
 
+    const AxisName hAx(gHeelAxis, gHeelSign), pAx(gPitchAxis, gPitchSign);
     Serial.println("──────────────────────────────────────────");
     Serial.printf("  지금 자세를 평형으로 삼았습니다.\n");
-    Serial.printf("  힐을 재는 축 가속 %s\n", heelAxisName());
-    Serial.printf("  기준각 %+.1f°  →  지금 힐 %+.1f°\n",
-                  gHeelOffsetDeg, currentHeelDeg());
+    Serial.printf("  힐   가속 %s  기준각 %+.1f°  →  지금 %+.1f°\n",
+                  hAx.text, gHeelOffsetDeg, currentHeelDeg());
+    Serial.printf("  피치 가속 %s  기준각 %+.1f°  →  지금 %+.1f°\n",
+                  pAx.text, gPitchOffsetDeg, currentPitchDeg());
     Serial.println("  NVS 에 저장했습니다. 다시 구워도 남습니다.");
     Serial.println("──────────────────────────────────────────");
     Serial.println("  ★ 배를 물에 띄우고 평형일 때 다시 한 번 잡으세요.");
@@ -1670,7 +1697,7 @@ static sail::TelemetryExtra buildExtra() {
     e.hdop = hdop;
 
     e.headingDeg = headingDeg();
-    e.pitchDeg   = gPitchDeg;
+    e.pitchDeg   = currentPitchDeg();
     e.accX = gAcc.x; e.accY = gAcc.y; e.accZ = gAcc.z;
     e.gyrX = gGyr.x; e.gyrY = gGyr.y; e.gyrZ = gGyr.z;
     e.magX = gMag.x; e.magY = gMag.y; e.magZ = gMag.z;
@@ -1863,8 +1890,9 @@ static void printHelp() {
     Serial.println("  gpscfg static <m/s> 정지로 볼 속도 문턱값");
     Serial.println("  nmea <본문>   NMEA 명령을 보내고 응답을 봅니다 (체크섬 자동)");
     Serial.println("  batt          배터리 전압 실측");
-    Serial.println("  level         ★ 지금 자세를 힐 0° 로 삼기 (배가 평형일 때)");
+    Serial.println("  level         ★ 지금 자세를 힐·피치 0° 로 삼기 (배가 평형일 때)");
     Serial.println("  heel [x|y|z]  힐을 어느 가속도 축에서 볼지 (앞에 - 로 뒤집기)");
+    Serial.println("  pitch [x|y|z] 피치를 어느 가속도 축에서 볼지");
     Serial.println("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)");
     Serial.println("  help          이 도움말");
     Serial.println("──────────────────────────────────────────");
@@ -1888,9 +1916,18 @@ static void handleCommand(String line) {
     if (line == "calib")               { doCalib();    return; }
     if (line == "level")               { doLevel();    return; }
 
-    // 힐을 어느 가속도 축에서 볼지. 보드를 다는 방법이 바뀌면 여기만 고친다.
-    if (line == "heel" || line.startsWith("heel ")) {
-        String arg = line.substring(4);
+    // 힐과 피치를 어느 가속도 축에서 볼지. 보드를 다는 방법이 바뀌면 여기만 고친다.
+    //   heel  y   힐을 Y 축에서
+    //   pitch -z  피치를 Z 축에서, 앞뒤 뒤집어서
+    if (line == "heel" || line.startsWith("heel ") ||
+        line == "pitch" || line.startsWith("pitch ")) {
+        const bool isHeel = line.startsWith("heel");
+        const char* what  = isHeel ? "힐" : "피치";
+        uint8_t& axisRef  = isHeel ? gHeelAxis : gPitchAxis;
+        float&   signRef  = isHeel ? gHeelSign : gPitchSign;
+        float&   offRef   = isHeel ? gHeelOffsetDeg : gPitchOffsetDeg;
+
+        String arg = line.substring(isHeel ? 4 : 5);
         arg.trim();
         if (arg.length() > 0) {
             float sign = 1.0f;
@@ -1903,31 +1940,37 @@ static void handleCommand(String line) {
             else if (arg == "y") axis = 1;
             else if (arg == "z") axis = 2;
             if (axis < 0) {
-                Serial.println("[IMU] heel x | heel y | heel z (앞에 - 를 붙이면 좌우 뒤집기)");
+                Serial.printf("[IMU] %s x | %s y | %s z (앞에 - 를 붙이면 뒤집기)\n",
+                              isHeel ? "heel" : "pitch", isHeel ? "heel" : "pitch",
+                              isHeel ? "heel" : "pitch");
                 return;
             }
 
-            gHeelAxis = (uint8_t)axis;
-            gHeelSign = sign;
+            axisRef = (uint8_t)axis;
+            signRef = sign;
             // 축을 바꾸면 옛 기준각은 다른 축에서 잡은 값이라 뜻이 없다.
-            gHeelOffsetDeg = 0.0f;
+            offRef  = 0.0f;
             gPrefs.begin("sail", false);
-            gPrefs.putUChar("heel_axis", gHeelAxis);
-            gPrefs.putChar("heel_sgn", sign < 0.0f ? -1 : 1);
-            gPrefs.putFloat("heel_off2", 0.0f);
+            gPrefs.putUChar(isHeel ? "heel_axis" : "pitch_axis", axisRef);
+            gPrefs.putChar(isHeel ? "heel_sgn" : "pitch_sgn", sign < 0.0f ? -1 : 1);
+            gPrefs.putFloat(isHeel ? "heel_off2" : "pitch_off", 0.0f);
             gPrefs.end();
             Serial.println("  기준각은 0 으로 되돌렸습니다. 평형일 때 level 을 다시 치세요.");
         }
 
         imuUpdate();
+        const AxisName hAx(gHeelAxis, gHeelSign), pAx(gPitchAxis, gPitchSign);
         Serial.println("──────────────────────────────────────────");
-        Serial.printf("  힐을 재는 축   가속 %s\n", heelAxisName());
-        Serial.printf("  기준각         %+.1f°\n", gHeelOffsetDeg);
-        Serial.printf("  지금 가속      %+.2f %+.2f %+.2f g\n", gAcc.x, gAcc.y, gAcc.z);
-        Serial.printf("  지금 힐        %+.1f°  (기준각 빼기 전 %+.1f°)\n",
-                      currentHeelDeg(), rawHeelDeg());
+        Serial.printf("  지금 가속   %+.2f %+.2f %+.2f g\n", gAcc.x, gAcc.y, gAcc.z);
+        Serial.printf("  힐    가속 %s  기준각 %+.1f°  →  %+.1f° "
+                      "(기준각 빼기 전 %+.1f°)\n",
+                      hAx.text, gHeelOffsetDeg, currentHeelDeg(), rawHeelDeg());
+        Serial.printf("  피치  가속 %s  기준각 %+.1f°  →  %+.1f° "
+                      "(기준각 빼기 전 %+.1f°)\n",
+                      pAx.text, gPitchOffsetDeg, currentPitchDeg(), rawPitchDeg());
         Serial.println("──────────────────────────────────────────");
-        Serial.println("  배가 평형일 때 그 축이 0 g 에 가까워야 맞는 축입니다.");
+        Serial.printf("  배가 평형일 때 %s 축이 0 g 에 가까워야 맞는 축입니다.\n", what);
+        Serial.println("  남은 한 축이 위아래를 향하는 축이라 ±1 g 를 읽습니다.");
         return;
     }
 
@@ -2332,7 +2375,7 @@ void loop() {
         ds.cogDeg     = gLatest.cogDeg;
         ds.headingDeg = headingDeg();
         ds.heelDeg    = gLatest.heelDeg;
-        ds.pitchDeg   = gPitchDeg;
+        ds.pitchDeg   = currentPitchDeg();
 
         ds.accX  = gAcc.x; ds.accY = gAcc.y; ds.accZ = gAcc.z;
         ds.gyrX  = gGyr.x; ds.gyrY = gGyr.y; ds.gyrZ = gGyr.z;
