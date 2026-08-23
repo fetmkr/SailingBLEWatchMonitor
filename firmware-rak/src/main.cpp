@@ -88,8 +88,9 @@ static float gGyrOffX = 0.0f, gGyrOffY = 0.0f, gGyrOffZ = 0.0f;
 //     각도 = asin(그 축의 g / 중력 크기)
 //
 // 배가 평형이면 그 축은 수평이라 0 g 를 읽고, 기울수록 중력이 그 축으로 흘러
-// 들어온다. 실제로 달아 보고 고른 축은 **힐 Y, 피치 Z** 다.
-// 남은 X 가 위아래를 향하는 축이다.
+// 들어온다. 실제로 달아 보고 고른 축은 **힐 -Y, 피치 +Z** 다.
+// 남은 X 가 위아래를 향하는 축이다. 힐에 마이너스가 붙은 건 아래 "부호" 대로
+// 기울여 봤더니 좌우가 반대로 나왔기 때문이다.
 //
 // ── 부호 ─────────────────────────────────────────────────────────────────
 //
@@ -107,10 +108,10 @@ static float gGyrOffX = 0.0f, gGyrOffY = 0.0f, gGyrOffZ = 0.0f;
 //
 // 어느 축인지, 부호가 어느 쪽인지는 `heel` / `pitch` 명령으로 바꾸고 NVS 에
 // 남긴다. 다는 방법이 또 바뀌어도 다시 굽지 않아도 된다.
-static uint8_t gHeelAxis  = 1;     // 0 = X, 1 = Y, 2 = Z
-static float   gHeelSign  = 1.0f;  // -1 이면 좌우가 뒤집혀 있다는 뜻
+static uint8_t gHeelAxis  = 1;      // 0 = X, 1 = Y, 2 = Z
+static float   gHeelSign  = -1.0f;  // 실물에서 좌우가 반대로 나와 뒤집었다
 static uint8_t gPitchAxis = 2;
-static float   gPitchSign = 1.0f;  // -1 이면 앞뒤가 뒤집혀 있다는 뜻
+static float   gPitchSign = 1.0f;   // -1 이면 앞뒤가 뒤집혀 있다는 뜻
 
 // "지금 이 자세가 평형" 이라고 알려주는 기준각. 배를 물에 띄우고 평형일 때
 // `level` 을 치면 그때 각도를 0 으로 삼는다. NVS 에 저장되므로 재부팅해도,
@@ -233,7 +234,7 @@ static void loadSettings() {
     // 힐 기준각의 키가 heel_off → heel_off2 로 바뀌었다. 옛 키에 남아 있는
     // 값은 roll 기준이라 지금 계산법에서는 뜻이 다르다. 그냥 안 읽는다.
     gHeelAxis       = gPrefs.getUChar("heel_axis", 1);  // 기본 힐 Y
-    gHeelSign       = gPrefs.getChar("heel_sgn", 1) < 0 ? -1.0f : 1.0f;
+    gHeelSign       = gPrefs.getChar("heel_sgn", -1) < 0 ? -1.0f : 1.0f;
     gHeelOffsetDeg  = gPrefs.getFloat("heel_off2", 0.0f);
     gPitchAxis      = gPrefs.getUChar("pitch_axis", 2); // 기본 피치 Z
     gPitchSign      = gPrefs.getChar("pitch_sgn", 1) < 0 ? -1.0f : 1.0f;
