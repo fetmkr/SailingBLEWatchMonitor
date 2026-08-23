@@ -53,8 +53,104 @@
 말할 수는 없지만, **최악이 아직 안 드러났다는 것만은 분명하다.** notify 주기
 100 ms 를 안 넘는다고 장담할 수 없다.
 
+20시간치까지 늘려 보니 **1.9초**까지 멈췄다. notify 주기 100 ms 의 19배다.
+
 → 그래서 §4 의 "쓰기를 따로 띄운다" 를 그대로 간다. 짐작이 아니라 측정에서
 나온 결론이다.
+
+**데이터를 잃지는 않았다.** 파일 크기가 110,160,000 바이트로 720000줄 ×
+153바이트와 정확히 맞았다. 느려질 뿐 실패하지는 않는다.
+
+### 왜 멈추나 — 표준 문서로 확인
+
+원문을 `docs/sd/` 에 넣어 뒀다 (SD Physical Layer Simplified Specification
+v3.01). 인터넷에서 다시 찾지 말 것.
+
+**1) 카드가 "바쁘다" 를 놓지 않는 것이다. 표준이 허락한 동작이다.**
+
+> "In case of High Capacity SD Memory Card, maximum length of busy is defined
+> as 250ms for all write" … "the card can indicate write busy up to 500ms"
+> — §4.6.2.2
+
+> "It is strongly recommended for hosts to implement more than 500ms timeout
+> value even if the card indicates the 250ms maximum busy length." — 같은 절
+
+드라이버도 딱 그렇게 짜여 있다. 쓰기를 보내고 카드가 놓아줄 때까지 최대
+500 ms 를 기다린다 [확인: `sd_diskio.cpp:94` `sdWait()`]. 우리가 잰 1.9초는
+한 번의 `f.write()` 안에서 이 기다림이 여러 번 겹친 것이다.
+
+**2) 카드는 AU(Allocation Unit)라는 큰 덩어리 단위로 관리한다.**
+
+> "The User Area is divided into units called *Allocation Unit (AU)*. AU is
+> physical boundary in User Area of a card and is not defined by the file
+> system boundary." — §4.13.1.1
+
+**그리고 그 덩어리 크기는 카드 용량에 따라 커진다.** 여기가 "용량이 커서
+그런가" 에 대한 답이다.
+
+| 카드 용량 | 최대 AU 크기 (Table 4-42) |
+|---|---|
+| ~32 GB | **4 MB** |
+| ~2 TB (SDXC) | **64 MB** |
+
+> "Capacities of up to 2TB and the UHS high speed interface require larger AU
+> sizes. In the case of SDXC the maximum AU size is increased to 64MB."
+> — §4.13.2.1.1
+
+**3) 카드의 속도 보증에는 조건이 붙어 있고, 우리는 그 조건을 못 지킨다.**
+
+> "To record the stream data, a Speed Class host shall manage the memory area
+> in units of an AU and **use only completely free AUs (zero fragmentation)**
+> to record the data." — §4.13.2.1.1
+
+> "r: Ratio of Used RU over an AU … r=1 means all RUs are used and
+> **performance indicates zero at this point**." — §4.13.1.5
+
+FAT32 + FatFs 는 Speed Class 호스트가 아니다. 빈 AU 를 골라 쓰지 않는다.
+파일을 지우고 같은 자리에 다시 쓰면 그 AU 는 "쓰인 채로 남은 조각" 이 되고,
+표준의 말대로 성능이 0 을 향해 내려간다.
+
+### 보드에서 확인 — 멈춤이 나는 자리
+
+멈춤이 파일 어디에서 나는지 찍었다 (110 MB 를 쓰면서 18만 번 기록).
+
+```
+     ~1 ms   148663번  (82.6%)
+  10~20 ms    24114번  (13.4%)   ← 낸드 페이지 쓰는 평소 값
+  50~100 ms     107번  ( 0.06%)
+  200 ms 위       7번  ( 0.004%)  ← 이게 문제
+```
+
+**긴 멈춤은 드물고, 흩어져 있지 않고 뭉쳐서 온다.**
+
+```
+1882 ms  파일  12.66 MB 자리
+ 282 ms  파일  12.69 MB 자리   (앞것과 0.03 MB)
+ 130 ms  파일  12.72 MB 자리   (앞것과 0.03 MB)
+1713 ms  파일  76.96 MB 자리   (앞것과 64.24 MB)   ★
+1828 ms  파일  76.97 MB 자리
+1253 ms  파일  76.97 MB 자리
+1593 ms  파일 103.93 MB 자리   (앞것과 26.96 MB)
+1121 ms  파일 103.93 MB 자리
+```
+
+세 번씩 뭉쳐서 온다. 매번 나는 게 아니라 **카드가 가끔 큰 정리를 한다**는
+뜻이다. 그리고 뭉치 사이 간격 하나가 **64.24 MB** 인데, 표준이 정한 SDXC 의
+AU 최대치가 정확히 **64 MB** 다. 점 하나로 단정할 수는 없지만 딱 맞는다.
+
+**카드가 꽉 차서가 아니다.** 이때 쓴 자리는 122066 MB 중 108 MB 였다.
+0.09% 다. 원인은 "가득 참" 이 아니라 "관리 덩어리가 크다" 와 "지우고 같은
+자리에 다시 썼다" 다.
+
+### 그래서 카드는 32 GB 가 낫다
+
+용량이 작아서가 아니라 **AU 가 작아서** 다. 32 GB 이하는 표준이 AU 를 4 MB
+로 묶어 놓았다. 128 GB 는 64 MB 까지 커질 수 있다. 카드가 한 번 정리할 때
+옮겨야 할 짐이 16배 차이 난다.
+
+- 카드를 꽉 채우지 않는다
+- 지우고 다시 쓰지 말고, 시즌마다 통째로 다시 포맷한다
+- 그래도 멈춤은 남는다. 그래서 §4 의 버퍼가 필요하다
 
 ### 저장 버튼
 

@@ -1656,6 +1656,17 @@ static void doSdBench(uint32_t rows) {
     uint64_t bytes     = 0;
     uint32_t sinceFlush = 0;
 
+    // 얼마나 자주 얼마나 오래 멈추는지. 평균만 보면 원인을 못 찾는다.
+    //   칸 경계 (ms):  1, 2, 5, 10, 20, 50, 100, 200, 그 위
+    static const uint32_t kEdge[8] = {1, 2, 5, 10, 20, 50, 100, 200};
+    uint32_t hist[9] = {0};
+
+    // 제일 오래 걸린 여덟 번이 파일의 어느 자리에서 났나.
+    //   일정한 간격이면 → FAT 갱신이나 클러스터 경계 (우리 탓)
+    //   들쭉날쭉하면    → 카드가 속으로 정리하는 것 (카드 탓)
+    uint32_t worstMs[8]  = {0};
+    uint64_t worstAt[8]  = {0};
+
     const uint32_t t0 = millis();
     for (uint32_t i = 0; i < rows; ++i) {
         memcpy(buf + used, kSample, lineLen);
@@ -1665,17 +1676,33 @@ static void doSdBench(uint32_t rows) {
             const uint32_t a = millis();
             f.write((const uint8_t*)buf, used);
             const uint32_t dt = millis() - a;
-            if (dt > maxWrite) maxWrite = dt;
             bytes += used;
             used = 0;
             ++writes;
 
+            if (dt > maxWrite) maxWrite = dt;
+            int b = 8;
+            for (int k = 0; k < 8; ++k) { if (dt < kEdge[k]) { b = k; break; } }
+            hist[b]++;
+
+            // 제일 느린 여덟 개를 자리와 함께 남긴다
+            if (dt > worstMs[7]) {
+                int k = 7;
+                while (k > 0 && worstMs[k - 1] < dt) {
+                    worstMs[k] = worstMs[k - 1];
+                    worstAt[k] = worstAt[k - 1];
+                    --k;
+                }
+                worstMs[k] = dt;
+                worstAt[k] = bytes;
+            }
+
             // 5초치(50줄)마다 디스크에 못박는다. 전원이 끊겨도 여기까지는 남는다.
             if (++sinceFlush >= 50) {
                 sinceFlush = 0;
-                const uint32_t b = millis();
+                const uint32_t bb = millis();
                 f.flush();
-                const uint32_t df = millis() - b;
+                const uint32_t df = millis() - bb;
                 if (df > maxFlush) maxFlush = df;
                 ++flushes;
             }
@@ -1687,6 +1714,9 @@ static void doSdBench(uint32_t rows) {
     const uint32_t elapsed = millis() - t0;
     const uint32_t size    = f.size();
     f.close();
+
+    const uint64_t totalB = SD.totalBytes();
+    const uint64_t usedB  = SD.usedBytes();
     SD.end();
 
     const float sec  = elapsed / 1000.0f;
@@ -1698,11 +1728,46 @@ static void doSdBench(uint32_t rows) {
     Serial.printf("  걸린 시간        %.2f 초\n", sec);
     Serial.printf("  평균 속도        %.0f KB/초\n", kbps);
     Serial.printf("  우리가 쓸 양     1.5 KB/초  →  여유 %.0f배\n", kbps / 1.5f);
+    Serial.printf("  카드 전체 %llu MB  쓴 자리 %llu MB\n",
+                  (unsigned long long)(totalB / 1048576ULL),
+                  (unsigned long long)(usedB / 1048576ULL));
     Serial.println("  ─────────────────────────────────────");
     Serial.printf("  한 번 쓰기       %u번,  제일 오래 %u ms\n",
                   (unsigned)writes, (unsigned)maxWrite);
     Serial.printf("  flush            %u번,  제일 오래 %u ms\n",
                   (unsigned)flushes, (unsigned)maxFlush);
+
+    Serial.println("  ─── 얼마나 오래 멈췄나 ───");
+    static const char* kLabel[9] = {
+        "     ~1 ms", "  1~2 ms", "  2~5 ms", " 5~10 ms", "10~20 ms",
+        "20~50 ms", "50~100 ms", "100~200 ms", "200 ms 위"};
+    for (int k = 0; k < 9; ++k) {
+        if (!hist[k]) continue;
+        Serial.printf("  %-10s %7u번  (%.3f%%)\n",
+                      kLabel[k], (unsigned)hist[k], 100.0f * hist[k] / writes);
+    }
+
+    Serial.println("  ─── 제일 오래 멈춘 자리 ───");
+    Serial.println("  일정한 간격이면 FAT 갱신·클러스터 경계, 들쭉날쭉하면 카드 사정이다.");
+    uint64_t prev = 0;
+    // 자리 순서로 다시 보여 준다 (간격을 눈으로 보려고)
+    for (int a = 0; a < 8; ++a) {
+        for (int b2 = a + 1; b2 < 8; ++b2) {
+            if (worstAt[b2] && (!worstAt[a] || worstAt[b2] < worstAt[a])) {
+                uint64_t ta = worstAt[a]; worstAt[a] = worstAt[b2]; worstAt[b2] = ta;
+                uint32_t tm = worstMs[a]; worstMs[a] = worstMs[b2]; worstMs[b2] = tm;
+            }
+        }
+    }
+    for (int k = 0; k < 8; ++k) {
+        if (!worstMs[k]) continue;
+        Serial.printf("  %3u ms  파일 %8.2f MB 자리", (unsigned)worstMs[k],
+                      worstAt[k] / 1048576.0);
+        if (prev) Serial.printf("   (앞것과 %.2f MB 차이)", (worstAt[k] - prev) / 1048576.0);
+        Serial.println();
+        prev = worstAt[k];
+    }
+
     Serial.println("  ─────────────────────────────────────");
     const uint32_t worst = maxWrite > maxFlush ? maxWrite : maxFlush;
     if (worst < 100) {
