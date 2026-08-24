@@ -10,7 +10,7 @@
 // 그 봉우리가 우리가 100 Hz 로 기록한 이유다.
 
 export interface Series {
-  /** 짧은 표시. 왼쪽 칸에 색깔로 작게 나온다 ("SOG", "HEEL") */
+  /** 이름을 남길 때 쓰는 열쇠. 화면에는 안 나온다 ("SOG", "HEEL") */
   code: string;
   /** 사람이 고칠 수 있는 이름. 왼쪽 칸에 크게 나온다 */
   name: string;
@@ -328,16 +328,21 @@ export function draw(o: DrawOpts): void {
     g.fillText(`${rhi.toFixed(rhi >= 100 ? 0 : 1)} ${s.unit}`, AXIS_W - 6, top);
     g.fillText(`${rlo.toFixed(rlo <= -100 ? 0 : 1)} ${s.unit}`, AXIS_W - 6, bot - 12);
 
-    // ── 왼쪽 이름 칸 — 두 줄이면 된다 ──
+    // ── 왼쪽 이름 칸 — 한 줄이면 된다 ──
+    //
+    // 처음에 짧은 표시(SOG)와 이름(Speed Over Ground)을 나란히 뒀는데,
+    // 같은 말을 두 번 쓰는 셈이었다. Saleae 의 D0 는 하드웨어 채널 번호라
+    // 이름과 다른 것이지만 우리는 그게 아니다.
+    //
+    // 색은 이름 앞의 작은 네모로 준다. 그림의 선 색과 이어진다.
     const midY = top + rowH / 2;
     g.fillStyle = s.color;
-    g.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
-    g.textAlign = "left";
-    g.fillText(s.code, 10, midY - 15);
+    g.fillRect(10, midY - 9, 8, 8);
 
     g.fillStyle = ink;
     g.font = "13px -apple-system, system-ui, sans-serif";
-    g.fillText(s.name, 10, midY - 1);
+    g.textAlign = "left";
+    g.fillText(s.name, 24, midY - 9);
 
     // 줄 나눔선
     g.strokeStyle = grid;
@@ -468,5 +473,5 @@ export function labelBox(
   const bodyH = r.height - TIME_H - OVER_H;
   const rowH = Math.max(24, (bodyH - GAP * (count - 1)) / count);
   const top = TIME_H + row * (rowH + GAP) + rowH / 2 - 15;
-  return { left: 6, top, width: LABEL_W - 12 };
+  return { left: 20, top, width: LABEL_W - 26 };   // 색 네모 옆에 놓는다
 }

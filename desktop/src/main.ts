@@ -291,7 +291,7 @@ function renderReadout() {
     if (i < 0) continue;
     const v = s.ys[i];
     parts.push(
-      `<span style="color:${s.color}">${s.name}</span> ` +
+      `<b style="color:${s.color}">■</b> ${s.code} ` +
       (Number.isFinite(v) ? `${v.toFixed(2)}${s.unit}` : "—")
     );
   }
