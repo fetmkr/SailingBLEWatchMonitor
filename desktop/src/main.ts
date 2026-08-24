@@ -505,46 +505,51 @@ function mountPaneHandles() {
     box.className = "handles";
 
     const big = document.createElement("button");
+    big.className = "big";
     big.textContent = "⤢";
     big.title = `${PANE_NAME[k]}만 크게 보기`;
     big.onclick = (e) => { e.stopPropagation(); only(k); };
 
     const shut = document.createElement("button");
     shut.textContent = "✕";
-    shut.title = `${PANE_NAME[k]} 닫기`;
+    shut.title = `${PANE_NAME[k]} 접기`;
     shut.onclick = (e) => { e.stopPropagation(); toggle(k); };
 
     box.append(big, shut);
-    el.append(box);
+
+    // 접혔을 때 남는 띠. 이름을 세로로 적어 두면 뭐가 접혔는지 보인다.
+    const rail = document.createElement("button");
+    rail.className = "rail";
+    rail.innerHTML = `<span>▸</span><span class="railname">${PANE_NAME[k]}</span>`;
+    rail.title = `${PANE_NAME[k]} 펼치기`;
+    rail.onclick = () => toggle(k);
+
+    el.append(box, rail);
   });
 }
 
 function applyLayout() {
-  (Object.keys(PANE_EL) as PaneKey[]).forEach((k) => {
-    $(PANE_EL[k]).classList.toggle("off", !layout[k]);
-    const btn = $("tgl" + k[0].toUpperCase() + k.slice(1));
-    btn.className = layout[k] ? "pane on" : "pane";
-    // 켜짐·꺼짐이 눈에 안 띄면 단추가 무슨 상태인지 알 수가 없다.
-    btn.textContent = (layout[k] ? "◉ " : "○ ") + PANE_NAME[k];
-    btn.title = layout[k]
-      ? `${PANE_NAME[k]} 끄기 — 두 번 누르면 이 칸만 크게`
-      : `${PANE_NAME[k]} 켜기 — 두 번 누르면 이 칸만 크게`;
+  const alone = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]).length === 1;
 
-    // 혼자 남았으면 ⤢ 가 "되돌리기" 다
-    const big = $(PANE_EL[k]).querySelector<HTMLButtonElement>(".handles button");
+  (Object.keys(PANE_EL) as PaneKey[]).forEach((k) => {
+    const el = $(PANE_EL[k]);
+    // ★ 접은 칸을 아주 없애지 않는다. 얇은 띠로 남긴다.
+    //   완전히 사라지면 어디로 갔는지, 어떻게 되돌리는지 알 수가 없다.
+    el.classList.toggle("mini", !layout[k]);
+
+    const big = el.querySelector<HTMLButtonElement>(".handles .big");
     if (big) {
-      const alone = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]).length === 1;
       big.textContent = alone ? "⤡" : "⤢";
-      big.title = alone ? "넷 다 켜기" : `${PANE_NAME[k]}만 크게 보기`;
+      big.title = alone ? "넷 다 펼치기" : `${PANE_NAME[k]}만 크게 보기`;
     }
   });
 
-  // 가운데가 하나만 켜져 있으면 나누개를 숨기고 그 칸이 다 쓴다
+  // 가운데 두 칸 중 하나가 접히면 나누개를 접고 남은 칸이 다 쓴다
   const solo = !(layout.video && layout.data);
   $("center").classList.toggle("solo", solo);
   if (solo) {
-    $("videoPane").style.flex = "1 1 100%";
-    $("dataPane").style.flex = "1 1 100%";
+    $("videoPane").style.flex = "";
+    $("dataPane").style.flex = "";
   }
 
   localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
@@ -554,11 +559,9 @@ function applyLayout() {
 function toggle(k: PaneKey) {
   const on = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]);
   if (layout[k] && on.length === 1) {
-    // 마지막 하나까지 끄면 볼 게 없어진다. 대신 넷 다 켜 준다 —
-    // 거절만 하면 사람이 어떻게 되돌리는지 모른다.
-    layout = { lib: true, video: true, data: true, info: true };
-    setStatus("마지막 칸이라 넷 다 켰습니다.");
-    applyLayout();
+    // 마지막 하나까지 접으면 볼 게 없어진다. 그건 막는다 —
+    // 다만 띠가 남아 있으니 사람이 어떻게 되돌리는지는 보인다.
+    setStatus("마지막 칸입니다. 다른 칸을 먼저 펼치세요.", "bad");
     return;
   }
   layout = { ...layout, [k]: !layout[k] };
@@ -579,7 +582,7 @@ function only(k: PaneKey) {
   } else {
     layout = { lib: false, video: false, data: false, info: false, [k]: true };
     // 손잡이(⤢)는 한 번, 위 띠 단추는 두 번이다. 둘 다 맞는 말로 적는다.
-    setStatus(`${PANE_NAME[k]}만 크게 봅니다. ⤡ 를 누르면 되돌아옵니다.`);
+    setStatus(`${PANE_NAME[k]}만 크게 봅니다. 옆의 얇은 띠를 누르면 다시 펼쳐집니다.`);
   }
   applyLayout();
 }
@@ -708,13 +711,6 @@ function wire() {
   $("list").onclick = listBoard;
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
   $("openVideo").onclick = openVideo;
-  // 한 번 누르면 켜고 끄기, 두 번 누르면 그 칸만 크게.
-  ([["Lib", "lib"], ["Video", "video"], ["Data", "data"], ["Info", "info"]] as
-    [string, PaneKey][]).forEach(([id, k]) => {
-    const b = $("tgl" + id);
-    b.onclick = () => toggle(k);
-    b.ondblclick = () => only(k);
-  });
 
   // ── 영상 조작 ──────────────────────────────────────────────────────
   const v = video();

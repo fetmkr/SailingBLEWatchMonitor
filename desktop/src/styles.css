@@ -110,24 +110,6 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 #star.on { color: #ffc857; }
 
 /* ── 칸 켜고 끄기 ────────────────────────────────────────────────── */
-.panes { display: flex; gap: 2px; }
-.pane {
-  padding: 5px 10px; border-radius: 0; border-color: var(--line);
-  background: transparent; color: #6b7280; font-size: 12px;
-  user-select: none;
-}
-.panes .pane:first-child { border-radius: 6px 0 0 6px; }
-.panes .pane:last-child  { border-radius: 0 6px 6px 0; }
-/* 켜짐·꺼짐이 한눈에 갈려야 한다. 앞의 ◉ / ○ 와 같이 본다. */
-.pane.on { background: #3b74d1; color: #fff; border-color: #3b74d1; }
-.pane:not(.on) { background: #1b1e24; }
-.pane:hover { filter: brightness(1.2); }
-
-/* 꺼진 칸 */
-.off { display: none !important; }
-/* 하나만 켜져 있으면 나누개도 숨긴다 */
-#center.solo #split { display: none; }
-#empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); }
 
 /* ── 칸마다 붙는 손잡이 ──────────────────────────────────────────── */
 .hasHandles { position: relative; }
@@ -145,3 +127,27 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 .handles button:hover { background: #3b74d1; border-color: #3b74d1; color: #fff; }
 /* 영상 칸은 검은 바탕이라 조금 더 밝게 */
 #videoPane .handles button { background: #000000aa; }
+
+/* ── 접힌 칸은 얇은 띠로 남는다 ──────────────────────────────────── */
+/*
+   완전히 사라지면 어디로 갔는지, 어떻게 되돌리는지 알 수가 없다.
+   이름을 세로로 적은 28px 짜리 띠를 남긴다. 누르면 다시 펼쳐진다.
+*/
+.mini {
+  flex: 0 0 28px !important; width: 28px !important; min-width: 28px !important;
+  padding: 0 !important; overflow: hidden;
+}
+.mini > *:not(.rail) { display: none !important; }
+
+.rail { display: none; }
+.mini .rail {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  width: 28px; height: 100%; padding: 8px 0;
+  background: var(--panel); border: none; border-radius: 0;
+  color: var(--dim); font-size: 11px; cursor: pointer;
+}
+.mini .rail:hover { background: #262b33; color: var(--ink); }
+.railname { writing-mode: vertical-rl; letter-spacing: 1px; }
+
+/* 가운데 두 칸 중 하나가 접히면 나누개도 접는다 */
+#center.solo #split { display: none; }
