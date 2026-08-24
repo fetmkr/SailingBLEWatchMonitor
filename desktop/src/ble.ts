@@ -162,15 +162,29 @@ export class Link {
  */
 export interface WifiUp {
   kind: "ap" | "join";
-  host: string;       // 앱이 두드릴 주소. AP 면 192.168.4.1, 접속이면 mDNS 이름
+  /**
+   * 앱이 두드려 볼 주소들. 먼저 답하는 쪽을 쓴다.
+   *
+   * 접속 모드에서는 새 주소를 미리 알 수가 없다 — 공유기가 정하는데
+   * 그때는 이미 BLE 가 끊겨 있다. 그래서 둘을 준다.
+   *   이름(mDNS)   늘 맞지만 늦다. 실측 2.6초. 권한이 없으면 아예 안 된다.
+   *   지난번 주소   대개 같은 주소가 다시 온다. 빠르다.
+   */
+  hosts: string[];
   ssid: string;       // 사람이 붙어야 할 WiFi 이름 (AP 일 때만 뜻이 있다)
   pass: string;
 }
 
 export function parseWifiUp(line: string): WifiUp | null {
   let m = /^ok wifi ap (.+) pass (\S+) ip (\S+)$/.exec(line);
-  if (m) return { kind: "ap", host: m[3], ssid: m[1], pass: m[2] };
-  m = /^ok wifi joining (.+) mdns (\S+)$/.exec(line);
-  if (m) return { kind: "join", host: m[2], ssid: m[1], pass: "" };
+  if (m) return { kind: "ap", hosts: [m[3]], ssid: m[1], pass: m[2] };
+  // "ok wifi joining FETM2G mdns sail-random.local last 192.168.0.76"
+  // 옛 펌웨어는 last 가 없다. 그때는 이름만 쓴다.
+  m = /^ok wifi joining (.+?) mdns (\S+)(?: last (\S+))?$/.exec(line);
+  if (m) {
+    const hosts = [m[2]];
+    if (m[3] && m[3] !== "-") hosts.unshift(m[3]);   // 빠른 쪽을 먼저
+    return { kind: "join", hosts, ssid: m[1], pass: "" };
+  }
   return null;
 }

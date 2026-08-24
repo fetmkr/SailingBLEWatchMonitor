@@ -63,6 +63,9 @@ uint32_t idleLeftMs();      // 꺼지기까지 남은 시간. 0 이면 안 끈�
 const char* mdnsHost();
 // 보드가 스스로 여는 WiFi 의 비밀번호.
 const char* apPass();
+// 지난번에 공유기한테 받았던 주소. 없으면 빈 문자열.
+// BLE 가 끊긴 뒤에 앱이 찾아올 실마리로 쓴다.
+const char* lastIp();
 
 Mode        mode();
 const char* ipText();     // "192.168.4.1". 안 켜져 있으면 빈 문자열

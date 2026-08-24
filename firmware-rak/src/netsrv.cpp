@@ -92,6 +92,32 @@ void onWifiEvent(arduino_event_id_t ev) {
     }
 }
 
+// 지난번에 받았던 주소.
+//
+// BLE 로 "WiFi 켜" 를 시키면 그 순간 BLE 가 끊겨서, 새로 받은 주소를 앱에
+// 알려줄 길이 없다. 이름(mDNS)으로 찾으라고 하는데 그게 늘 빠르진 않다.
+// 실측으로 2.6초 걸렸다. 맥이 로컬 네트워크 권한을 안 주면 아예 못 찾는다.
+//
+// 그래서 지난번 주소를 남겨 두고 미리 알려준다. 공유기는 대개 같은 주소를
+// 다시 준다. 앱은 이름과 이 주소를 같이 두드려서 먼저 답하는 쪽을 쓴다.
+char gLastIp[20] = {0};
+
+void loadLastIp() {
+    gWifiPrefs.begin("wifi", true);
+    String v = gWifiPrefs.getString("lastip", "");
+    gWifiPrefs.end();
+    snprintf(gLastIp, sizeof(gLastIp), "%s", v.c_str());
+}
+
+void saveLastIp(const char* ip) {
+    if (!ip || !*ip) return;
+    if (strcmp(gLastIp, ip) == 0) return;      // 안 바뀌었으면 안 쓴다
+    gWifiPrefs.begin("wifi", false);
+    gWifiPrefs.putString("lastip", ip);
+    gWifiPrefs.end();
+    snprintf(gLastIp, sizeof(gLastIp), "%s", ip);
+}
+
 void loadCreds() {
     gWifiPrefs.begin("wifi", /*readOnly=*/true);
     String ss = gWifiPrefs.getString("ssid", "");
@@ -571,6 +597,9 @@ bool startAP() {
     gServer.begin();
     startMdns();
     gMode = Mode::AP;
+    // ★ 시계를 여기서 돌린다. 안 돌리면 마지막으로 쓴 시각이 한참 전이라
+    //   켜는 순간 이미 시간이 지나 있어서 그대로 꺼진다 (실제로 그랬다).
+    used();
     sdUp();
 
     Serial.println("──────────────────────────────────────────");
@@ -618,6 +647,8 @@ bool startJoin(uint32_t timeoutMs) {
     gServer.begin();
     startMdns();
     gMode = Mode::Join;
+    used();          // 위 startAP 의 주석 참조
+    saveLastIp(gIp); // 다음에 앱이 이 주소부터 두드려 볼 수 있게
     sdUp();
     Serial.printf("[NET] 붙었습니다 — http://%s/\n", gIp);
     return true;
@@ -673,6 +704,8 @@ const char* mdnsHost() {
 }
 
 const char* apPass() { return SAIL_AP_PASS; }
+
+const char* lastIp() { loadLastIp(); return gLastIp; }
 
 uint32_t idleLeftMs() {
     if (gMode == Mode::Off || !gIdleOffMs) return 0;

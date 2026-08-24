@@ -703,7 +703,7 @@ async function wake(b: ble.Board) {
     if (!up) { setStatus(`알 수 없는 답 — ${reply}`, "bad"); return; }
 
     // 여기서부터 BLE 는 끊긴다. 붙잡고 있을 이유가 없다.
-    ($("host") as HTMLInputElement).value = up.host;
+    ($("host") as HTMLInputElement).value = up.hosts[0];
 
     if (up.kind === "ap") {
       setProgress(null);
@@ -713,16 +713,17 @@ async function wake(b: ble.Board) {
       return;
     }
 
-    // 붙는 데 시간이 걸린다. 이름이 잡힐 때까지 몇 번 두드려 본다.
+    // 붙는 데 시간이 걸린다. 주소가 답할 때까지 두드려 본다.
     setProgress(`${b.name} 이 ${up.ssid} 에 붙는 중…`);
-    const ok = await waitForBoard(up.host, 20000);
+    const found = await waitForBoard(up.hosts, 25000);
     setProgress(null);
-    if (!ok) {
-      setStatus(`${up.host} 을 아직 못 찾습니다. 잠시 뒤 목록을 눌러 보세요.`, "bad");
+    if (!found) {
+      setStatus(`${up.hosts.join(" 도 ")} 도 아직 답이 없습니다. ` +
+                `잠시 뒤 목록을 눌러 보세요.`, "bad");
       byHand = true; renderSide();
       return;
     }
-    setStatus(`${b.name} 준비됐습니다 — ${up.host}`, "good");
+    setStatus(`${b.name} 준비됐습니다 — ${found}`, "good");
     await listBoard();
   } catch (e) {
     setProgress(null);
@@ -734,18 +735,27 @@ async function wake(b: ble.Board) {
   }
 }
 
-/** 보드가 그 이름으로 뜰 때까지 두드려 본다. */
-async function waitForBoard(host: string, ms: number): Promise<boolean> {
+/**
+ * 보드가 답할 때까지 두드려 본다. 먼저 답하는 주소를 쓴다.
+ *
+ * 한 번에 6초를 준다. 이름(mDNS)은 실측 2.6초가 걸렸는데, 3초로 잡았더니
+ * 아슬아슬하게 놓쳤다.
+ */
+async function waitForBoard(hosts: string[], ms: number): Promise<string | null> {
   const until = Date.now() + ms;
-  ($("host") as HTMLInputElement).value = host;
+  const inp = $("host") as HTMLInputElement;
   while (Date.now() < until) {
-    try {
-      const r = await askBoard("/api/status", 3000);
-      if (r.ok) return true;
-    } catch { /* 아직 안 떴다. 다시 두드린다 */ }
-    await new Promise((r) => setTimeout(r, 1200));
+    for (const h of hosts) {
+      inp.value = h;
+      try {
+        const r = await askBoard("/api/status", 6000);
+        if (r.ok) return h;
+      } catch { /* 아직 안 떴다. 다음 주소를 두드린다 */ }
+      if (Date.now() > until) break;
+    }
+    await new Promise((r) => setTimeout(r, 800));
   }
-  return false;
+  return null;
 }
 
 /** 다 받았으면 보드 WiFi 를 끈다. 그래야 BLE 가 돌아오고 전기도 안 먹는다. */

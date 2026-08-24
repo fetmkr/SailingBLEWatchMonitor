@@ -2486,8 +2486,11 @@ static void controlLine(const char* raw) {
         const char* ss = netsrv::staSsid();
         if (!ss || !*ss) { controlSay("err wifi no-ssid"); return; }
         // 붙고 나면 주소는 공유기가 준다. 미리 못 알려주니 이름으로 찾으라고 한다.
-        snprintf(out, sizeof(out), "ok wifi joining %s mdns %s.local",
-                 ss, netsrv::mdnsHost());
+        // 이름과 함께 지난번 주소도 알려준다. 이름이 늦게 잡히거나 아예
+        // 안 잡힐 때 앱이 이 주소부터 두드려 볼 수 있다.
+        const char* last = netsrv::lastIp();
+        snprintf(out, sizeof(out), "ok wifi joining %s mdns %s.local last %s",
+                 ss, netsrv::mdnsHost(), (last && *last) ? last : "-");
         controlSay(out);
         gWifiWant = 1;
         return;
