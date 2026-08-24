@@ -8,7 +8,13 @@
   <body>
     <header>
       <div class="bar">
-        <button id="tglLib" class="ghost" title="보관함 여닫기">☰</button>
+        <span class="panes">
+          <button id="tglLib"   class="pane on" title="보관함 (1)">보관함</button>
+          <button id="tglVideo" class="pane on" title="영상 (2)">영상</button>
+          <button id="tglData"  class="pane on" title="데이터 (3)">데이터</button>
+          <button id="tglInfo"  class="pane on" title="훈련 정보 (4)">정보</button>
+        </span>
+        <span class="sep"></span>
         <button id="open">파일 열기</button>
         <button id="sample">시험용 데이터</button>
         <span class="sep"></span>
@@ -17,7 +23,6 @@
         <button id="fit">전체 보기</button>
         <span id="range" class="dim"></span>
         <span style="flex:1"></span>
-        <button id="tglInfo" class="ghost" title="훈련 정보 여닫기">ⓘ</button>
       </div>
       <div id="meta"></div>
       <div id="status"></div>

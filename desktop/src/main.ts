@@ -214,7 +214,10 @@ function clampView() {
 }
 
 function redraw() {
-  tl.draw({ canvas: canvas(), series, view, marks, cursorMs, full: fullSpan });
+  const c = canvas();
+  // 꺼진 칸은 크기가 0 이라 그릴 것도 없다
+  if (c.clientWidth < 2 || c.clientHeight < 2) return;
+  tl.draw({ canvas: c, series, view, marks, cursorMs, full: fullSpan });
   const span = view.to - view.from;
   $("range").textContent = session
     ? `${tl.formatDuration(view.from)} ~ ${tl.formatDuration(view.to)}  (${tl.formatDuration(span)} 보는 중)`
@@ -438,6 +441,68 @@ async function fetchFile(name: string) {
   }
 }
 
+// ── 칸 켜고 끄기 ────────────────────────────────────────────────────────
+//
+// 네 칸이 다 켜져 있으면 각자 좁다. 영상만 크게 보거나 데이터만 크게 보고
+// 싶을 때가 많다. 그래서 각각 끈다. 끈 칸의 자리는 남은 칸이 나눠 쓴다.
+//
+// 마지막 하나까지 끄면 볼 게 없어진다. 그건 막는다.
+type PaneKey = "lib" | "video" | "data" | "info";
+const PANE_EL: Record<PaneKey, string> = {
+  lib: "left", video: "videoPane", data: "dataPane", info: "right",
+};
+const LAYOUT_KEY = "layout.v1";
+
+let layout: Record<PaneKey, boolean> = {
+  lib: true, video: true, data: true, info: true,
+};
+
+function applyLayout() {
+  (Object.keys(PANE_EL) as PaneKey[]).forEach((k) => {
+    $(PANE_EL[k]).classList.toggle("off", !layout[k]);
+    const btn = $("tgl" + k[0].toUpperCase() + k.slice(1));
+    btn.className = layout[k] ? "pane on" : "pane";
+  });
+
+  // 가운데가 하나만 켜져 있으면 나누개를 숨기고 그 칸이 다 쓴다
+  const solo = !(layout.video && layout.data);
+  $("center").classList.toggle("solo", solo);
+  if (solo) {
+    $("videoPane").style.flex = "1 1 100%";
+    $("dataPane").style.flex = "1 1 100%";
+  }
+
+  localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+  redraw();
+}
+
+function toggle(k: PaneKey) {
+  const on = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]);
+  if (layout[k] && on.length === 1) {
+    setStatus("마지막 칸은 끌 수 없습니다.", "bad");
+    return;
+  }
+  layout = { ...layout, [k]: !layout[k] };
+  applyLayout();
+}
+
+function loadLayout() {
+  try {
+    const j = localStorage.getItem(LAYOUT_KEY);
+    if (j) {
+      const l = JSON.parse(j);
+      if (l && typeof l === "object") {
+        layout = { ...layout, ...l };
+        // 다 꺼진 상태로 저장돼 있으면 되돌린다
+        if (!Object.values(layout).some(Boolean)) {
+          layout = { lib: true, video: true, data: true, info: true };
+        }
+      }
+    }
+  } catch { /* 처음이면 없는 게 정상이다 */ }
+  applyLayout();
+}
+
 // ── 영상 ────────────────────────────────────────────────────────────────
 //
 // 왼쪽 반은 영상, 오른쪽 반은 데이터다. 둘의 시각을 맞춰 놓으면 태킹하는
@@ -544,16 +609,10 @@ function wire() {
   $("list").onclick = listBoard;
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
   $("openVideo").onclick = openVideo;
-  $("tglLib").onclick = () => {
-    const el = $("left");
-    el.style.display = el.style.display === "none" ? "" : "none";
-    redraw();
-  };
-  $("tglInfo").onclick = () => {
-    const el = $("right");
-    el.style.display = el.style.display === "none" ? "" : "none";
-    redraw();
-  };
+  $("tglLib").onclick = () => toggle("lib");
+  $("tglVideo").onclick = () => toggle("video");
+  $("tglData").onclick = () => toggle("data");
+  $("tglInfo").onclick = () => toggle("info");
 
   // ── 영상 조작 ──────────────────────────────────────────────────────
   const v = video();
@@ -747,6 +806,10 @@ function wire() {
       case "Home": panBy(fullSpan.from - view.from); break;
       case "End":  panBy(fullSpan.to - view.to); break;
       case "f": case "F": case "0": view = { ...fullSpan }; break;
+      case "1": toggle("lib"); break;
+      case "2": toggle("video"); break;
+      case "3": toggle("data"); break;
+      case "4": toggle("info"); break;
       case " ": {
         const vv = video();
         if (videoOn) { vv.paused ? vv.play() : vv.pause(); renderVbar(); }
@@ -763,6 +826,7 @@ function wire() {
 }
 
 wire();
+loadLayout();
 redraw();
 setStatus("파일을 열거나 보드에서 받으세요.");
 

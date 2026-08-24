@@ -108,3 +108,20 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 .drow input { flex: 1; width: auto; }
 #star { width: 30px; text-align: center; padding: 5px 0; }
 #star.on { color: #ffc857; }
+
+/* ── 칸 켜고 끄기 ────────────────────────────────────────────────── */
+.panes { display: flex; gap: 2px; }
+.pane {
+  padding: 5px 9px; border-radius: 0; border-color: var(--line);
+  background: transparent; color: var(--dim); font-size: 12px;
+}
+.panes .pane:first-child { border-radius: 6px 0 0 6px; }
+.panes .pane:last-child  { border-radius: 0 6px 6px 0; }
+.pane.on { background: #2f3a47; color: var(--ink); }
+.pane:hover { background: #39424f; }
+
+/* 꺼진 칸 */
+.off { display: none !important; }
+/* 하나만 켜져 있으면 나누개도 숨긴다 */
+#center.solo #split { display: none; }
+#empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); }
