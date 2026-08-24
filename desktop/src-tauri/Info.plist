@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 맥은 블루투스를 쓰기 전에 "왜 쓰는지" 를 요구한다. 이 글이 없으면
+       앱이 블루투스를 만지는 순간 그냥 죽는다.
+       배포판은 Tauri 가 이 파일을 찾아 합쳐 준다.
+       [확인: tauri-utils/src/config.rs:662 "Tauri also looks for a Info.plist
+              file in the same directory as the Tauri configuration file"]
+       tauri dev 는 맨 실행파일로 돌아서 build.rs 가 따로 박아 넣는다. -->
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>배에 달린 기록 장치를 찾아 WiFi 를 켜는 데 씁니다.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>같은 WiFi 에 있는 기록 장치를 이름으로 찾는 데 씁니다.</string>
+</dict>
+</plist>

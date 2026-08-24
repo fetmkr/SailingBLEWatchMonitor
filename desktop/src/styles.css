@@ -247,3 +247,13 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
   align-items: center; justify-content: center; text-align: center;
   background: #10151c; pointer-events: none; padding: 16px;
 }
+
+/* 보드 찾기 목록 */
+.file.board { display: flex; align-items: center; gap: 8px; cursor: default; }
+.file.board > div { flex: 1; }
+.file.board .wake { flex: none; }
+button.ghost {
+  background: transparent; color: var(--dim);
+  border: 1px solid var(--line);
+}
+button.ghost:hover { color: var(--ink); background: #232830; }

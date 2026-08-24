@@ -45,6 +45,7 @@
       ]
     },
     "core:webview:default",
-    "fs:allow-read-file"
+    "fs:allow-read-file",
+    "blec:default"
   ]
 }

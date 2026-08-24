@@ -10,6 +10,13 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
+
+  // 지도 부품은 웹 워커를 따로 들고 다닌다. Vite 가 미리 묶는 과정에서 그
+  // 워커 파일을 흘려서 "maplibre-gl-worker.mjs 가 없다" 는 말이 떴다.
+  // 미리 묶지 말라고 빼 둔다.
+  optimizeDeps: { exclude: ["maplibre-gl"] },
+  worker: { format: "es" },
+
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,

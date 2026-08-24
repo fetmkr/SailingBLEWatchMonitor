@@ -12,6 +12,7 @@ import { fetch as tfetch } from "@tauri-apps/plugin-http";
 import * as hlog from "./hlog";
 import * as lib from "./library";
 import * as vid from "./video";
+import * as ble from "./ble";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import * as tl from "./timeline";
 import { TrackMap, type TrackPoint } from "./map";
@@ -591,8 +592,172 @@ function renderSide() {
   ($("tabBoard") as HTMLElement).className = pane === "board" ? "tab on" : "tab";
   ($("boardBar") as HTMLElement).style.display = pane === "board" ? "flex" : "none";
   ($("libBar") as HTMLElement).style.display = pane === "library" ? "flex" : "none";
-  if (pane === "board") renderFileList(boardFiles);
-  else renderLibrary();
+  // 주소 칸은 BLE 를 못 쓰거나 사람이 "주소로" 를 눌렀을 때만 보인다
+  ($("hostBar") as HTMLElement).style.display =
+    pane === "board" && (byHand || !ble.usable) ? "flex" : "none";
+  ($("boards") as HTMLElement).style.display = pane === "board" ? "block" : "none";
+  if (pane === "board") { renderBoards(); renderFileList(boardFiles); }
+  else { $("boards").innerHTML = ""; renderLibrary(); }
+}
+
+// ── 보드 찾기 (BLE) ─────────────────────────────────────────────────────
+//
+// 보드 WiFi 는 평소에 꺼져 있다. 그래서 IP 로는 못 찾는다. BLE 광고는 늘
+// 나가고 있으니 그걸로 찾고, 그걸로 WiFi 를 켜라고 시킨다 (PROTOCOL.md §9).
+let boards: ble.Board[] = [];
+let scanning = false;
+let byHand = false;          // 사람이 주소를 직접 치겠다고 했나
+let waking: string | null = null;   // 지금 깨우는 중인 보드의 주소
+
+function renderBoards() {
+  const box = $("boards");
+  if (!ble.usable) { box.innerHTML = ""; return; }
+  if (!boards.length) {
+    box.innerHTML = scanning
+      ? "<div class='dim pad'>찾는 중…</div>"
+      : "<div class='dim pad'>배 찾기를 누르세요.<br>보드 WiFi 가 꺼져 있어도 찾습니다.</div>";
+    return;
+  }
+  box.innerHTML = boards.map((b) => {
+    const busy = waking === b.address;
+    return `<div class="file board" data-addr="${b.address}">
+      <div><b>${b.name}</b> <span class="dim">${bars(b.rssi)} ${b.rssi} dBm</span></div>
+      <button class="wake" ${busy ? "disabled" : ""}>${busy ? "깨우는 중…" : "연결"}</button>
+    </div>`;
+  }).join("");
+
+  box.querySelectorAll<HTMLElement>(".board .wake").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const addr = btn.closest<HTMLElement>(".board")?.dataset.addr;
+      const b = boards.find((x) => x.address === addr);
+      if (b) void wake(b);
+    };
+  });
+}
+
+/** 세기를 눈으로. -50 이면 코앞, -85 면 겨우 잡힌다. */
+function bars(rssi: number): string {
+  const n = rssi > -55 ? 4 : rssi > -68 ? 3 : rssi > -80 ? 2 : 1;
+  return "▮".repeat(n) + "▯".repeat(4 - n);
+}
+
+async function scanBoards() {
+  const st = await ble.ready();
+  if (!st.ok) {
+    setStatus(`블루투스를 못 씁니다 — ${st.why}`, "bad");
+    byHand = true; renderSide();
+    return;
+  }
+  boards = [];
+  scanning = true;
+  renderBoards();
+  setStatus("주변 배를 찾는 중…");
+  try {
+    await ble.scan(6000, (list) => { boards = list; renderBoards(); });
+    // 훑기는 정해진 시간이 지나면 저절로 끝난다
+    setTimeout(() => {
+      scanning = false;
+      renderBoards();
+      setStatus(boards.length
+        ? `배 ${boards.length}대 찾았습니다.`
+        : "못 찾았습니다. 보드가 켜져 있는지 보세요.", boards.length ? "good" : "bad");
+    }, 6200);
+  } catch (e) {
+    scanning = false; renderBoards();
+    setStatus(`찾기 실패 — ${e}`, "bad");
+  }
+}
+
+/**
+ * 보드를 깨운다. BLE 로 붙어서 "WiFi 켜" 를 시키고, 답에 적힌 주소로 옮겨간다.
+ *
+ * ★ WiFi 가 켜지면 BLE 는 끊긴다. 그건 잘못된 게 아니다 (PROTOCOL.md §9).
+ *   그래서 답을 받자마자 BLE 는 잊고 HTTP 로 넘어간다.
+ */
+async function wake(b: ble.Board) {
+  if (waking) { setStatus("이미 한 대를 깨우는 중입니다.", "bad"); return; }
+  waking = b.address;
+  renderBoards();
+  await ble.scanStop();
+  setStatus(`${b.name} 에 붙는 중…`);
+
+  let link: ble.Link | null = null;
+  try {
+    link = await ble.Link.open(b);
+    const st = await link.ask("wifi status");
+    if (st?.startsWith("status") && / rec on/.test(st)) {
+      setStatus("기록 중입니다. 기록을 멈춘 뒤에 받으세요.", "bad");
+      return;
+    }
+
+    setProgress(`${b.name} 의 WiFi 를 켜는 중…`);
+    const reply = await link.ask("wifi on", 8000);
+    if (!reply) { setStatus("보드가 대답이 없습니다.", "bad"); return; }
+
+    if (reply.startsWith("err wifi no-ssid")) {
+      setStatus("이 보드에 붙을 WiFi 가 정해져 있지 않습니다. WiFi 설정을 먼저 하세요.", "bad");
+      return;
+    }
+    const up = ble.parseWifiUp(reply);
+    if (!up) { setStatus(`알 수 없는 답 — ${reply}`, "bad"); return; }
+
+    // 여기서부터 BLE 는 끊긴다. 붙잡고 있을 이유가 없다.
+    ($("host") as HTMLInputElement).value = up.host;
+
+    if (up.kind === "ap") {
+      setProgress(null);
+      setStatus(`${b.name} 이 자기 WiFi 를 열었습니다 — ` +
+                `WiFi 를 "${up.ssid}" 로 바꾼 뒤 목록을 누르세요.`, "good");
+      byHand = true; renderSide();
+      return;
+    }
+
+    // 붙는 데 시간이 걸린다. 이름이 잡힐 때까지 몇 번 두드려 본다.
+    setProgress(`${b.name} 이 ${up.ssid} 에 붙는 중…`);
+    const ok = await waitForBoard(up.host, 20000);
+    setProgress(null);
+    if (!ok) {
+      setStatus(`${up.host} 을 아직 못 찾습니다. 잠시 뒤 목록을 눌러 보세요.`, "bad");
+      byHand = true; renderSide();
+      return;
+    }
+    setStatus(`${b.name} 준비됐습니다 — ${up.host}`, "good");
+    await listBoard();
+  } catch (e) {
+    setProgress(null);
+    setStatus(`${b.name} — ${e}`, "bad");
+  } finally {
+    try { await link?.close(); } catch { /* 이미 끊겼으면 그만이다 */ }
+    waking = null;
+    renderBoards();
+  }
+}
+
+/** 보드가 그 이름으로 뜰 때까지 두드려 본다. */
+async function waitForBoard(host: string, ms: number): Promise<boolean> {
+  const until = Date.now() + ms;
+  ($("host") as HTMLInputElement).value = host;
+  while (Date.now() < until) {
+    try {
+      const r = await askBoard("/api/status", 3000);
+      if (r.ok) return true;
+    } catch { /* 아직 안 떴다. 다시 두드린다 */ }
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+  return false;
+}
+
+/** 다 받았으면 보드 WiFi 를 끈다. 그래야 BLE 가 돌아오고 전기도 안 먹는다. */
+async function sleepBoard() {
+  try {
+    await askBoard("/api/wifi/off", 5000);
+    boardFiles = [];
+    setStatus("보드 WiFi 를 껐습니다. 블루투스로 다시 찾을 수 있습니다.", "good");
+    renderSide();
+  } catch (e) {
+    setStatus(`끄기 실패 — ${boardWhy(e)}`, "bad");
+  }
 }
 
 const dayText = (t: number) =>
@@ -725,6 +890,12 @@ function renderFileList(files: FileInfo[]) {
       </div>`;
     })
     .join("");
+
+  // 다 받았으면 끄는 단추. 켜 둔 채로 두면 전기를 먹고 BLE 도 안 돌아온다.
+  box.insertAdjacentHTML("beforeend",
+    `<div class="pad"><button id="sleepBoard" class="ghost">다 받았습니다 — 보드 WiFi 끄기</button></div>`);
+  const sb = document.getElementById("sleepBoard");
+  if (sb) (sb as HTMLButtonElement).onclick = () => void sleepBoard();
 
   // 줄을 누르는 것만으로는 안 받는다. 90 MB 를 실수로 받으면 안 된다.
   box.querySelectorAll<HTMLElement>(".file .get").forEach((btn) => {
@@ -1110,6 +1281,14 @@ function wire() {
   $("sample").onclick = loadSample;
   $("list").onclick = listBoard;
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
+  // ── 보드 찾기 단추들 ──
+  $("btScan").onclick = () => void scanBoards();
+  $("byHand").onclick = () => {
+    byHand = !byHand;
+    renderSide();
+    setStatus(byHand ? "주소를 직접 치는 방식입니다." : "블루투스로 찾습니다.");
+  };
+
   // ── 지도 단추들 ──
   const baseSel = $("baseSel") as HTMLSelectElement;
   baseSel.innerHTML = TrackMap.bases()
