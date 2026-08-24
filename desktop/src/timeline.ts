@@ -127,6 +127,14 @@ export interface DrawOpts {
   pinMs: number | null;
   /** 전체 구간. 아래 띠를 그린다 */
   full?: View;
+  /**
+   * 시각을 어디부터 세나 (ms).
+   *
+   * 영상을 맞춰 놓으면 영상 0초를 여기에 넣는다. 그러면 타임라인 숫자와
+   * 영상 재생 시간이 같은 값이 된다 — 영상이 1:23 일 때 타임라인도 1:23 이다.
+   * 서로 다른 숫자를 보면서 맞추려면 머릿속으로 계속 빼야 한다.
+   */
+  originMs?: number;
 }
 
 /**
@@ -220,6 +228,7 @@ export function draw(o: DrawOpts): void {
   g.lineTo(cssW, TIME_H - 0.5);
   g.stroke();
 
+  const origin = o.originMs ?? 0;
   const base = view.from;
   const step = tickStep(span, Math.max(3, Math.floor(plotW / 120)));
   const first = Math.ceil(base / step) * step;
@@ -250,7 +259,7 @@ export function draw(o: DrawOpts): void {
   g.fillStyle = ink;
   g.textAlign = "left";
   g.font = "bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";
-  g.fillText(formatDuration(base), LABEL_W + 4, 6);
+  g.fillText(formatDuration(base - origin), LABEL_W + 4, 6);
   g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
 
   // ── 마킹 ────────────────────────────────────────────────────────────

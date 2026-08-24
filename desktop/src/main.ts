@@ -47,6 +47,18 @@ let videoOn = false;
 let seeking = false;
 export const _seeking = () => seeking;
 
+/**
+ * 시각을 어디부터 세나.
+ *
+ *   session  세션이 시작한 때부터 (영상이 없으면 이것뿐이다)
+ *   video    영상 0초부터 — 타임라인 숫자와 영상 재생 시간이 같아진다
+ *
+ * 영상을 맞춘 뒤에는 video 로 넘어간다. 서로 다른 숫자를 보면서 맞추려면
+ * 머릿속으로 계속 빼야 한다.
+ */
+let timeOrigin: "session" | "video" = "session";
+const originMs = () => (timeOrigin === "video" && videoOn ? sync.offsetMs : 0);
+
 const $ = (id: string) => document.getElementById(id)!;
 const canvas = () => $("plot") as HTMLCanvasElement;
 
@@ -272,14 +284,18 @@ function redraw() {
   const c = canvas();
   // 꺼진 칸은 크기가 0 이라 그릴 것도 없다
   if (c.clientWidth < 2 || c.clientHeight < 2) return;
-  tl.draw({ canvas: c, series, view, marks, cursorMs, pinMs, full: fullSpan });
+  tl.draw({ canvas: c, series, view, marks, cursorMs, pinMs, full: fullSpan,
+            originMs: originMs() });
   const span = view.to - view.from;
   // 0.2초를 보고 있는데 "0:00 보는 중" 이라고 하면 아무 말도 안 하는 셈이다.
   const spanText = span < 10000
     ? tl.formatOffsetTick(span).replace(/^[+−]/, "")
     : tl.formatDuration(span);
+  const o = originMs();
   $("range").textContent = session
-    ? `${tl.formatDuration(view.from)} ~ ${tl.formatDuration(view.to)}  (${spanText} 보는 중)`
+    ? `${tl.formatDuration(view.from - o)} ~ ${tl.formatDuration(view.to - o)}` +
+      `  (${spanText} 보는 중)` +
+      (timeOrigin === "video" ? "  · 영상 기준" : "")
     : "";
   renderReadout();
 }
@@ -290,7 +306,7 @@ function renderReadout() {
   const at = pinMs !== null ? pinMs : cursorMs;
   if (!session || at === null) { $("readout").textContent = ""; return; }
   const parts: string[] = [
-    (pinMs !== null ? "📍 " : "") + tl.formatDuration(at),
+    (pinMs !== null ? "📍 " : "") + tl.formatDuration(at - originMs()),
   ];
   for (const s of series) {
     const i = nearest(s.xs, at);
@@ -683,6 +699,7 @@ async function useVideoUrl(url: string, name: string, blob: Blob | null) {
   v.classList.add("on");
   $("vdrop").classList.add("hide");
   videoOn = true;
+  timeOrigin = "session";     // 아직 안 맞췄다. 맞추고 나서 넘어간다
 
   // 파일이 적어 둔 시각으로 첫 짐작을 만든다
   let ft: Date | null = null;
@@ -703,6 +720,10 @@ function renderVbar() {
   const dur = Number.isFinite(v.duration) ? v.duration : 0;
   $("vtime").textContent =
     `${tl.formatDuration(v.currentTime * 1000)} / ${tl.formatDuration(dur * 1000)}`;
+
+  const ob = $("originBtn");
+  ob.textContent = timeOrigin === "video" ? "시각 기준: 영상" : "시각 기준: 세션";
+  ob.className = timeOrigin === "video" && videoOn ? "on" : "";
 
   const sl = $("vslider") as HTMLInputElement;
   sl.disabled = !videoOn || dur <= 0;
@@ -740,7 +761,9 @@ function syncHere() {
     return;
   }
   sync = { ...sync, offsetMs: at - video().currentTime * 1000, guessed: false };
-  setStatus(`맞췄습니다 — ${vid.formatOffset(sync.offsetMs)}`, "good");
+  // 맞췄으면 이제 영상 시각을 기준으로 센다. 그래야 두 숫자가 같아진다.
+  timeOrigin = "video";
+  setStatus("맞췄습니다. 이제 타임라인 숫자가 영상 재생 시간과 같습니다.", "good");
   renderVbar();
   redraw();
 }
@@ -790,6 +813,12 @@ function wire() {
   sl.addEventListener("change", () => { sliderHeld = false; slSeek(); });
   addEventListener("pointerup", () => { sliderHeld = false; });
   $("syncHere").onclick = syncHere;
+  $("originBtn").onclick = () => {
+    if (!videoOn) { setStatus("영상을 먼저 여세요.", "bad"); return; }
+    timeOrigin = timeOrigin === "video" ? "session" : "video";
+    renderVbar();
+    redraw();
+  };
   // 누른 부호대로 아래 숫자가 움직인다. 반대로 두면 사람이 헷갈린다.
   $("n10").onclick = () => nudge(-10000);
   $("n1").onclick = () => nudge(-1000);
