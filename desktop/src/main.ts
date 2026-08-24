@@ -282,6 +282,17 @@ function fitAll() {
   if (!Number.isFinite(lo)) { lo = 0; hi = 1; }
   fullSpan = { from: lo, to: Math.max(hi, lo + 1) };
   view = { ...fullSpan };
+
+  // ★ 파란 선을 처음부터 둔다.
+  //
+  //   전에는 데이터 창을 한 번 눌러야 생겼다. 그래서 영상만 만지던 사람은
+  //   파란 선을 본 적이 없고, 싱크를 눌러도 "맞출 자리가 없다"고 거절당했다.
+  //   거절당했으니 안 물리고, 안 물렸으니 영상이 돌아도 데이터가 안 움직였다.
+  //
+  //   늘 어딘가는 가리키고 있어야 한다. 처음엔 세션 첫머리다.
+  if (pinMs === null || pinMs < fullSpan.from || pinMs > fullSpan.to) {
+    pinMs = fullSpan.from;
+  }
 }
 
 function clampView() {
@@ -806,11 +817,8 @@ function toggleSync() {
     return;
   }
 
-  const at = pinMs !== null ? pinMs : cursorMs;
-  if (at === null) {
-    setStatus("타임라인에서 맞출 자리를 먼저 누르세요.", "bad");
-    return;
-  }
+  // 파란 선은 늘 있으므로 여기서 없을 일이 없다. 그래도 막아 둔다.
+  const at = pinMs ?? cursorMs ?? view.from;
   sync = { ...sync, offsetMs: at - video().currentTime * 1000, guessed: false };
   linked = true;
   timeOrigin = "video";      // 이제 두 숫자가 같아진다
@@ -1183,7 +1191,9 @@ function wire() {
       case "3": case "#": (e.shiftKey ? only : toggle)("data"); break;
       case "4": case "$": (e.shiftKey ? only : toggle)("info"); break;
       case "Escape":
-        if (pinMs !== null) { pinMs = null; setStatus("고정을 풀었습니다."); }
+        // 선을 없애지는 않는다. 없으면 싱크를 걸 자리가 없어진다.
+        pinMs = view.from;
+        setStatus("고정을 화면 왼쪽 끝으로 옮겼습니다.");
         break;
       case " ": {
         const vv = video();
