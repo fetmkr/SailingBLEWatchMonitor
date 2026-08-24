@@ -11,9 +11,6 @@
         <button id="open">파일 열기</button>
         <button id="sample">시험용 데이터</button>
         <span class="sep"></span>
-        <input id="host" value="192.168.4.1" spellcheck="false" />
-        <button id="list">보드에서 목록</button>
-        <span class="sep"></span>
         <button id="fit">전체 보기</button>
         <span id="range" class="dim"></span>
       </div>
@@ -22,11 +19,29 @@
     </header>
 
     <main>
-      <aside id="files"></aside>
+      <aside>
+        <div class="tabs">
+          <button id="tabLib" class="tab on">보관함</button>
+          <button id="tabBoard" class="tab">보드</button>
+        </div>
+        <div id="libBar" class="subbar">
+          <input id="q" placeholder="선수 · 장소 · 메모 찾기" spellcheck="false" />
+        </div>
+        <div id="boardBar" class="subbar" style="display:none">
+          <input id="host" value="192.168.4.1" spellcheck="false" />
+          <button id="list">목록</button>
+        </div>
+        <div id="files"></div>
+      </aside>
+
       <section>
         <canvas id="plot"></canvas>
         <div id="readout"></div>
       </section>
+
+      <aside id="right">
+        <div id="details"></div>
+      </aside>
     </main>
 
     <script type="module" src="/src/main.ts"></script>

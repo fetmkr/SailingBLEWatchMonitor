@@ -2039,9 +2039,8 @@ static void logWriteImu(uint32_t nowMs) {
     b.gyr[0] = (int16_t)lroundf(gGyr.x * 32.0f);
     b.gyr[1] = (int16_t)lroundf(gGyr.y * 32.0f);
     b.gyr[2] = (int16_t)lroundf(gGyr.z * 32.0f);
-    // 쿼터니언 네 칸 모두 0 = 자세 없음.
-    // MPU-9250 은 융합을 안 한다. 가속·자이로 원본이 100 Hz 로 남으므로
-    // 자세는 나중에 후처리로 뽑으면 된다. BNO085 로 바뀌면 여기가 채워진다.
+    // 자세는 여기 안 넣는다. 가속·자이로 원본이 100 Hz 로 남으므로 후처리로
+    // 뽑는다. 어느 축이 힐인지는 머리글에 적혀 있다.
     hlog::writeImu(b);
 }
 

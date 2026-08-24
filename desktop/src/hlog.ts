@@ -10,7 +10,11 @@ export const HEADER_SIZE = 128;
 export const TYPE_NAV = 0xa1;
 export const NAV_SIZE = 38;
 export const TYPE_IMU = 0xb1;
-export const IMU_SIZE = 27;
+// v1.0 은 27바이트(쿼터니언 8칸 포함), v1.1 부터 19바이트.
+// 자세는 가속·자이로 원본에서 후처리로 뽑는다 — 원본이 남아 있으면 계산법을
+// 나중에 고쳐도 예전 데이터까지 다시 계산된다.
+export const IMU_SIZE_V0 = 27;
+export const IMU_SIZE_V1 = 19;
 
 // 값 없음 표식. 0 을 쓰면 "정박 중 0노트" 와 "위성 못 잡음" 이 구별되지 않는다.
 const LATLON_INVALID = -0x80000000;
@@ -58,6 +62,13 @@ export interface Header {
   imuRows: number;
   dropped: number;
   closed: boolean;
+  // 힐·피치를 어느 가속도 축에서 봤나. 이게 없으면 이 파일로 힐을 못 구한다.
+  heelAxis: number;    // 0=X 1=Y 2=Z
+  heelSign: number;    // 0=+ 1=-
+  pitchAxis: number;
+  pitchSign: number;
+  heelOff: number;     // 기준각 (도)
+  pitchOff: number;
   crcOk: boolean;
 }
 
@@ -81,7 +92,6 @@ export interface ImuRecord {
   ms: number;
   acc: [number, number, number];   // g
   gyr: [number, number, number];   // °/s
-  quat: [number, number, number, number] | null;
 }
 
 export interface Session {
@@ -130,6 +140,12 @@ export function parseHeader(buf: Uint8Array): Header {
     imuRows: d.getUint32(56, true),
     dropped: d.getUint32(60, true),
     closed: buf[64] === 1,
+    heelAxis: buf[65],
+    heelSign: buf[66],
+    pitchAxis: buf[67],
+    pitchSign: buf[68],
+    heelOff: d.getFloat32(69, true),
+    pitchOff: d.getFloat32(73, true),
     crcOk: d.getUint16(126, true) === crc16(buf, 0, 126),
   };
 }
@@ -164,11 +180,6 @@ function readNav(d: DataView, o: number): NavRecord {
 }
 
 function readImu(d: DataView, o: number): ImuRecord {
-  const q: [number, number, number, number] = [
-    d.getInt16(o + 17, true), d.getInt16(o + 19, true),
-    d.getInt16(o + 21, true), d.getInt16(o + 23, true),
-  ];
-  const noQuat = q[0] === 0 && q[1] === 0 && q[2] === 0 && q[3] === 0;
   return {
     ms: d.getUint32(o + 1, true),
     acc: [
@@ -181,8 +192,6 @@ function readImu(d: DataView, o: number): ImuRecord {
       d.getInt16(o + 13, true) / 32,
       d.getInt16(o + 15, true) / 32,
     ],
-    // 넷 다 0 이면 자세 없음. 0 벡터는 회전이 아니라 안전한 표식이다.
-    quat: noQuat ? null : [q[0] / 16384, q[1] / 16384, q[2] / 16384, q[3] / 16384],
   };
 }
 
@@ -197,6 +206,11 @@ export function parse(buf: Uint8Array): Session {
   const header = parseHeader(buf);
   const d = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
 
+  // 옛 파일은 IMU 레코드가 27바이트다. 머리글의 판 번호를 보고 고른다.
+  const imuSize =
+    header.verMajor > 1 || (header.verMajor === 1 && header.verMinor >= 1)
+      ? IMU_SIZE_V1 : IMU_SIZE_V0;
+
   const nav: NavRecord[] = [];
   const imu: ImuRecord[] = [];
   let resyncs = 0;
@@ -207,7 +221,7 @@ export function parse(buf: Uint8Array): Session {
   const n = buf.length;
   while (i < n) {
     const t = buf[i];
-    const size = t === TYPE_NAV ? NAV_SIZE : t === TYPE_IMU ? IMU_SIZE : 0;
+    const size = t === TYPE_NAV ? NAV_SIZE : t === TYPE_IMU ? imuSize : 0;
     let ok = false;
 
     if (size && i + size <= n) {

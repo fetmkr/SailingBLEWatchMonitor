@@ -19,11 +19,25 @@ namespace hlog {
 // ── 크기와 표식 ──────────────────────────────────────────────────────────
 constexpr uint8_t kMagic0 = 'H', kMagic1 = 'H', kMagic2 = 'L', kMagic3 = 'G';
 constexpr uint8_t kVerMajor = 1;
-constexpr uint8_t kVerMinor = 0;
+constexpr uint8_t kVerMinor = 1;
 
 constexpr size_t kHeaderSize = 128;
 constexpr size_t kNavSize    = 38;
-constexpr size_t kImuSize    = 27;
+
+// ── Type B 가 27 → 19 바이트로 줄었다 (v1.1) ─────────────────────────────
+//
+// 규격 초안은 여기에 쿼터니언 4칸(8바이트)을 두고 "힐·트림·헤딩은 저장하지
+// 않는다, 후처리에서 쿼터니언으로 산출한다" 고 했다. **그걸 뺐다.**
+//
+// 이유
+//   - 우리 시제품에는 융합이 없어서 채울 값이 아예 없었다 (늘 0 이었다)
+//   - 자세는 가속·자이로 원본에서 후처리로 뽑을 수 있다. 원본이 남아 있으면
+//     계산법을 나중에 고쳐도 예전 데이터까지 다시 계산된다
+//   - 제일 큰 흐름이 26% 줄었다. 8시간 89 MB → 66 MB
+//
+// 옛 파일(v1.0)은 27바이트다. 읽는 쪽은 머리글의 ver_minor 를 보고 고른다.
+constexpr size_t kImuSizeV0  = 27;   // v1.0 — 쿼터니언이 있던 시절
+constexpr size_t kImuSize    = 19;   // v1.1 — 지금
 
 constexpr uint8_t kTypeNav = 0xA1;
 constexpr uint8_t kTypeImu = 0xB1;
@@ -46,7 +60,6 @@ constexpr uint16_t kCogInvalid    = 0xFFFF;              // 유효 범위 0~3599
 constexpr uint16_t kAccInvalid    = 0xFFFF;              // 655 m. 쓸모없는 정확도
 constexpr uint32_t kItowInvalid   = 0xFFFFFFFF;
 constexpr uint16_t kWeekInvalid   = 0xFFFF;
-// 쿼터니언 네 칸이 모두 0 이면 자세 없음. 0 벡터는 회전이 아니라서 안전하다.
 
 // ── 이벤트 비트 (Type A 오프셋 29) ───────────────────────────────────────
 constexpr uint8_t kEvMark      = 0x01; // 마킹 버튼
@@ -135,7 +148,6 @@ struct ImuSample {
     uint32_t localMs = 0;
     int16_t  acc[3]  = {0, 0, 0};        // 1 mg/LSB
     int16_t  gyr[3]  = {0, 0, 0};        // 1/32 °/s/LSB
-    int16_t  quat[4] = {0, 0, 0, 0};     // Q14. 넷 다 0 이면 자세 없음
 };
 
 // 파일 머리글에 박아 둘 것

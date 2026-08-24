@@ -399,8 +399,7 @@ void writeImu(const ImuSample& s) {
     put32(r, o, s.localMs);
     for (int i = 0; i < 3; ++i) put16(r, o, (uint16_t)s.acc[i]);
     for (int i = 0; i < 3; ++i) put16(r, o, (uint16_t)s.gyr[i]);
-    for (int i = 0; i < 4; ++i) put16(r, o, (uint16_t)s.quat[i]);
-    const uint16_t c = crc16(r, 25);
+    const uint16_t c = crc16(r, kImuSize - 2);
     put16(r, o, c);
 
     if (push(r, kImuSize)) ++gImuRows;
@@ -566,11 +565,13 @@ void verify(uint32_t session) {
     uint32_t prevImuMs = 0;
     uint32_t gap10 = 0, gapOther = 0, gapMax = 0;
     uint8_t  rec[64];
+    // 옛 파일(v1.0)은 IMU 레코드가 27바이트다. 머리글을 보고 고른다.
+    const size_t imuSize = (hdr[5] >= 1) ? kImuSize : kImuSizeV0;
 
     while (f.available()) {
         const int t = f.read();
         if (t < 0) break;
-        const size_t size = (t == kTypeNav) ? kNavSize : ((t == kTypeImu) ? kImuSize : 0);
+        const size_t size = (t == kTypeNav) ? kNavSize : ((t == kTypeImu) ? imuSize : 0);
         if (size == 0) { ++bad; continue; }   // 한 바이트 밀면서 다시 맞춘다
 
         rec[0] = (uint8_t)t;
@@ -602,7 +603,7 @@ void verify(uint32_t session) {
     const uint64_t freeB = SD.totalBytes() - SD.usedBytes();
     SD.end();
 
-    const uint32_t used = kHeaderSize + nav * kNavSize + imu * kImuSize;
+    const uint32_t used = kHeaderSize + nav * kNavSize + imu * imuSize;
     Serial.println("  ─────────────────────────────────────");
     Serial.printf("  NAV 레코드     %u\n", (unsigned)nav);
     Serial.printf("  IMU 레코드     %u\n", (unsigned)imu);

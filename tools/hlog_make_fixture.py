@@ -21,7 +21,7 @@ import sys
 
 HEADER_SIZE = 128
 TYPE_NAV, NAV_SIZE = 0xA1, 38
-TYPE_IMU, IMU_SIZE = 0xB1, 27
+TYPE_IMU, IMU_SIZE = 0xB1, 19
 KNOTS_PER_MPS = 1.943844
 
 
@@ -38,7 +38,7 @@ def make_header(session, utc_start, dur_s, nav_rows, imu_rows):
     h = bytearray(HEADER_SIZE)
     h[0:4] = b"HHLG"
     h[4] = 1                                     # ver major
-    h[5] = 0                                     # ver minor
+    h[5] = 1                                     # ver minor (쿼터니언 뺀 판)
     struct.pack_into("<H", h, 6, HEADER_SIZE)
     h[8:14] = bytes([0x3C, 0xDC, 0x75, 0x70, 0x2F, 0xB4])
     struct.pack_into("<H", h, 14, 0x0100)        # fw
@@ -85,14 +85,13 @@ def nav_record(ms, itow, week, lat, lon, sog_mms, cog_cdeg, sv, fix,
     return bytes(r)
 
 
-def imu_record(ms, acc, gyr, quat=(0, 0, 0, 0)):
+def imu_record(ms, acc, gyr):
     r = bytearray(IMU_SIZE)
     r[0] = TYPE_IMU
     struct.pack_into("<I", r, 1, ms)
     struct.pack_into("<3h", r, 5, *acc)
     struct.pack_into("<3h", r, 11, *gyr)
-    struct.pack_into("<4h", r, 17, *quat)
-    struct.pack_into("<H", r, 25, crc16(bytes(r[:25])))
+    struct.pack_into("<H", r, 17, crc16(bytes(r[:17])))
     return bytes(r)
 
 

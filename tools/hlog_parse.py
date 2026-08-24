@@ -21,7 +21,10 @@ from collections import Counter
 MAGIC = b"HHLG"
 HEADER_SIZE = 128
 TYPE_NAV, NAV_SIZE = 0xA1, 38
-TYPE_IMU, IMU_SIZE = 0xB1, 27
+TYPE_IMU = 0xB1
+# v1.0 은 27바이트(쿼터니언 8칸 포함), v1.1 부터 19바이트.
+# 자세는 가속·자이로 원본에서 후처리로 뽑는다.
+IMU_SIZE_V0, IMU_SIZE_V1 = 27, 19
 
 # 값 없음 표식
 LATLON_INVALID = -0x80000000
@@ -103,17 +106,14 @@ def parse_nav(r: bytes) -> dict:
 def parse_imu(r: bytes) -> dict:
     acc = struct.unpack_from("<3h", r, 5)
     gyr = struct.unpack_from("<3h", r, 11)
-    quat = struct.unpack_from("<4h", r, 17)
     return {
         "type": "IMU", "local_ms": struct.unpack_from("<I", r, 1)[0],
         "acc_g": tuple(v / 1000.0 for v in acc),
         "gyr_dps": tuple(v / 32.0 for v in gyr),
-        # 넷 다 0 이면 자세 없음. 0 벡터는 회전이 아니라 안전한 표식이다.
-        "quat": None if quat == (0, 0, 0, 0) else tuple(v / 16384.0 for v in quat),
     }
 
 
-def walk(buf: bytes):
+def walk(buf: bytes, imu_size: int = IMU_SIZE_V1):
     """레코드를 훑는다. (레코드, 파일오프셋, 재동기했나) 를 내놓는다."""
     i = HEADER_SIZE
     n = len(buf)
@@ -121,7 +121,7 @@ def walk(buf: bytes):
     resynced = False
     while i < n:
         t = buf[i]
-        size = NAV_SIZE if t == TYPE_NAV else (IMU_SIZE if t == TYPE_IMU else 0)
+        size = NAV_SIZE if t == TYPE_NAV else (imu_size if t == TYPE_IMU else 0)
         ok = False
         if size and i + size <= n:
             want = struct.unpack_from("<H", buf, i + size - 2)[0]
@@ -171,13 +171,16 @@ def main() -> int:
     else:
         print("  첫 fix        없음 (세션 내내 위성을 못 잡았거나 아직 안 채움)")
 
+    # 옛 파일은 IMU 레코드가 27바이트다. 머리글의 판 번호를 보고 고른다.
+    imu_size = IMU_SIZE_V1 if (buf[4], buf[5]) >= (1, 1) else IMU_SIZE_V0
+
     navs, imus, resyncs = [], [], 0
-    for rec, _off, was_resync in walk(buf):
+    for rec, _off, was_resync in walk(buf, imu_size):
         if was_resync:
             resyncs += 1
         (navs if rec["type"] == "NAV" else imus).append(rec)
 
-    used = HEADER_SIZE + len(navs) * NAV_SIZE + len(imus) * IMU_SIZE
+    used = HEADER_SIZE + len(navs) * NAV_SIZE + len(imus) * imu_size
     lost = len(buf) - used
 
     print("─" * 60)
@@ -241,11 +244,10 @@ def main() -> int:
                     r["sog_kn"], r["cog_deg"], r["num_sv"], r["fix"],
                     r["h_acc_m"], r["batt_mv"], r["event"], *r["mag"]]) + "\n")
         with open(args.csv + "_imu.csv", "w") as f:
-            f.write("local_ms,ax,ay,az,gx,gy,gz,qw,qx,qy,qz\n")
+            f.write("local_ms,ax,ay,az,gx,gy,gz\n")
             for r in imus:
-                q = r["quat"] or ("", "", "", "")
                 f.write(",".join(str(v) for v in
-                                 [r["local_ms"], *r["acc_g"], *r["gyr_dps"], *q]) + "\n")
+                                 [r["local_ms"], *r["acc_g"], *r["gyr_dps"]]) + "\n")
         print(f"─ CSV 로 뽑았습니다: {args.csv}_nav.csv / {args.csv}_imu.csv")
 
     print("═" * 60)

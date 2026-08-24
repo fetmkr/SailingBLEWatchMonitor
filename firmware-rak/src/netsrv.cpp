@@ -138,8 +138,9 @@ void handleFiles() {
         // 데스크탑 앱이 "대충 이만한 세션" 이라도 알아야 고를 수 있다.
         const bool closed = (h[hlog::kOffClosed] == 1);
         if (!closed && sz > hlog::kHeaderSize) {
+            const uint32_t imuSz = (h[5] >= 1) ? hlog::kImuSize : hlog::kImuSizeV0;
             const uint32_t perSec = hlog::kNavSize * hlog::kRateNav +
-                                    hlog::kImuSize * hlog::kRateImu;
+                                    imuSz * hlog::kRateImu;
             durS = (sz - hlog::kHeaderSize) / perSec;
         }
 

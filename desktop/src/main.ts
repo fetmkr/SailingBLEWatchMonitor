@@ -10,6 +10,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { fetch as tfetch } from "@tauri-apps/plugin-http";
 import * as hlog from "./hlog";
+import * as lib from "./library";
 import * as tl from "./timeline";
 import "./styles.css";
 
@@ -21,6 +22,13 @@ let marks: number[] = [];
 let view: tl.View = { from: 0, to: 1 };
 let fullSpan: tl.View = { from: 0, to: 1 };
 let cursorMs: number | null = null;
+
+// 보관함
+let library: lib.Library = { version: 1, entries: [] };
+let openId: string | null = null;       // 지금 보고 있는 세션
+let query = "";
+/** 왼쪽에 무엇을 보여줄지. 보관함이 기본이다 — 코치는 대개 이미 받은 걸 본다 */
+let pane: "library" | "board" = "library";
 
 const $ = (id: string) => document.getElementById(id)!;
 const canvas = () => $("plot") as HTMLCanvasElement;
@@ -41,17 +49,17 @@ async function openFile() {
   if (!path || typeof path !== "string") return;
   setStatus("읽는 중…");
   const bytes = await readFile(path);
-  loadBytes(new Uint8Array(bytes), path.split("/").pop() ?? path);
+  await intake(new Uint8Array(bytes), path.split("/").pop() ?? path);
 }
 
-function loadBytes(buf: Uint8Array, name: string) {
+function loadBytes(buf: Uint8Array, name: string): hlog.Session | null {
   const t0 = performance.now();
   let s: hlog.Session;
   try {
     s = hlog.parse(buf);
   } catch (e) {
     setStatus(`읽을 수 없습니다 — ${e}`, "bad");
-    return;
+    return null;
   }
   const ms = performance.now() - t0;
 
@@ -60,6 +68,24 @@ function loadBytes(buf: Uint8Array, name: string) {
   renderHeader(s, name, ms, buf.length);
   fitAll();
   redraw();
+  return s;
+}
+
+/** 읽고, 검사하고, 보관함에 넣는다. TRANSFER.md §4 순서 그대로. */
+async function intake(buf: Uint8Array, name: string) {
+  const s = loadBytes(buf, name);
+  if (!s) return;
+  const c = hlog.check(s);
+  try {
+    const r = await lib.put(library, buf, s.header, c.ok, c.problems);
+    library = r.lib;
+    openId = r.entry.id;
+    renderSide();
+    renderDetails();
+  } catch (e) {
+    // 보관함에 못 넣어도 화면은 이미 그려져 있다. 보는 건 막지 않는다.
+    setStatus(`보관함에 못 넣었습니다 — ${e}`, "bad");
+  }
 }
 
 // ── 값 묶음 만들기 ──────────────────────────────────────────────────────
@@ -82,6 +108,12 @@ function buildSeries(s: hlog.Session) {
     if (r.event & 0x01) marks.push(r.ms - t0);
   }
 
+  // 힐·피치를 어느 축에서 봤나. 머리글에 적혀 있다 (hlog.h 의 표).
+  const hAxis = s.header.heelAxis, pAxis = s.header.pitchAxis;
+  const hSign = s.header.heelSign ? -1 : 1;
+  const pSign = s.header.pitchSign ? -1 : 1;
+  const hOff = s.header.heelOff, pOff = s.header.pitchOff;
+
   const imuX = new Float64Array(s.imu.length);
   const heel = new Float32Array(s.imu.length);
   const pitch = new Float32Array(s.imu.length);
@@ -90,12 +122,14 @@ function buildSeries(s: hlog.Session) {
   for (let i = 0; i < s.imu.length; i++) {
     const r = s.imu[i];
     imuX[i] = r.ms - t0;
-    // 자세는 후처리로 뽑는다. 지금 보드는 쿼터니언을 안 준다 (quat_src=1).
-    // 가속도 한 축에서 바로 구하는 방법은 펌웨어와 같다 (main.cpp 의 "힐과 피치").
+    // 자세는 가속도 원본에서 뽑는다. 어느 축이 힐인지는 머리글에 적혀 있다.
+    // 우리는 실제로 힐 축을 X → Y 로, 부호도 한 번 뒤집었다. 머리글을 안 보고
+    // 고정된 축으로 읽으면 그 전후 파일에서 값이 틀린다.
     const [ax, ay, az_] = r.acc;
+    const a = [ax, ay, az_];
     const mag = Math.hypot(ax, ay, az_) || 1;
-    heel[i] = (Math.asin(clamp(-ay / mag)) * 180) / Math.PI;
-    pitch[i] = (Math.asin(clamp(az_ / mag)) * 180) / Math.PI;
+    heel[i] = (Math.asin(clamp((hSign * a[hAxis]) / mag)) * 180) / Math.PI - hOff;
+    pitch[i] = (Math.asin(clamp((pSign * a[pAxis]) / mag)) * 180) / Math.PI - pOff;
     gz[i] = r.gyr[2];
     az[i] = az_;
   }
@@ -226,17 +260,139 @@ async function listBoard() {
   try {
     const r = await tfetch(`${boardUrl()}/api/files`, { method: "GET" });
     const j = (await r.json()) as { ok: boolean; files: FileInfo[] };
-    renderFileList(j.files ?? []);
+    boardFiles = j.files ?? [];
+    renderSide();
     setStatus(`파일 ${j.files?.length ?? 0}개`, "good");
   } catch (e) {
     setStatus(`보드에 못 붙었습니다 — ${e}`, "bad");
   }
 }
 
+let boardFiles: FileInfo[] = [];
+
+// ── 왼쪽 칸 ─────────────────────────────────────────────────────────────
+//
+// 보관함이 기본이다. 코치는 대개 이미 받아 둔 걸 본다. 보드에서 받는 건
+// 훈련이 끝난 직후 한 번뿐이다.
+function renderSide() {
+  ($("tabLib") as HTMLElement).className = pane === "library" ? "tab on" : "tab";
+  ($("tabBoard") as HTMLElement).className = pane === "board" ? "tab on" : "tab";
+  ($("boardBar") as HTMLElement).style.display = pane === "board" ? "flex" : "none";
+  ($("libBar") as HTMLElement).style.display = pane === "library" ? "flex" : "none";
+  if (pane === "board") renderFileList(boardFiles);
+  else renderLibrary();
+}
+
+const dayText = (t: number) =>
+  new Date(t * 1000).toLocaleDateString("ko-KR", { month: "long", day: "numeric", weekday: "short" });
+const timeText = (t: number) =>
+  new Date(t * 1000).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+
+function renderLibrary() {
+  const box = $("files");
+  const hits = lib.search(library.entries, query);
+  if (!hits.length) {
+    box.innerHTML = library.entries.length
+      ? "<div class='dim pad'>찾는 게 없습니다.</div>"
+      : "<div class='dim pad'>아직 받은 훈련이 없습니다.<br>보드 칸에서 받아오세요.</div>";
+    return;
+  }
+
+  box.innerHTML = lib.byDay(hits).map(({ items }) => {
+    const head = `<div class="day">${dayText(items[0].utcStart || items[0].fetchedAt)}
+        <span class="dim">${items.length}척</span></div>`;
+    const rows = items.map((e) => {
+      const when = e.utcStart ? timeText(e.utcStart) : "—";
+      const dur = tl.formatDuration(e.durationS * 1000);
+      const bad = !e.verified || e.dropped ? "<span class='bad'>●</span>" : "";
+      const who = e.sailor || e.title || `세션 ${e.session}`;
+      const sub = [e.boatClass, e.venue, e.windKn && `${e.windKn}kn`]
+        .filter(Boolean).join(" · ");
+      return `<div class="file ${e.id === openId ? "on" : ""}" data-id="${e.id}">
+        <div>${e.starred ? "★ " : ""}<b>${esc(who)}</b> ${bad}</div>
+        <div class="dim">${when} · ${dur} · ${esc(sub) || e.module.slice(-5)}</div>
+      </div>`;
+    }).join("");
+    return head + rows;
+  }).join("");
+
+  box.querySelectorAll<HTMLElement>(".file").forEach((el) => {
+    el.onclick = () => openEntry(el.dataset.id!);
+  });
+}
+
+const esc = (v: string) =>
+  v.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
+
+async function openEntry(id: string) {
+  const e = library.entries.find((x) => x.id === id);
+  if (!e) return;
+  if (!(await lib.hasFile(e))) {
+    setStatus("보관함에 파일이 없습니다. 다시 받아야 합니다.", "bad");
+    return;
+  }
+  setStatus("읽는 중…");
+  openId = id;
+  loadBytes(await lib.readEntry(e), e.title || e.sailor || e.file);
+  renderSide();
+  renderDetails();
+}
+
+// ── 훈련 정보 적기 ──────────────────────────────────────────────────────
+//
+// 모듈 MAC 만으로는 누가 탔는지 모른다. 조건도 모른다. 코치가 적는다.
+// **원본 파일은 안 건드린다.** 적은 것은 library.json 에만 들어간다.
+const FIELDS: [keyof lib.Entry, string, string][] = [
+  ["title", "제목", "화요일 오전 상승풍"],
+  ["sailor", "선수", "이름"],
+  ["boatClass", "클래스", "ILCA / 470 / 49er / iQFoil"],
+  ["venue", "장소", "왕산 마리나"],
+  ["group", "훈련 묶음", "같은 날 같이 나간 배끼리 같은 값"],
+  ["windKn", "풍속", "8~12"],
+  ["windDir", "풍향", "북서"],
+  ["waves", "파도", "잔잔 / 1m 너울"],
+  ["rig", "리그 세팅", "바텐 텐션 …"],
+  ["notes", "메모", ""],
+];
+
+function renderDetails() {
+  const box = $("details");
+  const e = library.entries.find((x) => x.id === openId);
+  if (!e) { box.innerHTML = ""; return; }
+
+  box.innerHTML = `
+    <div class="drow">
+      <button id="star" class="${e.starred ? "on" : ""}">${e.starred ? "★" : "☆"}</button>
+      <span class="dim">${e.module} · 세션 ${e.session} · ${(e.bytes / 1048576).toFixed(2)} MB</span>
+      ${e.verified ? "<span class='good'>검사 통과</span>" : "<span class='bad'>검사 실패</span>"}
+    </div>
+    ${FIELDS.map(([k, label, ph]) => `
+      <label class="drow"><span>${label}</span>
+        <input data-k="${k}" value="${esc(String(e[k] ?? ""))}" placeholder="${ph}" />
+      </label>`).join("")}`;
+
+  box.querySelectorAll<HTMLInputElement>("input").forEach((inp) => {
+    // 칠 때마다 저장한다. 저장 버튼을 따로 두면 잊고 닫는다.
+    inp.onchange = () => {
+      library = lib.update(library, e.id, { [inp.dataset.k!]: inp.value });
+      renderSide();
+    };
+  });
+  ($("star") as HTMLButtonElement).onclick = () => {
+    library = lib.update(library, e.id, { starred: !e.starred });
+    renderDetails();
+    renderSide();
+  };
+}
+
 function renderFileList(files: FileInfo[]) {
   const box = $("files");
-  if (!files.length) { box.innerHTML = "<div class='dim'>파일이 없습니다.</div>"; return; }
+  if (!files.length) {
+    box.innerHTML = "<div class='dim pad'>보드에서 목록을 받아오세요.</div>";
+    return;
+  }
 
+  const have = new Set(library.entries.map((e) => e.id));
   box.innerHTML = files
     .map((f) => {
       const when = f.utc_start
@@ -245,8 +401,12 @@ function renderFileList(files: FileInfo[]) {
       const dur = f.duration_s ? tl.formatDuration(f.duration_s * 1000) : "?";
       const bad = f.dropped ? `<span class='bad'>버림 ${f.dropped}</span>` : "";
       const notClosed = f.closed === false ? "<span class='bad'>안 닫힘</span>" : "";
-      return `<div class="file" data-name="${f.name}">
-        <div><b>${f.name}</b> <span class="dim">${(f.size / 1048576).toFixed(2)} MB</span></div>
+      // 이미 받은 것은 흐리게. 같은 걸 두 번 받을 이유가 없다.
+      const mine = f.module && f.session !== undefined
+        && have.has(lib.entryId(f.module, f.session));
+      return `<div class="file ${mine ? "got" : ""}" data-name="${f.name}">
+        <div><b>${f.name}</b> <span class="dim">${(f.size / 1048576).toFixed(2)} MB</span>
+          ${mine ? "<span class='good'>받음</span>" : ""}</div>
         <div class="dim">세션 ${f.session ?? "?"} · ${when} · ${dur} ${bad} ${notClosed}</div>
       </div>`;
     })
@@ -263,7 +423,7 @@ async function fetchFile(name: string) {
     const r = await tfetch(`${boardUrl()}/file/${name}`, { method: "GET" });
     if (!r.ok) { setStatus(`받기 실패 — HTTP ${r.status}`, "bad"); return; }
     const buf = new Uint8Array(await r.arrayBuffer());
-    loadBytes(buf, name);
+    await intake(buf, name);
   } catch (e) {
     setStatus(`받기 실패 — ${e}`, "bad");
   }
@@ -275,7 +435,7 @@ async function fetchFile(name: string) {
 async function loadSample() {
   setStatus("시험용 데이터를 읽는 중…");
   const r = await fetch("/sample.HLG");
-  loadBytes(new Uint8Array(await r.arrayBuffer()), "sample.HLG (시험용)");
+  await intake(new Uint8Array(await r.arrayBuffer()), "sample.HLG (시험용)");
 }
 
 function wire() {
@@ -283,6 +443,12 @@ function wire() {
   $("sample").onclick = loadSample;
   $("list").onclick = listBoard;
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
+  $("tabLib").onclick = () => { pane = "library"; renderSide(); };
+  $("tabBoard").onclick = () => { pane = "board"; renderSide(); };
+  ($("q") as HTMLInputElement).oninput = (e) => {
+    query = (e.target as HTMLInputElement).value;
+    renderLibrary();
+  };
 
   const c = canvas();
 
@@ -413,6 +579,8 @@ function wire() {
 wire();
 redraw();
 setStatus("파일을 열거나 보드에서 받으세요.");
+
+lib.load().then((l) => { library = l; renderSide(); });
 
 // 만드는 중에는 시험용 데이터를 바로 띄운다. 배포판에서는 안 그런다.
 if (import.meta.env.DEV) loadSample();
