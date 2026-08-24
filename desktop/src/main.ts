@@ -572,9 +572,9 @@ async function listBoard() {
     const r = await askBoard("/api/files", 25000);
     const j = (await r.json()) as { ok: boolean; files: FileInfo[] };
     boardFiles = j.files ?? [];
-    // 목록이 왔으면 붙어 있는 것이다. 주소를 손으로 친 경우도 여기서 숨을
-    // 쉬기 시작한다 — 그래야 앱을 닫았을 때 보드가 알아서 꺼진다.
-    breatheStart();
+    // 목록이 왔으면 붙어 있는 것이다. 주소를 손으로 친 경우도 여기서부터
+    // 연락을 보낸다 — 그래야 앱을 닫았을 때 보드가 알아서 꺼진다.
+    keepAliveStart();
     renderSide();
     setProgress(null);
     setStatus(`파일 ${j.files?.length ?? 0}개 — 받을 것을 고르세요`, "good");
@@ -599,9 +599,9 @@ function renderSide() {
   ($("hostBar") as HTMLElement).style.display =
     pane === "board" && (byHand || !ble.usable) ? "flex" : "none";
   ($("boards") as HTMLElement).style.display = pane === "board" ? "block" : "none";
-  // 연결 해제는 붙어 있을 때만 뜬다. 숨을 쉬고 있으면 붙어 있는 것이다.
+  // 연결 해제는 붙어 있을 때만 뜬다. 연락을 보내고 있으면 붙어 있는 것이다.
   ($("btDrop") as HTMLElement).style.display =
-    pane === "board" && beat !== null ? "inline-block" : "none";
+    pane === "board" && pinger !== null ? "inline-block" : "none";
   if (pane === "board") { renderBoards(); renderFileList(boardFiles); }
   else { $("boards").innerHTML = ""; renderLibrary(); }
 }
@@ -730,7 +730,7 @@ async function wake(b: ble.Board) {
       return;
     }
     setStatus(`${b.name} 준비됐습니다 — ${found}`, "good");
-    breatheStart();
+    keepAliveStart();
     await listBoard();
   } catch (e) {
     setProgress(null);
@@ -765,46 +765,46 @@ async function waitForBoard(hosts: string[], ms: number): Promise<string | null>
   return null;
 }
 
-// ── 숨쉬기 ───────────────────────────────────────────────────────────────
+// ── 4초마다 연락하기 ────────────────────────────────────────────────────
 //
-// 보드 WiFi 를 켜 두면 전기를 먹고 BLE 도 안 돌아온다. 그러니 다 쓰면 꺼야
-// 하는데, 사람에게 "다 받았으면 이 단추를 누르세요" 라고 시킬 일이 아니다.
+// 보드 WiFi 를 켜 두면 전기를 먹고 BLE 도 안 돌아온다. 다 쓰면 꺼야 한다.
+// 그런데 사람에게 "다 받았으면 이 단추를 누르세요" 라고 시킬 일이 아니다.
 // 안 누르고 노트북을 덮으면 그만이다.
 //
-// 그래서 앱이 몇 초에 한 번씩 보드에게 말을 건다. **말이 끊기면 보드가
-// 스스로 끈다.** 앱이 죽든 노트북을 덮든 배가 멀어지든 이유를 따질 필요가
-// 없다 — 말이 끊긴 것 하나면 충분하다.
+// 그래서 앱이 4초마다 보드에 짧은 요청을 보낸다. 요청이 끊기면 보드가
+// 15초 뒤에 스스로 끈다. 앱이 죽었는지, 노트북을 덮었는지, 배가 멀어졌는지
+// 따질 필요가 없다. 요청이 안 오는 것 하나로 충분하다.
 //
-//   빌리는 시간   15초    이만큼 말이 없으면 보드가 끈다
-//   숨 쉬는 주기   4초    네 번까지 놓쳐도 안 끊긴다
+//   빌리는 시간   15초    이만큼 요청이 없으면 보드가 끈다
+//   보내는 주기    4초    세 번까지 놓쳐도 안 끊긴다
 const LEASE_S = 15;
-const BEAT_MS = 4000;
-let beat: ReturnType<typeof setInterval> | null = null;
+const PING_MS = 4000;
+let pinger: ReturnType<typeof setInterval> | null = null;
 
-function breatheStart() {
-  if (beat) return;
+function keepAliveStart() {
+  if (pinger) return;
   const tick = async () => {
-    // 파일을 받는 중이면 쉰다. 보드는 한 번에 한 사람만 상대할 수 있고,
-    // 받는 동안에는 그것만으로도 살아 있다는 표시가 된다.
+    // 파일을 받는 중이면 보내지 않는다. 보드는 한 번에 한 사람만 상대하고,
+    // 받는 것 자체가 앱이 살아 있다는 표시다.
     if (fetching) return;
     try { await askBoard(`/api/ping?lease=${LEASE_S}`, 5000); }
-    catch { /* 한 번 놓치는 건 괜찮다. 네 번까지 견딘다 */ }
+    catch { /* 한 번 놓치는 건 괜찮다. 세 번까지 견딘다 */ }
   };
   void tick();
-  beat = setInterval(() => void tick(), BEAT_MS);
+  pinger = setInterval(() => void tick(), PING_MS);
   renderSide();
 }
 
-function breatheStop() {
-  if (!beat) return;
-  clearInterval(beat);
-  beat = null;
+function keepAliveStop() {
+  if (!pinger) return;
+  clearInterval(pinger);
+  pinger = null;
   renderSide();
 }
 
-/** 다 썼다고 알린다. 안 되면 그만이다 — 숨이 끊기면 보드가 알아서 끈다. */
+/** 다 썼다고 알린다. 못 해도 그만이다 — 요청이 끊기면 보드가 알아서 끈다. */
 async function sleepBoard(quiet = false) {
-  breatheStop();
+  keepAliveStop();
   try {
     await askBoard("/api/wifi/off", 4000);
     boardFiles = [];
@@ -1763,9 +1763,9 @@ function wire() {
 
   // 앱을 닫으면 보드 WiFi 도 끈다.
   //
-  // 이건 "빨리 끄기" 일 뿐이고 못 해도 괜찮다. 숨이 끊기면 보드가 15초 뒤에
+  // 이건 빨리 끄려는 것뿐이고 못 해도 괜찮다. 연락이 끊기면 보드가 15초 뒤에
   // 스스로 끈다. 창이 닫히는 중이라 답을 기다릴 수도 없다.
-  addEventListener("beforeunload", () => { if (beat) void sleepBoard(true); });
+  addEventListener("beforeunload", () => { if (pinger) void sleepBoard(true); });
   addEventListener("dragover", (e) => e.preventDefault());
 }
 
