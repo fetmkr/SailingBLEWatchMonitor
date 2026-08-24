@@ -11,6 +11,14 @@ namespace sail {
 // ── 식별자 ───────────────────────────────────────────────────────────────
 static constexpr const char* kServiceUUID   = "b0a70001-0000-4000-8000-000000000001";
 static constexpr const char* kTelemetryUUID = "b0a70002-0000-4000-8000-000000000001";
+// 설정 통로. 글자 한 줄을 써 넣으면 한 줄로 답한다 (PROTOCOL.md §9).
+// WiFi 이름·비밀번호를 넣고, 받을 때만 WiFi 를 켜는 데 쓴다.
+static constexpr const char* kControlUUID   = "b0a70003-0000-4000-8000-000000000001";
+
+// 한 줄의 최대 길이. BLE 한 번에 들어가는 크기(기본 MTU 23 → 20바이트)보다
+// 크지만, 요즘 폰·맥은 MTU 를 185 이상으로 올려 잡는다. 넘치면 잘라 보낸다.
+static constexpr size_t kControlLineMax = 180;
+
 
 // 광고 이름은 "SAIL-" + 사용자 지정 이름. 앱은 이 접두사로 우리 모듈을 골라낸다.
 //   예) SAIL-hojun

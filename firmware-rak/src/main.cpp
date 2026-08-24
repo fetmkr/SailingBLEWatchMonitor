@@ -2416,6 +2416,137 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 };
 
 // ── Characteristic 콜백 ─────────────────────────────────────────────────
+// ── 설정 통로 (BLE) ──────────────────────────────────────────────────────
+//
+// 글자 한 줄을 써 넣으면 한 줄로 답한다. 규격은 PROTOCOL.md §9.
+//
+// 왜 글자냐면 — 시리얼 명령과 같은 말을 쓰려는 것이다. 새 규격을 외울 게
+// 없고, 앱이 없어도 시리얼로 똑같이 시험할 수 있다.
+//
+// ★ "wifi on" 을 받으면 답을 **먼저** 보내고 나서 WiFi 를 켠다.
+//   WiFi 가 켜지는 순간 BLE 가 내려가서 그 뒤로는 아무 말도 못 한다.
+//   그래서 답에 "어디로 찾아오라" 를 미리 다 적어 준다.
+static NimBLECharacteristic* gControlChr = nullptr;
+
+// WiFi 를 켜는 일은 콜백 안에서 하면 안 된다. NimBLE 안쪽에서 부르는데
+// 거기서 BLE 를 내리면 자기 발등을 찍는다. 깃발만 세우고 loop 에서 한다.
+static volatile uint8_t gWifiWant = 0;   // 0 없음, 1 join, 2 ap, 3 off
+
+static void controlSay(const char* line) {
+    Serial.printf("[CTL] → %s\n", line);
+    if (!gControlChr) return;
+    gControlChr->setValue((const uint8_t*)line, strlen(line));
+    gControlChr->notify();
+}
+
+/** 한 줄을 처리한다. 시리얼에서도 부를 수 있게 따로 뒀다. */
+static void controlLine(const char* raw) {
+    String line(raw);
+    line.trim();
+    if (line.length() == 0) return;
+    Serial.printf("[CTL] ← %s\n", line.c_str());
+
+    char out[240];
+
+    // wifi ssid <이름>
+    if (line.startsWith("wifi ssid ")) {
+        String v = line.substring(10); v.trim();
+        netsrv::setCreds(v.c_str(), nullptr);
+        snprintf(out, sizeof(out), "ok wifi ssid %s", v.c_str());
+        controlSay(out);
+        return;
+    }
+    // wifi pass <비밀번호>
+    if (line.startsWith("wifi pass ")) {
+        String v = line.substring(10);       // 뒤 공백도 비밀번호일 수 있다
+        netsrv::setCreds(netsrv::staSsid(), v.c_str());
+        // ★ 비밀번호는 되읽어 주지 않는다. 길이만 알린다.
+        snprintf(out, sizeof(out), "ok wifi pass %u자", (unsigned)v.length());
+        controlSay(out);
+        return;
+    }
+    // wifi scan — BLE 를 안 내리고 할 수 있다
+    if (line == "wifi scan") {
+        netsrv::ScanEntry list[20];
+        const int n = netsrv::scan(list, 20);
+        snprintf(out, sizeof(out), "scan begin %d", n);
+        controlSay(out);
+        for (int i = 0; i < n; i++) {
+            snprintf(out, sizeof(out), "scan %d %d %s %s",
+                     i, (int)list[i].rssi, list[i].locked ? "lock" : "open",
+                     list[i].ssid);
+            controlSay(out);
+        }
+        controlSay("scan end");
+        return;
+    }
+    // wifi on / wifi ap — 답을 먼저 보내고 켠다
+    if (line == "wifi on" || line == "wifi join") {
+        if (hlog::recording()) { controlSay("err wifi recording"); return; }
+        const char* ss = netsrv::staSsid();
+        if (!ss || !*ss) { controlSay("err wifi no-ssid"); return; }
+        // 붙고 나면 주소는 공유기가 준다. 미리 못 알려주니 이름으로 찾으라고 한다.
+        snprintf(out, sizeof(out), "ok wifi joining %s mdns %s.local",
+                 ss, netsrv::mdnsHost());
+        controlSay(out);
+        gWifiWant = 1;
+        return;
+    }
+    if (line == "wifi ap") {
+        if (hlog::recording()) { controlSay("err wifi recording"); return; }
+        // AP 는 이름도 주소도 미리 안다. 그대로 알려준다.
+        snprintf(out, sizeof(out), "ok wifi ap %s pass %s ip 192.168.4.1",
+                 gFullName, netsrv::apPass());
+        controlSay(out);
+        gWifiWant = 2;
+        return;
+    }
+    if (line == "wifi off") { controlSay("ok wifi off"); gWifiWant = 3; return; }
+
+    // wifi idle <초> — 아무도 안 쓰면 저절로 끄기까지의 시간. 0 이면 안 끈다
+    if (line.startsWith("wifi idle ")) {
+        const uint32_t sec = (uint32_t)line.substring(10).toInt();
+        netsrv::setIdleOff(sec);
+        snprintf(out, sizeof(out), "ok wifi idle %lu", (unsigned long)sec);
+        controlSay(out);
+        return;
+    }
+    if (line == "wifi status" || line == "status") {
+        snprintf(out, sizeof(out),
+                 "status name %s mode %s ip %s rec %s idle %lus left %lus",
+                 gFullName,
+                 netsrv::mode() == netsrv::Mode::Off ? "off"
+                   : netsrv::mode() == netsrv::Mode::AP ? "ap" : "join",
+                 netsrv::ipText(), hlog::recording() ? "on" : "off",
+                 (unsigned long)netsrv::idleOffSec(),
+                 (unsigned long)(netsrv::idleLeftMs() / 1000));
+        controlSay(out);
+        return;
+    }
+    if (line == "help") {
+        controlSay("cmds: wifi ssid|pass|scan|on|ap|off|status");
+        return;
+    }
+    snprintf(out, sizeof(out), "err unknown %s", line.c_str());
+    controlSay(out);
+}
+
+class ControlCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        (void)info;
+        const std::string v = chr->getValue();
+        // 한 번에 여러 줄이 올 수도 있다. 줄 단위로 끊어 처리한다.
+        String buf(v.c_str());
+        int at = 0;
+        while (at < (int)buf.length()) {
+            int nl = buf.indexOf('\n', at);
+            if (nl < 0) nl = buf.length();
+            controlLine(buf.substring(at, nl).c_str());
+            at = nl + 1;
+        }
+    }
+};
+
 class TelemetryCallbacks : public NimBLECharacteristicCallbacks {
     void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
         (void)chr;
@@ -2565,6 +2696,17 @@ static void handleCommand(String line) {
             Serial.println("[NET] WiFi 껐습니다.");
             return;
         }
+        // 아래는 BLE 설정 통로와 **같은 말**을 쓴다. 앱 없이 여기서 시험한다.
+        //   wifi ssid <이름> / wifi pass <비번> / wifi scan / wifi status
+        if (arg.startsWith("ssid ") || arg.startsWith("pass ") ||
+            arg == "scan" || arg == "status" || arg == "on" ||
+            arg.startsWith("idle ")) {
+            // 대소문자를 이미 내렸다. 이름·비밀번호는 원문이 필요하다.
+            String orig = line.substring(5);
+            orig.trim();
+            controlLine((String("wifi ") + orig).c_str());
+            return;
+        }
 
         Serial.println("──────────────────────────────────────────");
         switch (netsrv::mode()) {
@@ -2586,8 +2728,14 @@ static void handleCommand(String line) {
                       netsrv::servedBytes() / 1048576.0);
         Serial.println("──────────────────────────────────────────");
         Serial.println("  wifi ap    보드가 스스로 WiFi 를 만든다 (바닷가용)");
-        Serial.println("  wifi join  아는 WiFi 에 붙는다 (secrets.h)");
+        Serial.println("  wifi join  저장된 WiFi 에 붙는다");
         Serial.println("  wifi off   끈다");
+        Serial.println("  ─ 아래는 BLE 설정 통로와 같은 말이다 ─");
+        Serial.println("  wifi ssid <이름>   붙을 WiFi 이름 (전원 빼도 남는다)");
+        Serial.println("  wifi pass <비번>   비밀번호");
+        Serial.println("  wifi scan          주변 WiFi 훑기 (BLE 안 내리고 된다)");
+        Serial.println("  wifi idle <초>     아무도 안 쓰면 끄기까지 (0 이면 안 끔)");
+        Serial.println("  wifi status        지금 상태");
         return;
     }
 
@@ -2982,6 +3130,14 @@ void sailBleStart() {
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     gTelemetryChr->setCallbacks(new TelemetryCallbacks());
 
+    // 설정 통로. 써 넣으면 한 줄로 답한다 (PROTOCOL.md §9).
+    gControlChr = svc->createCharacteristic(
+        sail::kControlUUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+        NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ);
+    gControlChr->setCallbacks(new ControlCallbacks());
+    gControlChr->setValue("ready");
+
     uint8_t initial[sail::kTelemetryExtLen];
     sail::encodeTelemetryExt(gLatest, buildExtra(), initial);
     gTelemetryChr->setValue(initial, sizeof(initial));
@@ -3002,6 +3158,7 @@ void sailBleStop() {
     NimBLEDevice::deinit(true);
     gServer       = nullptr;
     gTelemetryChr = nullptr;
+    gControlChr   = nullptr;
     gConnected    = false;
     Serial.println("[BLE] 내렸습니다 (WiFi 쓰는 동안). wifi off 하면 돌아옵니다.");
 }
@@ -3193,6 +3350,20 @@ void loop() {
             }
         }
         secDone(gStNotify, micros() - tN);
+    }
+
+    // 3b) BLE 로 시킨 WiFi 켜고 끄기.
+    //
+    // ★ 콜백 안에서 하면 안 된다. NimBLE 안쪽에서 부르는데 거기서 BLE 를
+    //   내리면 자기 발등을 찍는다. 깃발만 세워 두고 여기서 처리한다.
+    if (gWifiWant) {
+        const uint8_t want = gWifiWant;
+        gWifiWant = 0;
+        // 답이 폰에 닿을 시간을 준다. 이 뒤로 BLE 가 내려간다.
+        delay(150);
+        if (want == 1) netsrv::startJoin();
+        else if (want == 2) netsrv::startAP();
+        else netsrv::stop();
     }
 
     // 4) 광고 모드 전환 (연결/해제 직후, 또는 이름 변경 직후 한 번)

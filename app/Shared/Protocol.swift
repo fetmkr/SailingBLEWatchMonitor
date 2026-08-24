@@ -22,6 +22,8 @@ enum SailProtocol {
 
     static let serviceUUID   = CBUUID(string: "B0A70001-0000-4000-8000-000000000001")
     static let telemetryUUID = CBUUID(string: "B0A70002-0000-4000-8000-000000000001")
+    /// 설정 통로. 글자 한 줄을 써 넣으면 한 줄로 답한다 (PROTOCOL.md §9).
+    static let controlUUID   = CBUUID(string: "B0A70003-0000-4000-8000-000000000001")
 
     /// 미할당(테스트용) Company ID
     static let companyID: UInt16 = 0xFFFF

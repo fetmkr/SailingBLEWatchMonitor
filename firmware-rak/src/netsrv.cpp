@@ -6,6 +6,7 @@
 #include <ESPmDNS.h>
 #include <SD.h>
 #include <SPI.h>
+#include <Preferences.h>
 
 #include "board_rak.h"
 #include "hlog.h"
@@ -28,6 +29,79 @@ uint32_t  gServedFiles = 0;
 uint64_t  gServedBytes = 0;
 bool      gSdUp = false;
 
+// ── 언제 WiFi 를 끄나 ────────────────────────────────────────────────────
+//
+// BLE 로 "WiFi 켜" 를 시키면 그 순간 BLE 가 내려간다. 그래서 언제 다시
+// 끌지가 중요하다. 켠 채로 남으면 전기를 먹고 BLE 도 안 돌아온다.
+//
+// **시간을 재서 끄는 건 마지막 수단이다.** 세 겹으로 둔다.
+//
+//   1) 앱이 "다 받았다" 고 말한다        POST /api/wifi/off   ← 제일 정확하다
+//   2) 쓰던 상대가 사라지면 바로 끈다     아래 onWifiEvent()
+//        AP  마지막 한 대가 떨어지면
+//        접속  붙어 있던 공유기를 놓치면 (어차피 아무 일도 못 한다)
+//   3) 그래도 아무 일이 없으면 시간       gIdleOffMs
+//
+// 2번이 실제 사건이라 제일 빠르다. 노트북을 덮으면 몇 초 안에 꺼진다.
+// 3번은 "앱도 안 부르고 붙지도 않은" 경우만 걸린다 — 켜 놓고 잊은 때다.
+uint32_t  gIdleOffMs = 5 * 60 * 1000;   // 0 이면 안 끈다
+uint32_t  gLastUse = 0;
+
+// 상대가 떨어졌다. 곧 끈다.
+//
+// 바로 안 끄고 조금 기다리는 이유 — WiFi 는 잠깐 끊겼다 다시 붙는 일이 흔하다.
+// 노트북이 채널을 옮기거나 잠깐 졸 때 그렇다. 그 사이에 꺼 버리면 사람은
+// 아무것도 안 했는데 연결이 죽는다.
+constexpr uint32_t kGoneGraceMs = 8000;
+uint32_t  gGoneAt = 0;          // 0 이면 상대가 붙어 있다
+
+void used() { gLastUse = millis(); gGoneAt = 0; }
+
+// ── WiFi 이름·비밀번호 ──────────────────────────────────────────────────
+//
+// 예전에는 secrets.h 에 박아 두고 다시 구웠다. 배가 30대면 대회장 WiFi 가
+// 바뀔 때마다 30대를 노트북에 꽂아야 한다.
+//
+// 이제 NVS 에 둔다. BLE 로 넣을 수 있다 (PROTOCOL.md §9).
+// NVS 가 비어 있으면 secrets.h 값을 쓴다 — 내 책상에서는 그게 편하다.
+Preferences gWifiPrefs;
+char gStaSsid[33] = {0};
+char gStaPass[65] = {0};
+
+// WiFi 쪽에서 오는 사건. 상대가 붙고 떨어지는 것을 여기서 안다.
+void onWifiEvent(arduino_event_id_t ev) {
+    switch (ev) {
+        case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+            Serial.printf("[NET] 붙었습니다 (%u대)\n", WiFi.softAPgetStationNum());
+            used();
+            break;
+        case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+            if (WiFi.softAPgetStationNum() == 0) {
+                Serial.println("[NET] 쓰던 기기가 떨어졌습니다. 곧 끕니다.");
+                gGoneAt = millis();
+            }
+            break;
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            // 붙어 있던 공유기를 놓쳤다. 이 상태로는 아무것도 못 한다.
+            if (gMode == Mode::Join) {
+                Serial.println("[NET] WiFi 를 놓쳤습니다. 곧 끕니다.");
+                gGoneAt = millis();
+            }
+            break;
+        default: break;
+    }
+}
+
+void loadCreds() {
+    gWifiPrefs.begin("wifi", /*readOnly=*/true);
+    String ss = gWifiPrefs.getString("ssid", "");
+    String pw = gWifiPrefs.getString("pass", "");
+    gWifiPrefs.end();
+    if (ss.length() == 0) { ss = SAIL_WIFI_SSID; pw = SAIL_WIFI_PASS; }
+    snprintf(gStaSsid, sizeof(gStaSsid), "%s", ss.c_str());
+    snprintf(gStaPass, sizeof(gStaPass), "%s", pw.c_str());
+}
+
 // AP 비밀번호. secrets.h 에 없으면 여기 기본값을 쓴다.
 // ★ 진짜 값은 secrets.h 에만 둔다. 이 파일은 커밋된다.
 #ifndef SAIL_AP_PASS
@@ -48,6 +122,7 @@ void sdDown() {
 // 브라우저나 데스크탑 앱이 다른 출처에서 부를 수 있게 열어 둔다.
 // 이 서버는 우리 보드가 만든 닫힌 망에만 있고 비밀도 없다.
 void cors() {
+    used();
     gServer.sendHeader("Access-Control-Allow-Origin", "*");
     gServer.sendHeader("Access-Control-Allow-Headers", "*");
     gServer.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -260,6 +335,7 @@ void handleFile() {
         gServer.client().write(buf, (size_t)got);
         usWrite += micros() - t;
         left -= (uint32_t)got;
+        used();          // 90 MB 를 보내는 중에 저절로 꺼지면 안 된다
     }
     f.close();
 
@@ -364,6 +440,19 @@ void handleRoot() {
 // Join 모드에서는 공유기가 IP 를 주므로 미리 알 수 없다. 30대를 회수할 때
 // 한 대씩 IP 를 찾아다닐 수는 없다. `_sail._tcp` 를 찾으면 켜져 있는 보드가
 // 다 나온다 (TRANSFER.md §3).
+// 이 보드의 mDNS 이름. "SAIL-random()" → "sail-random"
+// BLE 로 "붙고 나면 이 이름으로 찾아와" 라고 알려줄 때도 쓴다.
+void mdnsHostInto(char* host, size_t cap) {
+    size_t j = 0;
+    for (const char* p = ::sailFullName(); *p && j < cap - 1; ++p) {
+        const char c = *p;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') host[j++] = c;
+        else if (c >= 'A' && c <= 'Z') host[j++] = (char)(c - 'A' + 'a');
+    }
+    host[j] = '\0';
+    if (j == 0) snprintf(host, cap, "sail");
+}
+
 void startMdns() {
     // ★ 이름은 **배 이름**으로 짓는다. 붙은 WiFi 이름으로 지으면 안 된다.
     //
@@ -376,14 +465,7 @@ void startMdns() {
     //
     // 이름에 쓸 수 없는 글자는 뺀다. "SAIL-random()" → "sail-random"
     char host[32];
-    size_t j = 0;
-    for (const char* p = ::sailFullName(); *p && j < sizeof(host) - 1; ++p) {
-        const char c = *p;
-        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') host[j++] = c;
-        else if (c >= 'A' && c <= 'Z') host[j++] = (char)(c - 'A' + 'a');
-    }
-    host[j] = '\0';
-    if (j == 0) snprintf(host, sizeof(host), "sail");
+    mdnsHostInto(host, sizeof(host));
 
     if (MDNS.begin(host)) {
         MDNS.addService("sail", "tcp", 80);
@@ -426,8 +508,22 @@ void handleSpeed() {
                   dt ? total / 1.024f / dt : 0.0f);
 }
 
+// 다 받았으면 앱이 이걸 부른다. 보드가 WiFi 를 끄고 BLE 로 돌아온다.
+//
+// 왜 BLE 로 안 끄냐면 — WiFi 가 켜져 있는 동안은 BLE 가 내려가 있어서
+// 보드가 BLE 말을 못 듣는다. 지금 붙어 있는 길로 시키는 게 맞다.
+void handleWifiOff() {
+    cors();
+    gServer.send(200, "application/json", "{\"ok\":true,\"wifi\":\"off\"}");
+    gServer.client().flush();
+    delay(120);            // 답을 다 보내고 나서 끊는다
+    stop();
+}
+
 void routes() {
     gServer.on("/", HTTP_GET, handleRoot);
+    gServer.on("/api/wifi/off", HTTP_POST, handleWifiOff);
+    gServer.on("/api/wifi/off", HTTP_GET,  handleWifiOff);
     gServer.on("/api/status", HTTP_GET, handleStatus);
     gServer.on("/api/files", HTTP_GET, handleFiles);
     gServer.on("/api/speed", HTTP_GET, handleSpeed);
@@ -452,6 +548,7 @@ bool startAP() {
     snprintf(gSsid, sizeof(gSsid), "%s", ::sailFullName());
     ::sailBleStop();          // 이름을 읽은 뒤에 내린다
 
+    WiFi.onEvent(onWifiEvent);
     WiFi.mode(WIFI_AP);
     if (!WiFi.softAP(gSsid, SAIL_AP_PASS)) {
         Serial.println("[NET] AP 를 못 열었습니다.");
@@ -487,15 +584,18 @@ bool startAP() {
 }
 
 bool startJoin(uint32_t timeoutMs) {
-    if (strlen(SAIL_WIFI_SSID) == 0) {
-        Serial.println("[NET] secrets.h 에 WiFi 이름이 비어 있습니다.");
+    loadCreds();
+    if (strlen(gStaSsid) == 0) {
+        Serial.println("[NET] 붙을 WiFi 이름이 없습니다.");
+        Serial.println("      BLE 로 넣거나 secrets.h 에 적으세요.");
         return false;
     }
     stop();
     ::sailBleStop();
+    WiFi.onEvent(onWifiEvent);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(SAIL_WIFI_SSID, SAIL_WIFI_PASS);
-    Serial.printf("[NET] %s 에 붙는 중", SAIL_WIFI_SSID);
+    WiFi.begin(gStaSsid, gStaPass);
+    Serial.printf("[NET] %s 에 붙는 중", gStaSsid);
 
     const uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) {
@@ -512,7 +612,7 @@ bool startJoin(uint32_t timeoutMs) {
     // 라디오를 재우지 않는다. 자세히는 startAP 의 주석.
     WiFi.setSleep(false);
 
-    snprintf(gSsid, sizeof(gSsid), "%s", SAIL_WIFI_SSID);
+    snprintf(gSsid, sizeof(gSsid), "%s", gStaSsid);
     snprintf(gIp, sizeof(gIp), "%s", WiFi.localIP().toString().c_str());
     routes();
     gServer.begin();
@@ -529,9 +629,11 @@ void stop() {
         gServer.stop();
         sdDown();
     }
+    WiFi.removeEvent(onWifiEvent);
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     gMode = Mode::Off;
+    gGoneAt = 0;
     gIp[0] = '\0';
     // WiFi 를 끄면 BLE 를 되살린다. 워치와 아이폰이 다시 붙는다.
     if (wasUp) ::sailBleStart();
@@ -540,6 +642,75 @@ void stop() {
 void poll() {
     if (gMode == Mode::Off) return;
     gServer.handleClient();
+
+    // 1) 쓰던 상대가 사라졌다 — 이게 제일 빠른 신호다
+    if (gGoneAt && millis() - gGoneAt > kGoneGraceMs) {
+        // AP 라면 그 사이에 누가 다시 붙었을 수도 있다. 한 번 더 본다.
+        if (gMode == Mode::AP && WiFi.softAPgetStationNum() > 0) {
+            gGoneAt = 0;
+        } else {
+            Serial.println("[NET] 쓰던 기기가 사라져서 WiFi 를 끕니다.");
+            stop();
+            return;
+        }
+    }
+
+    // 2) 아무 일도 없으면 시간으로. 켜 놓고 잊은 경우만 여기까지 온다.
+    if (gIdleOffMs && millis() - gLastUse > gIdleOffMs) {
+        Serial.printf("[NET] %lu초 동안 아무도 안 써서 WiFi 를 끕니다.\n",
+                      (unsigned long)(gIdleOffMs / 1000));
+        stop();
+    }
+}
+
+void setIdleOff(uint32_t seconds) { gIdleOffMs = seconds * 1000UL; used(); }
+uint32_t idleOffSec() { return gIdleOffMs / 1000; }
+
+const char* mdnsHost() {
+    static char host[32];
+    mdnsHostInto(host, sizeof(host));
+    return host;
+}
+
+const char* apPass() { return SAIL_AP_PASS; }
+
+uint32_t idleLeftMs() {
+    if (gMode == Mode::Off || !gIdleOffMs) return 0;
+    const uint32_t gone = millis() - gLastUse;
+    return gone >= gIdleOffMs ? 0 : gIdleOffMs - gone;
+}
+
+void setCreds(const char* ssid, const char* pass) {
+    gWifiPrefs.begin("wifi", /*readOnly=*/false);
+    gWifiPrefs.putString("ssid", ssid ? ssid : "");
+    if (pass) gWifiPrefs.putString("pass", pass);
+    gWifiPrefs.end();
+    loadCreds();
+}
+
+const char* staSsid() { loadCreds(); return gStaSsid; }
+
+// 주변 WiFi 훑기.
+//
+// ★ 이건 BLE 를 내리지 않고 할 수 있다. WiFi 절전을 끄지만 않으면 둘이
+//   같이 돌아간다. 절전을 끄려 했을 때만 칩이 죽었다.
+//   (main.cpp 의 sailBleStop 주석 참조)
+int scan(ScanEntry* out, int max) {
+    const bool wasOff = (gMode == Mode::Off);
+    if (wasOff) WiFi.mode(WIFI_STA);
+    const int n = WiFi.scanNetworks();
+    int k = 0;
+    for (int i = 0; i < n && k < max; i++) {
+        const String nm = WiFi.SSID(i);
+        if (nm.length() == 0) continue;          // 이름 숨긴 것은 고를 수가 없다
+        snprintf(out[k].ssid, sizeof(out[k].ssid), "%s", nm.c_str());
+        out[k].rssi = WiFi.RSSI(i);
+        out[k].locked = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+        k++;
+    }
+    WiFi.scanDelete();
+    if (wasOff) WiFi.mode(WIFI_OFF);
+    return k;
 }
 
 Mode        mode()        { return gMode; }

@@ -335,3 +335,88 @@ AD 구조 전체는 `[len=0x0C][type=0xFF][FF FF][9바이트 페이로드]` = 13
 
 - `ver` 필드가 `0x01` 이 아니면 수신 측은 해당 패킷을 **무시**한다.
 - 페이로드 길이가 규정보다 짧으면 무시. 길면 앞부분만 파싱(전방 호환).
+
+---
+
+## 9. 설정 통로 (BLE) — v1.2
+
+특성 UUID `B0A70003-0000-4000-8000-000000000001`  (WRITE / WRITE_NR / NOTIFY / READ)
+
+글자 한 줄을 써 넣으면 한 줄로 답한다. 여러 줄을 한 번에 써도 되고,
+줄바꿈(`\n`)으로 끊는다. 한 줄은 180바이트 안이어야 한다.
+
+**시리얼 명령과 같은 말을 쓴다.** 앱이 없어도 USB 로 똑같이 시험할 수 있고,
+새로 외울 규격이 없다.
+
+### 왜 이게 필요한가
+
+WiFi 이름과 비밀번호가 `secrets.h` 에 박혀 있었다. 배가 30대면 대회장
+WiFi 가 바뀔 때마다 30대를 노트북에 꽂아 다시 구워야 한다.
+
+그리고 WiFi 를 늘 켜 두면 전기를 먹는다. 파일을 옮길 때만 켜는 게 맞다.
+그런데 꺼 두면 앱이 보드를 찾을 수가 없다 — BLE 광고는 늘 나가고 있으니
+BLE 로 찾아서 BLE 로 켜라고 시킨다.
+
+### 보내는 말
+
+| 줄 | 하는 일 |
+|---|---|
+| `wifi ssid <이름>` | 붙을 WiFi 이름. NVS 에 남는다 |
+| `wifi pass <비밀번호>` | 비밀번호. NVS 에 남는다 |
+| `wifi scan` | 주변 WiFi 훑기. **BLE 를 안 내리고 된다** |
+| `wifi on` | 저장된 이름으로 붙는다 |
+| `wifi ap` | 보드가 스스로 WiFi 를 연다 |
+| `wifi off` | 끈다 |
+| `wifi idle <초>` | 아무 일도 없을 때 끄기까지. 0 이면 안 끔 |
+| `wifi status` | 지금 상태 |
+
+### 돌아오는 말
+
+```
+ok wifi ssid FETM2G
+ok wifi pass 10자
+scan begin 8
+scan 0 -34 lock FETM2G
+scan 1 -41 lock [air purifier] Samsung
+scan end
+ok wifi joining FETM2G mdns sail-random.local
+ok wifi ap SAIL-random() pass sailing1234 ip 192.168.4.1
+status name SAIL-random() mode join ip 192.168.0.76 rec off idle 300s left 0s
+err wifi no-ssid
+err wifi recording
+```
+
+비밀번호는 되읽어 주지 않는다. 길이만 알린다.
+
+### ★ WiFi 를 켜면 BLE 가 내려간다
+
+칩이 둘을 같이 켜면 죽는다.
+
+```
+E wifi: Error! Should enable WiFi modem sleep when both WiFi and
+        Bluetooth are enabled!!!!!!
+abort()
+```
+
+그래서 `wifi on` 과 `wifi ap` 는 **답을 먼저 보내고 나서** WiFi 를 켠다.
+답에 "어디로 찾아오라" 를 미리 다 적어 주는 이유가 이것이다.
+
+- `wifi ap` — 이름도 비밀번호도 주소도 미리 안다. 그대로 적어 준다.
+- `wifi on` — 주소는 공유기가 준다. 미리 모르니 **mDNS 이름**을 적어 준다.
+  앱은 `sail-random.local` 로 찾아오면 된다.
+
+`wifi scan` 은 예외다. 절전을 끄지만 않으면 BLE 와 같이 돌아간다.
+
+### 다시 끄기
+
+BLE 가 내려가 있으니 BLE 로는 못 끈다. 세 겹으로 둔다.
+
+| 순서 | 무엇을 보나 | 언제 |
+|---|---|---|
+| 1 | 앱이 다 받고 `POST /api/wifi/off` | 즉시 |
+| 2 | 쓰던 기기가 사라짐 (WiFi 사건) | 8초 |
+| 3 | 아무 일도 없음 | `wifi idle` 만큼 (기본 5분) |
+
+2번은 칩이 알려주는 실제 사건이다 — AP 에서 마지막 한 대가 떨어지거나,
+붙어 있던 공유기를 놓쳤을 때. 바로 안 끄고 8초를 두는 이유는 WiFi 가 잠깐
+끊겼다 다시 붙는 일이 흔해서다.

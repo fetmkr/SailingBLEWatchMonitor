@@ -35,6 +35,35 @@ void stop();
 // loop() 에서 자주 부른다. 안 켜져 있으면 바로 돌아온다.
 void poll();
 
+// 주변 WiFi 하나.
+struct ScanEntry {
+    char ssid[33];
+    int8_t rssi;       // dBm. -50 이면 아주 가깝고 -85 면 겨우 잡힌다
+    bool locked;       // 비밀번호가 걸려 있나
+};
+
+// 주변 WiFi 를 훑는다. **BLE 를 안 내리고 할 수 있다.**
+// 돌려주는 값은 out 에 채운 개수.
+int scan(ScanEntry* out, int max);
+
+// 붙을 WiFi 를 정한다. NVS 에 남으니 전원을 빼도 그대로다.
+// pass 가 nullptr 이면 비밀번호는 그대로 둔다.
+void setCreds(const char* ssid, const char* pass);
+const char* staSsid();
+
+// 아무도 안 쓰면 저절로 끄기. 기본은 켜져 있다.
+//
+// BLE 로 WiFi 를 켜라고 시키면 그 순간 BLE 가 내려간다. 앱이 죽으면
+// 보드가 WiFi 를 켠 채 남아서 BLE 도 안 돌아온다. 그걸 막는다.
+void     setIdleOff(uint32_t seconds);   // 0 이면 안 끈다
+uint32_t idleOffSec();
+uint32_t idleLeftMs();      // 꺼지기까지 남은 시간. 0 이면 안 끈다
+
+// 이 보드의 mDNS 이름 ("sail-random"). 뒤에 .local 을 붙이면 주소가 된다.
+const char* mdnsHost();
+// 보드가 스스로 여는 WiFi 의 비밀번호.
+const char* apPass();
+
 Mode        mode();
 const char* ipText();     // "192.168.4.1". 안 켜져 있으면 빈 문자열
 const char* ssidText();
