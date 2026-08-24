@@ -242,8 +242,12 @@ function redraw() {
   if (c.clientWidth < 2 || c.clientHeight < 2) return;
   tl.draw({ canvas: c, series, view, marks, cursorMs, pinMs, full: fullSpan });
   const span = view.to - view.from;
+  // 0.2초를 보고 있는데 "0:00 보는 중" 이라고 하면 아무 말도 안 하는 셈이다.
+  const spanText = span < 10000
+    ? tl.formatOffsetTick(span).replace(/^[+−]/, "")
+    : tl.formatDuration(span);
   $("range").textContent = session
-    ? `${tl.formatDuration(view.from)} ~ ${tl.formatDuration(view.to)}  (${tl.formatDuration(span)} 보는 중)`
+    ? `${tl.formatDuration(view.from)} ~ ${tl.formatDuration(view.to)}  (${spanText} 보는 중)`
     : "";
   renderReadout();
 }
@@ -889,6 +893,7 @@ function wire() {
     moved = 0;
     if (inOverview(e)) {
       drag = { kind: "over", x: e.clientX, from: view.from };
+      c.style.cursor = "grabbing";      // 잡고 있는 동안은 쥔 손
       jumpTo(tl.msAtOverviewX(c, fullSpan, e.clientX));
       redraw();
     } else {
@@ -908,6 +913,7 @@ function wire() {
     if (drag?.kind === "over") {
       jumpTo(tl.msAtOverviewX(c, fullSpan, e.clientX));
       cursorMs = null;
+      c.style.cursor = "grabbing";
     } else if (drag?.kind === "pan") {
       moved = Math.max(moved, Math.abs(e.clientX - drag.x));
       const rect = c.getBoundingClientRect();
@@ -918,7 +924,10 @@ function wire() {
       clampView();
       cursorMs = tl.msAtX(c, view, e.clientX);
     } else {
-      cursorMs = inOverview(e) ? null : tl.msAtX(c, view, e.clientX);
+      const over = inOverview(e);
+      cursorMs = over ? null : tl.msAtX(c, view, e.clientX);
+      // 스크롤바 위에서는 손바닥. 잡아서 끌 수 있다는 뜻이다.
+      c.style.cursor = over ? "grab" : "crosshair";
     }
     // 고정 전에는 마우스를 따라 영상이 훑어진다. 고정한 뒤에는 안 움직인다 —
     // 박아 둔 자리를 보려고 고정한 것이다.
@@ -934,10 +943,13 @@ function wire() {
       setStatus("이 자리에 고정했습니다. Esc 로 풉니다.");
     }
     drag = null;
+    c.style.cursor = inOverview(e) ? "grab" : "crosshair";
     redraw();
   });
-  c.addEventListener("pointercancel", () => { drag = null; });
-  c.addEventListener("pointerleave", () => { cursorMs = null; drag = null; redraw(); });
+  c.addEventListener("pointercancel", () => { drag = null; c.style.cursor = "crosshair"; });
+  c.addEventListener("pointerleave", () => {
+    cursorMs = null; drag = null; c.style.cursor = "crosshair"; redraw();
+  });
 
   // 두 번 누르면 그 자리로 크게 당긴다
   c.addEventListener("dblclick", (e) => {

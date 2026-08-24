@@ -82,6 +82,25 @@ export function formatDuration(ms: number): string {
     : `${m}:${String(sec).padStart(2, "0")}`;
 }
 
+/**
+ * 기준점에서 얼마나 떨어졌나. Saleae 처럼 단위를 같이 적는다.
+ *
+ *   +250 ms   +2.5 초   +1분 30초
+ *
+ * 단위를 안 적으면 "0:02" 가 2초인지 2분인지 헷갈린다. 크게 당겨서 볼수록
+ * 그렇다.
+ */
+export function formatOffsetTick(ms: number): string {
+  const sign = ms < 0 ? "−" : "+";
+  const a = Math.abs(ms);
+  if (a < 1000) return `${sign}${Math.round(a)} ms`;
+  if (a < 10000) return `${sign}${(a / 1000).toFixed(a % 1000 ? 1 : 0)} 초`;
+  if (a < 60000) return `${sign}${Math.round(a / 1000)} 초`;
+  const m = Math.floor(a / 60000);
+  const s = Math.round((a % 60000) / 1000);
+  return s ? `${sign}${m}분 ${s}초` : `${sign}${m}분`;
+}
+
 /** 눈금 간격을 사람이 읽기 좋은 값으로 (1, 2, 5, 10, 15, 30초 …) */
 function tickStep(spanMs: number, want: number): number {
   const steps = [
@@ -108,10 +127,11 @@ export interface DrawOpts {
 }
 
 const AXIS_W = 62;
-const TIME_H = 22;
+/** 시간 축. Saleae 처럼 **위**에 둔다 — 눈이 먼저 가는 자리다 */
+const TIME_H = 26;
 const GAP = 8;
-/** 아래에 붙는 전체 구간 띠. 지금 어디를 보고 있는지 알려 준다. */
-const OVER_H = 34;
+/** 맨 아래 스크롤 막대. 전체 어디쯤인지만 알려 주면 된다 */
+const OVER_H = 10;
 
 export function draw(o: DrawOpts): void {
   const { canvas, series, view } = o;
@@ -128,6 +148,7 @@ export function draw(o: DrawOpts): void {
 
   const plotW = Math.max(1, cssW - AXIS_W - 8);
   const rows = series.length || 1;
+  const bodyTop = TIME_H;                       // 시간 축이 위에 있다
   const bodyH = cssH - TIME_H - OVER_H;
   const rowH = Math.max(24, (bodyH - GAP * (rows - 1)) / rows);
   const cols = Math.max(1, Math.floor(plotW));
@@ -139,23 +160,59 @@ export function draw(o: DrawOpts): void {
   const dim = css.getPropertyValue("--dim").trim() || "#8a8a8a";
   const grid = css.getPropertyValue("--grid").trim() || "#2a2a2a";
 
-  // ── 세로 눈금 (시간) ────────────────────────────────────────────────
-  const step = tickStep(span, Math.max(3, Math.floor(plotW / 110)));
-  const first = Math.ceil(view.from / step) * step;
+  // ── 시간 축 (위) ────────────────────────────────────────────────────
+  //
+  // Saleae 방식이다. 맨 왼쪽에 기준 시각을 굵게 적고, 그 뒤로는 거기서
+  // 얼마나 떨어졌는지를 **단위와 함께** 적는다.
+  //
+  //   3:04    +10 초   +20 초   +30 초
+  //
+  // 단위가 없으면 크게 당겼을 때 "0:02" 가 2초인지 2분인지 헷갈린다.
   g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
   g.textBaseline = "top";
+
+  // 축 바탕
+  g.fillStyle = "#181b21";
+  g.fillRect(0, 0, cssW, TIME_H);
+  g.strokeStyle = grid;
+  g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(0, TIME_H - 0.5);
+  g.lineTo(cssW, TIME_H - 0.5);
+  g.stroke();
+
+  const base = view.from;
+  const step = tickStep(span, Math.max(3, Math.floor(plotW / 120)));
+  const first = Math.ceil(base / step) * step;
+
   for (let t = first; t <= view.to; t += step) {
     const x = Math.round(xOf(t)) + 0.5;
     g.strokeStyle = grid;
     g.lineWidth = 1;
     g.beginPath();
-    g.moveTo(x, 0);
-    g.lineTo(x, bodyH);
+    g.moveTo(x, bodyTop);
+    g.lineTo(x, bodyTop + bodyH);
     g.stroke();
-    g.fillStyle = dim;
-    g.textAlign = "center";
-    g.fillText(formatDuration(t), x, bodyH + 5);
+    // 축 안의 짧은 눈금
+    g.beginPath();
+    g.moveTo(x, TIME_H - 6);
+    g.lineTo(x, TIME_H - 1);
+    g.stroke();
+
+    // 맨 왼쪽 눈금은 기준 시각과 겹친다. 기준이 이미 "0 부터" 라고 말한다.
+    if (x > AXIS_W + 46) {
+      g.fillStyle = dim;
+      g.textAlign = "center";
+      g.fillText(formatOffsetTick(t - base), x, 6);
+    }
   }
+
+  // 기준 시각. 맨 왼쪽에 굵게.
+  g.fillStyle = ink;
+  g.textAlign = "left";
+  g.font = "bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+  g.fillText(formatDuration(base), 4, 6);
+  g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
 
   // ── 마킹 ────────────────────────────────────────────────────────────
   for (const m of o.marks) {
@@ -165,15 +222,15 @@ export function draw(o: DrawOpts): void {
     g.lineWidth = 1.5;
     g.setLineDash([4, 3]);
     g.beginPath();
-    g.moveTo(x, 0);
-    g.lineTo(x, bodyH);
+    g.moveTo(x, bodyTop);
+    g.lineTo(x, bodyTop + bodyH);
     g.stroke();
     g.setLineDash([]);
   }
 
   // ── 값들 ────────────────────────────────────────────────────────────
   series.forEach((s, r) => {
-    const top = r * (rowH + GAP);
+    const top = bodyTop + r * (rowH + GAP);
     const bot = top + rowH;
     const band = bucketize(s, view, cols);
 
@@ -196,19 +253,56 @@ export function draw(o: DrawOpts): void {
       g.stroke();
     }
 
-    // 최소~최대를 세로줄로. 봉우리가 살아 있다.
+    // 화면에 들어온 점이 몇 개인지 센다.
+    let n = 0;
+    for (let c = 0; c < cols; c++) if (band.has[c]) n++;
+
     g.strokeStyle = s.color;
     g.lineWidth = 1;
-    g.beginPath();
-    for (let c = 0; c < cols; c++) {
-      if (!band.has[c]) continue;
-      const x = AXIS_W + c + 0.5;
-      const y1 = yOf(band.max[c]);
-      const y2 = yOf(band.min[c]);
-      g.moveTo(x, y1);
-      g.lineTo(x, Math.max(y2, y1 + 0.6));   // 한 점짜리도 보이게
+
+    if (n * 3 < cols) {
+      // ── 아주 당겨서 점이 성길 때 ──
+      //
+      // 픽셀마다 세로줄을 그으면 점 하나가 점 하나로만 보여서 흐름을 못 읽는다.
+      // 이럴 때는 실제 점을 이어 긋고 동그라미를 찍는다. 어디가 실제로 잰
+      // 자리인지 눈에 보여야 한다 — 사이는 그냥 이어 놓은 선일 뿐이다.
+      let first = true;
+      g.beginPath();
+      for (let i = 0; i < s.xs.length; i++) {
+        const x = s.xs[i];
+        if (x < view.from) continue;
+        if (x > view.to) break;
+        const y = s.ys[i];
+        if (!Number.isFinite(y)) { first = true; continue; }
+        const px = xOf(x), py = yOf(y);
+        if (first) { g.moveTo(px, py); first = false; } else { g.lineTo(px, py); }
+      }
+      g.stroke();
+
+      g.fillStyle = s.color;
+      for (let i = 0; i < s.xs.length; i++) {
+        const x = s.xs[i];
+        if (x < view.from) continue;
+        if (x > view.to) break;
+        const y = s.ys[i];
+        if (!Number.isFinite(y)) continue;
+        g.beginPath();
+        g.arc(xOf(x), yOf(y), 2, 0, Math.PI * 2);
+        g.fill();
+      }
+    } else {
+      // ── 보통 때 ── 픽셀마다 최소~최대를 세로줄로. 봉우리가 살아 있다.
+      g.beginPath();
+      for (let c = 0; c < cols; c++) {
+        if (!band.has[c]) continue;
+        const x = AXIS_W + c + 0.5;
+        const y1 = yOf(band.max[c]);
+        const y2 = yOf(band.min[c]);
+        g.moveTo(x, y1);
+        g.lineTo(x, Math.max(y2, y1 + 0.6));
+      }
+      g.stroke();
     }
-    g.stroke();
 
     // 이름과 눈금
     g.fillStyle = dim;
@@ -240,8 +334,8 @@ export function draw(o: DrawOpts): void {
     g.globalAlpha = 0.35;
     g.lineWidth = 1;
     g.beginPath();
-    g.moveTo(x, 0);
-    g.lineTo(x, bodyH);
+    g.moveTo(x, bodyTop);
+    g.lineTo(x, bodyTop + bodyH);
     g.stroke();
     g.globalAlpha = 1;
   }
@@ -251,72 +345,40 @@ export function draw(o: DrawOpts): void {
     g.strokeStyle = "#4ea1ff";
     g.lineWidth = 1.5;
     g.beginPath();
-    g.moveTo(x, 0);
-    g.lineTo(x, bodyH);
+    g.moveTo(x, bodyTop - TIME_H + 2);
+    g.lineTo(x, bodyTop + bodyH);
     g.stroke();
-    // 위쪽에 작은 손잡이. 어느 것이 고정인지 한눈에 갈린다.
+    // 시간 축 안에 손잡이. 어느 것이 고정인지 한눈에 갈린다.
     g.fillStyle = "#4ea1ff";
     g.beginPath();
-    g.moveTo(x - 5, 0);
-    g.lineTo(x + 5, 0);
-    g.lineTo(x, 8);
+    g.moveTo(x - 5, 2);
+    g.lineTo(x + 5, 2);
+    g.lineTo(x, 11);
     g.closePath();
     g.fill();
   }
 
-  // ── 전체 구간 띠 ────────────────────────────────────────────────────
+  // ── 맨 아래 스크롤 막대 ─────────────────────────────────────────────
   //
-  // 크게 당겨서 보면 전체 어디쯤인지 알 수가 없다. Saleae 처럼 아래에
-  // 전체를 깔고 지금 보는 구간을 밝게 표시한다. 여기를 끌어도 움직인다.
+  // Saleae 처럼 파형은 다시 안 그린다. **손잡이 길이가 곧 배율**이다 —
+  // 크게 당길수록 짧아지고, 전체를 보면 꽉 찬다. 그것만 알면 된다.
+  // 같은 속도 그림을 아래에 또 깔면 눈만 어지럽다.
   if (o.full && o.full.to > o.full.from) {
-    const oy = cssH - OVER_H + 4;
-    const oh = OVER_H - 8;
+    const oy = cssH - OVER_H + 3;
+    const oh = OVER_H - 6;
     const fSpan = o.full.to - o.full.from;
     const fx = (ms: number) => AXIS_W + ((ms - o.full!.from) / fSpan) * plotW;
 
-    g.fillStyle = "#101317";
+    g.fillStyle = "#1b1e24";
     g.fillRect(AXIS_W, oy, plotW, oh);
 
-    // 전체 속도 모양을 얇게 깔아 둔다. 어디가 빠른 구간인지 눈에 띈다.
-    const s0 = series[0];
-    if (s0) {
-      const band = bucketize(s0, o.full, Math.floor(plotW));
-      let lo = Infinity, hi = -Infinity;
-      for (let c = 0; c < band.has.length; c++) {
-        if (!band.has[c]) continue;
-        if (band.min[c] < lo) lo = band.min[c];
-        if (band.max[c] > hi) hi = band.max[c];
-      }
-      if (hi > lo) {
-        g.strokeStyle = s0.color;
-        g.globalAlpha = 0.55;
-        g.beginPath();
-        for (let c = 0; c < band.has.length; c++) {
-          if (!band.has[c]) continue;
-          const x = AXIS_W + c + 0.5;
-          const y1 = oy + oh - ((band.max[c] - lo) / (hi - lo)) * oh;
-          const y2 = oy + oh - ((band.min[c] - lo) / (hi - lo)) * oh;
-          g.moveTo(x, y1);
-          g.lineTo(x, Math.max(y2, y1 + 0.6));
-        }
-        g.stroke();
-        g.globalAlpha = 1;
-      }
-    }
-
-    // 지금 보는 구간
     const wx = fx(view.from);
-    const ww = Math.max(3, fx(view.to) - wx);
-    g.fillStyle = "rgba(255,255,255,0.13)";
-    g.fillRect(wx, oy, ww, oh);
-    g.strokeStyle = ink;
-    g.lineWidth = 1;
-    g.strokeRect(Math.round(wx) + 0.5, oy + 0.5, Math.round(ww), oh - 1);
-
-    // 양쪽 손잡이 — 여기를 끌면 구간이 넓어지고 좁아진다
-    g.fillStyle = ink;
-    g.fillRect(Math.round(wx) - 1, oy + oh / 2 - 6, 3, 12);
-    g.fillRect(Math.round(wx + ww) - 2, oy + oh / 2 - 6, 3, 12);
+    const ww = Math.max(14, fx(view.to) - wx);   // 너무 짧으면 잡을 수가 없다
+    g.fillStyle = "#4a5160";
+    g.beginPath();
+    const rr = oh / 2;
+    g.roundRect(Math.min(wx, AXIS_W + plotW - ww), oy, ww, oh, rr);
+    g.fill();
   }
 }
 
