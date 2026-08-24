@@ -112,16 +112,36 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 /* ── 칸 켜고 끄기 ────────────────────────────────────────────────── */
 .panes { display: flex; gap: 2px; }
 .pane {
-  padding: 5px 9px; border-radius: 0; border-color: var(--line);
-  background: transparent; color: var(--dim); font-size: 12px;
+  padding: 5px 10px; border-radius: 0; border-color: var(--line);
+  background: transparent; color: #6b7280; font-size: 12px;
+  user-select: none;
 }
 .panes .pane:first-child { border-radius: 6px 0 0 6px; }
 .panes .pane:last-child  { border-radius: 0 6px 6px 0; }
-.pane.on { background: #2f3a47; color: var(--ink); }
-.pane:hover { background: #39424f; }
+/* 켜짐·꺼짐이 한눈에 갈려야 한다. 앞의 ◉ / ○ 와 같이 본다. */
+.pane.on { background: #3b74d1; color: #fff; border-color: #3b74d1; }
+.pane:not(.on) { background: #1b1e24; }
+.pane:hover { filter: brightness(1.2); }
 
 /* 꺼진 칸 */
 .off { display: none !important; }
 /* 하나만 켜져 있으면 나누개도 숨긴다 */
 #center.solo #split { display: none; }
 #empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); }
+
+/* ── 칸마다 붙는 손잡이 ──────────────────────────────────────────── */
+.hasHandles { position: relative; }
+.handles {
+  position: absolute; top: 4px; right: 6px; z-index: 5;
+  display: flex; gap: 2px; opacity: 0.35; transition: opacity .12s;
+}
+.hasHandles:hover .handles { opacity: 1; }
+.handles button {
+  width: 22px; height: 22px; padding: 0; line-height: 1;
+  font-size: 12px; border-radius: 4px;
+  background: #1b1e24cc; border: 1px solid var(--line); color: var(--dim);
+  backdrop-filter: blur(3px);
+}
+.handles button:hover { background: #3b74d1; border-color: #3b74d1; color: #fff; }
+/* 영상 칸은 검은 바탕이라 조금 더 밝게 */
+#videoPane .handles button { background: #000000aa; }

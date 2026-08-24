@@ -481,11 +481,62 @@ let layout: Record<PaneKey, boolean> = {
   lib: true, video: true, data: true, info: true,
 };
 
+const PANE_NAME: Record<PaneKey, string> = {
+  lib: "보관함", video: "영상", data: "데이터", info: "정보",
+};
+
+/**
+ * 칸마다 제 손잡이를 달아 준다.
+ *
+ * 위 띠의 단추만 있으면 "이 칸을 크게" 하려고 눈이 위로 갔다가 다시 내려와야
+ * 한다. 크게 하고 싶은 칸을 보고 있는데 손잡이는 저 위에 있는 셈이다.
+ * 그래서 칸 자체의 오른쪽 위에 붙인다.
+ *
+ *   ⤢  이 칸만 크게 (다시 누르면 넷 다)
+ *   ✕  이 칸 끄기
+ */
+function mountPaneHandles() {
+  (Object.keys(PANE_EL) as PaneKey[]).forEach((k) => {
+    const el = $(PANE_EL[k]);
+    if (el.querySelector(".handles")) return;
+    el.classList.add("hasHandles");
+
+    const box = document.createElement("div");
+    box.className = "handles";
+
+    const big = document.createElement("button");
+    big.textContent = "⤢";
+    big.title = `${PANE_NAME[k]}만 크게 보기`;
+    big.onclick = (e) => { e.stopPropagation(); only(k); };
+
+    const shut = document.createElement("button");
+    shut.textContent = "✕";
+    shut.title = `${PANE_NAME[k]} 닫기`;
+    shut.onclick = (e) => { e.stopPropagation(); toggle(k); };
+
+    box.append(big, shut);
+    el.append(box);
+  });
+}
+
 function applyLayout() {
   (Object.keys(PANE_EL) as PaneKey[]).forEach((k) => {
     $(PANE_EL[k]).classList.toggle("off", !layout[k]);
     const btn = $("tgl" + k[0].toUpperCase() + k.slice(1));
     btn.className = layout[k] ? "pane on" : "pane";
+    // 켜짐·꺼짐이 눈에 안 띄면 단추가 무슨 상태인지 알 수가 없다.
+    btn.textContent = (layout[k] ? "◉ " : "○ ") + PANE_NAME[k];
+    btn.title = layout[k]
+      ? `${PANE_NAME[k]} 끄기 — 두 번 누르면 이 칸만 크게`
+      : `${PANE_NAME[k]} 켜기 — 두 번 누르면 이 칸만 크게`;
+
+    // 혼자 남았으면 ⤢ 가 "되돌리기" 다
+    const big = $(PANE_EL[k]).querySelector<HTMLButtonElement>(".handles button");
+    if (big) {
+      const alone = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]).length === 1;
+      big.textContent = alone ? "⤡" : "⤢";
+      big.title = alone ? "넷 다 켜기" : `${PANE_NAME[k]}만 크게 보기`;
+    }
   });
 
   // 가운데가 하나만 켜져 있으면 나누개를 숨기고 그 칸이 다 쓴다
@@ -503,14 +554,38 @@ function applyLayout() {
 function toggle(k: PaneKey) {
   const on = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]);
   if (layout[k] && on.length === 1) {
-    setStatus("마지막 칸은 끌 수 없습니다.", "bad");
+    // 마지막 하나까지 끄면 볼 게 없어진다. 대신 넷 다 켜 준다 —
+    // 거절만 하면 사람이 어떻게 되돌리는지 모른다.
+    layout = { lib: true, video: true, data: true, info: true };
+    setStatus("마지막 칸이라 넷 다 켰습니다.");
+    applyLayout();
     return;
   }
   layout = { ...layout, [k]: !layout[k] };
   applyLayout();
 }
 
+/**
+ * 이 칸만 크게. 나머지를 다 끈다.
+ *
+ * "영상만 크게 보고 싶다" 가 제일 흔한데, 하나씩 끄면 세 번을 눌러야 한다.
+ * 한 번에 되게 한다. 이미 혼자면 넷 다 켜서 되돌린다.
+ */
+function only(k: PaneKey) {
+  const on = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]);
+  if (on.length === 1 && on[0] === k) {
+    layout = { lib: true, video: true, data: true, info: true };
+    setStatus("넷 다 켰습니다.");
+  } else {
+    layout = { lib: false, video: false, data: false, info: false, [k]: true };
+    // 손잡이(⤢)는 한 번, 위 띠 단추는 두 번이다. 둘 다 맞는 말로 적는다.
+    setStatus(`${PANE_NAME[k]}만 크게 봅니다. ⤡ 를 누르면 되돌아옵니다.`);
+  }
+  applyLayout();
+}
+
 function loadLayout() {
+  mountPaneHandles();
   try {
     const j = localStorage.getItem(LAYOUT_KEY);
     if (j) {
@@ -633,10 +708,13 @@ function wire() {
   $("list").onclick = listBoard;
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
   $("openVideo").onclick = openVideo;
-  $("tglLib").onclick = () => toggle("lib");
-  $("tglVideo").onclick = () => toggle("video");
-  $("tglData").onclick = () => toggle("data");
-  $("tglInfo").onclick = () => toggle("info");
+  // 한 번 누르면 켜고 끄기, 두 번 누르면 그 칸만 크게.
+  ([["Lib", "lib"], ["Video", "video"], ["Data", "data"], ["Info", "info"]] as
+    [string, PaneKey][]).forEach(([id, k]) => {
+    const b = $("tgl" + id);
+    b.onclick = () => toggle(k);
+    b.ondblclick = () => only(k);
+  });
 
   // ── 영상 조작 ──────────────────────────────────────────────────────
   const v = video();
@@ -830,10 +908,11 @@ function wire() {
       case "Home": panBy(fullSpan.from - view.from); break;
       case "End":  panBy(fullSpan.to - view.to); break;
       case "f": case "F": case "0": view = { ...fullSpan }; break;
-      case "1": toggle("lib"); break;
-      case "2": toggle("video"); break;
-      case "3": toggle("data"); break;
-      case "4": toggle("info"); break;
+      // 숫자만 누르면 켜고 끄기, 시프트를 같이 누르면 그 칸만 크게
+      case "1": case "!": (e.shiftKey ? only : toggle)("lib"); break;
+      case "2": case "@": (e.shiftKey ? only : toggle)("video"); break;
+      case "3": case "#": (e.shiftKey ? only : toggle)("data"); break;
+      case "4": case "$": (e.shiftKey ? only : toggle)("info"); break;
       case " ": {
         const vv = video();
         if (videoOn) { vv.paused ? vv.play() : vv.pause(); renderVbar(); }
