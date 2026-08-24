@@ -43,6 +43,20 @@ let pane: "library" | "board" = "library";
 // 영상
 let sync: vid.Sync = { offsetMs: 0, guessed: false, fileTime: null };
 let videoOn = false;
+/**
+ * 영상과 데이터가 물려 있나.
+ *
+ * ★ `여기 맞춤` 을 누르기 전에는 **따로 움직여야 한다.**
+ *
+ *   맞추는 방법은 이렇다. 영상을 태킹하는 장면에 두고, 타임라인에서 힐이
+ *   넘어가는 자리에 커서를 두고, 그때 `여기 맞춤` 을 누른다.
+ *   그런데 둘이 붙어 다니면 하나를 옮길 때 다른 하나도 따라가서 애초에
+ *   맞출 수가 없다.
+ *
+ * 파일이 적어 둔 시각으로 짐작은 해 두지만 그건 짐작일 뿐이다. 사람이
+ * 눌러서 확인해야 물린다.
+ */
+let linked = false;
 /** 타임라인이 영상을 움직이는 중인가. 서로 밀지 않게 한 쪽만 몰게 한다 */
 let seeking = false;
 export const _seeking = () => seeking;
@@ -699,7 +713,8 @@ async function useVideoUrl(url: string, name: string, blob: Blob | null) {
   v.classList.add("on");
   $("vdrop").classList.add("hide");
   videoOn = true;
-  timeOrigin = "session";     // 아직 안 맞췄다. 맞추고 나서 넘어간다
+  linked = false;             // 사람이 눌러 확인하기 전에는 따로 논다
+  timeOrigin = "session";
 
   // 파일이 적어 둔 시각으로 첫 짐작을 만든다
   let ft: Date | null = null;
@@ -729,16 +744,26 @@ function renderVbar() {
   sl.disabled = !videoOn || dur <= 0;
   // 사람이 끌고 있는 동안에는 건드리지 않는다. 손이 튕겨 나간다.
   if (!sliderHeld && dur > 0) sl.value = String(Math.round((v.currentTime / dur) * 1000));
-  $("voff").textContent = videoOn
-    ? `영상 0초 = 세션 ${vid.formatOffset(sync.offsetMs)}` +
-      (sync.guessed ? "  (파일 시각으로 짐작)" : "")
-    : "";
+  const off = $("voff");
+  if (!videoOn) {
+    off.textContent = "";
+    off.className = "mono dim";
+  } else if (linked) {
+    off.textContent = `물림 · 영상 0초 = 세션 ${vid.formatOffset(sync.offsetMs)}`;
+    off.className = "mono good";
+  } else {
+    // 안 물렸으면 그 사실을 먼저 말한다. 그래야 왜 따로 노는지 안다.
+    off.textContent =
+      "따로 움직임 — 영상과 데이터를 같은 순간에 두고 [여기 맞춤]" +
+      (sync.guessed ? `  (짐작 ${vid.formatOffset(sync.offsetMs)})` : "");
+    off.className = "mono bad";
+  }
   ($("play") as HTMLButtonElement).textContent = v.paused ? "▶" : "⏸";
 }
 
 /** 타임라인 커서 → 영상 위치 */
 function seekVideoTo(sessionMs: number) {
-  if (!videoOn) return;
+  if (!videoOn || !linked) return;   // 맞추기 전에는 따로 논다
   const v = video();
   const t = vid.sessionToVideo(sync, sessionMs);
   if (t < 0 || t > (v.duration || Infinity)) return;
@@ -756,14 +781,16 @@ function nudge(ms: number) {
 /** 지금 영상 화면이 커서 자리라고 알려 준다. 눈으로 맞추는 길이다. */
 function syncHere() {
   const at = pinMs !== null ? pinMs : cursorMs;
-  if (!videoOn || at === null) {
+  if (!videoOn) { setStatus("영상을 먼저 여세요.", "bad"); return; }
+  if (at === null) {
     setStatus("타임라인에서 맞출 자리를 눌러 고정하고 누르세요.", "bad");
     return;
   }
   sync = { ...sync, offsetMs: at - video().currentTime * 1000, guessed: false };
-  // 맞췄으면 이제 영상 시각을 기준으로 센다. 그래야 두 숫자가 같아진다.
+  // 맞췄으면 이제 물린다. 그리고 영상 시각을 기준으로 센다.
+  linked = true;
   timeOrigin = "video";
-  setStatus("맞췄습니다. 이제 타임라인 숫자가 영상 재생 시간과 같습니다.", "good");
+  setStatus("맞췄습니다. 이제 영상과 데이터가 같이 움직입니다.", "good");
   renderVbar();
   redraw();
 }
@@ -803,8 +830,8 @@ function wire() {
     const dur = Number.isFinite(v.duration) ? v.duration : 0;
     if (dur <= 0) return;
     v.currentTime = (Number(sl.value) / 1000) * dur;
-    // 영상을 옮기면 타임라인 고정도 그 자리로 간다. 둘이 늘 같은 곳을 봐야 한다.
-    pinMs = vid.videoToSession(sync, v.currentTime);
+    // 물려 있을 때만 타임라인이 따라온다. 맞추기 전에는 영상만 움직인다.
+    if (linked) pinMs = vid.videoToSession(sync, v.currentTime);
     renderVbar();
     redraw();
   };
@@ -813,6 +840,14 @@ function wire() {
   sl.addEventListener("change", () => { sliderHeld = false; slSeek(); });
   addEventListener("pointerup", () => { sliderHeld = false; });
   $("syncHere").onclick = syncHere;
+  $("unlinkBtn").onclick = () => {
+    if (!linked) { setStatus("이미 따로 움직입니다.", "bad"); return; }
+    linked = false;
+    timeOrigin = "session";
+    setStatus("물림을 풀었습니다. 영상과 데이터가 따로 움직입니다.");
+    renderVbar();
+    redraw();
+  };
   $("originBtn").onclick = () => {
     if (!videoOn) { setStatus("영상을 먼저 여세요.", "bad"); return; }
     timeOrigin = timeOrigin === "video" ? "session" : "video";
@@ -829,9 +864,9 @@ function wire() {
   // requestVideoFrameCallback 은 프레임이 바뀔 때마다 불러 줘서 timeupdate
   // (초당 4번쯤)보다 훨씬 매끄럽다. Safari 15.4 부터 있다.
   const follow = () => {
-    if (!v.paused) {
+    if (!v.paused && linked) {
       // 재생 중에는 고정 자리가 영상을 따라간다. 지금 보는 프레임이 어디인지
-      // 타임라인에 보여야 한다.
+      // 타임라인에 보여야 한다. 물려 있을 때만이다.
       pinMs = vid.videoToSession(sync, v.currentTime);
       cursorMs = pinMs;
       // 커서가 화면 밖으로 나가면 따라 밀어 준다
@@ -843,6 +878,8 @@ function wire() {
       }
       renderVbar();
       redraw();
+    } else if (!v.paused) {
+      renderVbar();
     }
     if ("requestVideoFrameCallback" in v) {
       (v as any).requestVideoFrameCallback(follow);
@@ -1067,8 +1104,10 @@ function wire() {
         : over || axis ? "grab"        // 스크롤 막대와 시간 축은 잡아서 미는 자리
         : onLabel ? "text"
         : "crosshair";
-      // 아직 고정 안 했으면 마우스만 움직여도 영상이 따라온다.
-      if (pinMs === null && cursorMs !== null && video().paused) seekVideoTo(cursorMs);
+      // 물려 있고 아직 고정 안 했으면 마우스만 움직여도 영상이 따라온다.
+      if (linked && pinMs === null && cursorMs !== null && video().paused) {
+        seekVideoTo(cursorMs);
+      }
     }
     redraw();
   });
