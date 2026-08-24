@@ -331,6 +331,12 @@ function renderReadout() {
       (Number.isFinite(v) ? `${v.toFixed(2)}${s.unit}` : "—")
     );
   }
+  // 가까운 마킹이 있으면 알려 준다. 주황 점선이 뭔지 물어볼 일이 없게.
+  const near = marks.findIndex((m) => Math.abs(m - at) < (view.to - view.from) * 0.01);
+  if (near >= 0) {
+    parts.splice(1, 0,
+      `<b style="color:#f0a020">⚑ 마킹 ${near + 1}</b>`);
+  }
   $("readout").innerHTML = parts.join("　");
 }
 
@@ -846,17 +852,23 @@ function wire() {
   const sl = $("vslider") as HTMLInputElement;
   const slSeek = () => {
     const dur = Number.isFinite(v.duration) ? v.duration : 0;
-    if (dur <= 0) return;
+    if (dur <= 0) {
+      setStatus("영상을 아직 다 읽지 못했습니다.", "bad");
+      return;
+    }
+    sliderHeld = true;          // 끄는 동안 코드가 값을 안 건드리게
     v.currentTime = (Number(sl.value) / 1000) * dur;
     // 물려 있을 때만 타임라인이 따라온다. 맞추기 전에는 영상만 움직인다.
     if (linked) pinMs = vid.videoToSession(sync, v.currentTime);
     renderVbar();
     redraw();
   };
-  sl.addEventListener("pointerdown", () => { sliderHeld = true; });
+  // input 은 끄는 내내, change 는 놓을 때 온다. 둘 다 받는다 —
+  // 웹뷰마다 어느 쪽이 오는지가 다르다.
   sl.addEventListener("input", slSeek);
-  sl.addEventListener("change", () => { sliderHeld = false; slSeek(); });
+  sl.addEventListener("change", () => { slSeek(); sliderHeld = false; });
   addEventListener("pointerup", () => { sliderHeld = false; });
+  addEventListener("keyup", () => { sliderHeld = false; });
   $("syncBtn").onclick = toggleSync;
   // 누른 부호대로 아래 숫자가 움직인다. 반대로 두면 사람이 헷갈린다.
   $("n10").onclick = () => nudge(-10000);
@@ -864,13 +876,32 @@ function wire() {
   $("p1").onclick = () => nudge(1000);
   $("p10").onclick = () => nudge(10000);
 
-  // 영상이 돌면 타임라인 커서가 따라간다.
-  // requestVideoFrameCallback 은 프레임이 바뀔 때마다 불러 줘서 timeupdate
-  // (초당 4번쯤)보다 훨씬 매끄럽다. Safari 15.4 부터 있다.
+  // ── 영상이 돌면 타임라인이 따라간다 ──────────────────────────────
+  //
+  // ★ requestVideoFrameCallback 만 쓰면 안 된다.
+  //
+  //   그건 **새 프레임이 나올 때만** 불린다. 그래서 영상을 한 번 세우면
+  //   다시는 안 불리고, 그 뒤로는 재생해도 타임라인이 안 따라온다.
+  //   (다음 부름을 콜백 안에서 걸어 두는 구조라 한 번 끊기면 영영 끊긴다)
+  //
+  // 그래서 재생이 시작될 때마다 다시 건다. timeupdate 도 함께 받는다 —
+  // 초당 네 번쯤이라 성기지만, 프레임 콜백이 없는 경우의 안전망이다.
+  let rvfcArmed = false;
   const follow = () => {
-    if (!v.paused && linked) {
-      // 재생 중에는 고정 자리가 영상을 따라간다. 지금 보는 프레임이 어디인지
-      // 타임라인에 보여야 한다. 물려 있을 때만이다.
+    rvfcArmed = false;
+    syncFromVideo();
+    if (!v.paused) armFollow();
+  };
+  function armFollow() {
+    if (rvfcArmed) return;
+    if ("requestVideoFrameCallback" in v) {
+      rvfcArmed = true;
+      (v as any).requestVideoFrameCallback(follow);
+    }
+  }
+  /** 지금 영상 자리를 타임라인에 옮긴다 */
+  function syncFromVideo() {
+    if (linked) {
       pinMs = vid.videoToSession(sync, v.currentTime);
       cursorMs = pinMs;
       // 커서가 화면 밖으로 나가면 따라 밀어 준다
@@ -880,20 +911,15 @@ function wire() {
         view.to = view.from + span;
         clampView();
       }
-      renderVbar();
-      redraw();
-    } else if (!v.paused) {
-      renderVbar();
     }
-    if ("requestVideoFrameCallback" in v) {
-      (v as any).requestVideoFrameCallback(follow);
-    }
-  };
-  if ("requestVideoFrameCallback" in v) (v as any).requestVideoFrameCallback(follow);
-  else (v as HTMLVideoElement).addEventListener("timeupdate", follow);
+    renderVbar();
+    redraw();
+  }
+  v.addEventListener("play", () => { armFollow(); renderVbar(); });
+  v.addEventListener("timeupdate", syncFromVideo);
+  armFollow();
 
-  v.addEventListener("seeked", () => { seeking = false; renderVbar(); });
-  v.addEventListener("play", renderVbar);
+  v.addEventListener("seeked", () => { seeking = false; syncFromVideo(); });
   v.addEventListener("pause", renderVbar);
   v.addEventListener("loadedmetadata", renderVbar);
 

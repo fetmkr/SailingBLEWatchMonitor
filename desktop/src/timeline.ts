@@ -268,10 +268,14 @@ export function draw(o: DrawOpts): void {
   g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
 
   // ── 마킹 ────────────────────────────────────────────────────────────
-  for (const m of o.marks) {
-    if (m < view.from || m > view.to) continue;
+  //
+  // 선수가 배에서 버튼을 눌러 "이 순간" 이라고 찍어 둔 자리다. 주황 점선만
+  // 그으면 뭔지 알 수가 없어서 위에 깃발과 번호를 붙인다.
+  const MARK = "#f0a020";
+  o.marks.forEach((m, i) => {
+    if (m < view.from || m > view.to) return;
     const x = Math.round(xOf(m)) + 0.5;
-    g.strokeStyle = "#f0a020";
+    g.strokeStyle = MARK;
     g.lineWidth = 1.5;
     g.setLineDash([4, 3]);
     g.beginPath();
@@ -279,7 +283,22 @@ export function draw(o: DrawOpts): void {
     g.lineTo(x, bodyTop + bodyH);
     g.stroke();
     g.setLineDash([]);
-  }
+
+    // 깃발
+    g.fillStyle = MARK;
+    g.beginPath();
+    g.moveTo(x, bodyTop);
+    g.lineTo(x + 15, bodyTop + 5);
+    g.lineTo(x, bodyTop + 10);
+    g.closePath();
+    g.fill();
+    g.fillStyle = "#0b0e12";
+    g.font = "bold 8px ui-monospace, SFMono-Regular, Menlo, monospace";
+    g.textAlign = "left";
+    g.textBaseline = "top";
+    g.fillText(String(i + 1), x + 3, bodyTop + 1);
+    g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+  });
 
   // ── 값들 ────────────────────────────────────────────────────────────
   series.forEach((s, r) => {
