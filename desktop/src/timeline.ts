@@ -99,8 +99,10 @@ export interface DrawOpts {
   view: View;
   /** 마킹이 찍힌 시각 (ms) */
   marks: number[];
-  /** 커서 (마우스가 있는 시각). null 이면 안 그린다 */
+  /** 마우스가 있는 시각. 옅게 그린다. null 이면 안 그린다 */
   cursorMs: number | null;
+  /** 눌러서 고정한 시각. 진하게 그린다 */
+  pinMs: number | null;
   /** 전체 구간. 아래 띠를 그린다 */
   full?: View;
 }
@@ -225,16 +227,41 @@ export function draw(o: DrawOpts): void {
   });
 
   // ── 커서 ────────────────────────────────────────────────────────────
+  //
+  // 두 가지를 그린다.
+  //   따라다니는 커서   마우스를 옮기면 같이 움직인다. 옅게
+  //   고정한 커서       눌러서 박아 둔 자리. 진하게. 마우스를 떼도 남는다
+  //
+  // 영상과 맞춰 보려면 한 자리에 박아 두고 봐야 한다. 마우스를 뗄 때마다
+  // 풀리면 화면을 볼 수가 없다.
   if (o.cursorMs !== null && o.cursorMs >= view.from && o.cursorMs <= view.to) {
     const x = Math.round(xOf(o.cursorMs)) + 0.5;
     g.strokeStyle = ink;
-    g.globalAlpha = 0.5;
+    g.globalAlpha = 0.35;
     g.lineWidth = 1;
     g.beginPath();
     g.moveTo(x, 0);
     g.lineTo(x, bodyH);
     g.stroke();
     g.globalAlpha = 1;
+  }
+
+  if (o.pinMs !== null && o.pinMs >= view.from && o.pinMs <= view.to) {
+    const x = Math.round(xOf(o.pinMs)) + 0.5;
+    g.strokeStyle = "#4ea1ff";
+    g.lineWidth = 1.5;
+    g.beginPath();
+    g.moveTo(x, 0);
+    g.lineTo(x, bodyH);
+    g.stroke();
+    // 위쪽에 작은 손잡이. 어느 것이 고정인지 한눈에 갈린다.
+    g.fillStyle = "#4ea1ff";
+    g.beginPath();
+    g.moveTo(x - 5, 0);
+    g.lineTo(x + 5, 0);
+    g.lineTo(x, 8);
+    g.closePath();
+    g.fill();
   }
 
   // ── 전체 구간 띠 ────────────────────────────────────────────────────

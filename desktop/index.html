@@ -49,9 +49,13 @@
               </div>
             </div>
           </div>
+          <!-- 영상 스크러빙 슬라이더. 타임라인 없이도 영상만 훑을 수 있어야 한다 -->
+          <div id="vseek">
+            <input id="vslider" type="range" min="0" max="1000" value="0" step="1" />
+          </div>
           <div id="vbar">
             <button id="play">▶</button>
-            <span id="vtime" class="mono dim">0:00</span>
+            <span id="vtime" class="mono dim">0:00 / 0:00</span>
             <span class="sep"></span>
             <span class="dim">싱크</span>
             <button id="syncHere" title="지금 보이는 영상 화면이 타임라인 커서 자리라고 알려 준다">여기 맞춤</button>

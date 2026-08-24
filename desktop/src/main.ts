@@ -23,7 +23,15 @@ let series: tl.Series[] = [];
 let marks: number[] = [];
 let view: tl.View = { from: 0, to: 1 };
 let fullSpan: tl.View = { from: 0, to: 1 };
+/** 마우스가 있는 시각. 마우스를 떼면 사라진다 */
 let cursorMs: number | null = null;
+/**
+ * 눌러서 고정한 시각.
+ *
+ * 영상과 맞춰 보려면 한 자리에 박아 두고 봐야 한다. 마우스를 뗄 때마다
+ * 풀리면 화면을 볼 수가 없다. 눌러서 박고, Esc 로 푼다.
+ */
+let pinMs: number | null = null;
 
 // 보관함
 let library: lib.Library = { version: 1, entries: [] };
@@ -232,7 +240,7 @@ function redraw() {
   const c = canvas();
   // 꺼진 칸은 크기가 0 이라 그릴 것도 없다
   if (c.clientWidth < 2 || c.clientHeight < 2) return;
-  tl.draw({ canvas: c, series, view, marks, cursorMs, full: fullSpan });
+  tl.draw({ canvas: c, series, view, marks, cursorMs, pinMs, full: fullSpan });
   const span = view.to - view.from;
   $("range").textContent = session
     ? `${tl.formatDuration(view.from)} ~ ${tl.formatDuration(view.to)}  (${tl.formatDuration(span)} 보는 중)`
@@ -242,10 +250,14 @@ function redraw() {
 
 /** 커서가 놓인 시각의 값을 숫자로 보여준다. 그래프만으로는 못 읽는다. */
 function renderReadout() {
-  if (!session || cursorMs === null) { $("readout").textContent = ""; return; }
-  const parts: string[] = [tl.formatDuration(cursorMs)];
+  // 고정한 자리가 있으면 그걸 보여준다. 마우스를 떼도 숫자가 남아야 한다.
+  const at = pinMs !== null ? pinMs : cursorMs;
+  if (!session || at === null) { $("readout").textContent = ""; return; }
+  const parts: string[] = [
+    (pinMs !== null ? "📍 " : "") + tl.formatDuration(at),
+  ];
   for (const s of series) {
-    const i = nearest(s.xs, cursorMs);
+    const i = nearest(s.xs, at);
     if (i < 0) continue;
     const v = s.ys[i];
     parts.push(
@@ -614,6 +626,8 @@ function loadLayout() {
 // 시간대를 지역 시각으로 적거나) **첫 짐작으로만** 쓰고 사람이 맞춘다.
 
 const video = () => $("vid") as HTMLVideoElement;
+/** 슬라이더를 사람이 끌고 있나. 그동안은 코드가 값을 안 건드린다 */
+let sliderHeld = false;
 
 async function openVideo() {
   const path = await open({
@@ -650,7 +664,14 @@ async function useVideoUrl(url: string, name: string, blob: Blob | null) {
 
 function renderVbar() {
   const v = video();
-  $("vtime").textContent = tl.formatDuration(v.currentTime * 1000);
+  const dur = Number.isFinite(v.duration) ? v.duration : 0;
+  $("vtime").textContent =
+    `${tl.formatDuration(v.currentTime * 1000)} / ${tl.formatDuration(dur * 1000)}`;
+
+  const sl = $("vslider") as HTMLInputElement;
+  sl.disabled = !videoOn || dur <= 0;
+  // 사람이 끌고 있는 동안에는 건드리지 않는다. 손이 튕겨 나간다.
+  if (!sliderHeld && dur > 0) sl.value = String(Math.round((v.currentTime / dur) * 1000));
   $("voff").textContent = videoOn
     ? `영상 0초 = 세션 ${vid.formatOffset(sync.offsetMs)}` +
       (sync.guessed ? "  (파일 시각으로 짐작)" : "")
@@ -677,11 +698,12 @@ function nudge(ms: number) {
 
 /** 지금 영상 화면이 커서 자리라고 알려 준다. 눈으로 맞추는 길이다. */
 function syncHere() {
-  if (!videoOn || cursorMs === null) {
-    setStatus("타임라인에서 맞출 자리에 커서를 두고 누르세요.", "bad");
+  const at = pinMs !== null ? pinMs : cursorMs;
+  if (!videoOn || at === null) {
+    setStatus("타임라인에서 맞출 자리를 눌러 고정하고 누르세요.", "bad");
     return;
   }
-  sync = { ...sync, offsetMs: cursorMs - video().currentTime * 1000, guessed: false };
+  sync = { ...sync, offsetMs: at - video().currentTime * 1000, guessed: false };
   setStatus(`맞췄습니다 — ${vid.formatOffset(sync.offsetMs)}`, "good");
   renderVbar();
   redraw();
@@ -715,6 +737,22 @@ function wire() {
   // ── 영상 조작 ──────────────────────────────────────────────────────
   const v = video();
   $("play").onclick = () => { v.paused ? v.play() : v.pause(); renderVbar(); };
+
+  // 영상 슬라이더. 타임라인 없이 영상만 훑을 때 쓴다.
+  const sl = $("vslider") as HTMLInputElement;
+  const slSeek = () => {
+    const dur = Number.isFinite(v.duration) ? v.duration : 0;
+    if (dur <= 0) return;
+    v.currentTime = (Number(sl.value) / 1000) * dur;
+    // 영상을 옮기면 타임라인 고정도 그 자리로 간다. 둘이 늘 같은 곳을 봐야 한다.
+    pinMs = vid.videoToSession(sync, v.currentTime);
+    renderVbar();
+    redraw();
+  };
+  sl.addEventListener("pointerdown", () => { sliderHeld = true; });
+  sl.addEventListener("input", slSeek);
+  sl.addEventListener("change", () => { sliderHeld = false; slSeek(); });
+  addEventListener("pointerup", () => { sliderHeld = false; });
   $("syncHere").onclick = syncHere;
   // 누른 부호대로 아래 숫자가 움직인다. 반대로 두면 사람이 헷갈린다.
   $("n10").onclick = () => nudge(-10000);
@@ -727,11 +765,14 @@ function wire() {
   // (초당 4번쯤)보다 훨씬 매끄럽다. Safari 15.4 부터 있다.
   const follow = () => {
     if (!v.paused) {
-      cursorMs = vid.videoToSession(sync, v.currentTime);
+      // 재생 중에는 고정 자리가 영상을 따라간다. 지금 보는 프레임이 어디인지
+      // 타임라인에 보여야 한다.
+      pinMs = vid.videoToSession(sync, v.currentTime);
+      cursorMs = pinMs;
       // 커서가 화면 밖으로 나가면 따라 밀어 준다
-      if (cursorMs < view.from || cursorMs > view.to) {
+      if (pinMs < view.from || pinMs > view.to) {
         const span = view.to - view.from;
-        view.from = cursorMs - span * 0.3;
+        view.from = pinMs - span * 0.3;
         view.to = view.from + span;
         clampView();
       }
@@ -839,9 +880,13 @@ function wire() {
     return e.clientY - c.getBoundingClientRect().top >= top;
   };
 
+  // 누른 자리에서 거의 안 움직이고 떼면 "고정", 끌었으면 "밀기" 다.
+  // 한 손으로 둘 다 하려면 이렇게 갈라야 한다.
+  let moved = 0;
   c.addEventListener("pointerdown", (e) => {
     if (!session) return;
     c.setPointerCapture(e.pointerId);
+    moved = 0;
     if (inOverview(e)) {
       drag = { kind: "over", x: e.clientX, from: view.from };
       jumpTo(tl.msAtOverviewX(c, fullSpan, e.clientX));
@@ -864,6 +909,7 @@ function wire() {
       jumpTo(tl.msAtOverviewX(c, fullSpan, e.clientX));
       cursorMs = null;
     } else if (drag?.kind === "pan") {
+      moved = Math.max(moved, Math.abs(e.clientX - drag.x));
       const rect = c.getBoundingClientRect();
       const plotW = rect.width - tl.PLOT_LEFT - 8;
       const span = view.to - view.from;
@@ -874,14 +920,23 @@ function wire() {
     } else {
       cursorMs = inOverview(e) ? null : tl.msAtX(c, view, e.clientX);
     }
-    // 커서를 끌면 영상이 따라온다. 태킹 순간을 짚으면 그때 화면이 뜬다.
-    if (cursorMs !== null && video().paused) seekVideoTo(cursorMs);
+    // 고정 전에는 마우스를 따라 영상이 훑어진다. 고정한 뒤에는 안 움직인다 —
+    // 박아 둔 자리를 보려고 고정한 것이다.
+    if (pinMs === null && cursorMs !== null && video().paused) seekVideoTo(cursorMs);
     redraw();
   });
 
-  const endDrag = () => { drag = null; };
-  c.addEventListener("pointerup", endDrag);
-  c.addEventListener("pointercancel", endDrag);
+  c.addEventListener("pointerup", (e) => {
+    // 4픽셀 안에서 떼면 누른 것으로 본다. 밀려던 것이 아니다.
+    if (drag?.kind === "pan" && moved < 4 && session) {
+      pinMs = tl.msAtX(c, view, e.clientX);
+      seekVideoTo(pinMs);
+      setStatus("이 자리에 고정했습니다. Esc 로 풉니다.");
+    }
+    drag = null;
+    redraw();
+  });
+  c.addEventListener("pointercancel", () => { drag = null; });
   c.addEventListener("pointerleave", () => { cursorMs = null; drag = null; redraw(); });
 
   // 두 번 누르면 그 자리로 크게 당긴다
@@ -909,6 +964,9 @@ function wire() {
       case "2": case "@": (e.shiftKey ? only : toggle)("video"); break;
       case "3": case "#": (e.shiftKey ? only : toggle)("data"); break;
       case "4": case "$": (e.shiftKey ? only : toggle)("info"); break;
+      case "Escape":
+        if (pinMs !== null) { pinMs = null; setStatus("고정을 풀었습니다."); }
+        break;
       case " ": {
         const vv = video();
         if (videoOn) { vv.paused ? vv.play() : vv.pause(); renderVbar(); }

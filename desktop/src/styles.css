@@ -151,3 +151,20 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 
 /* 가운데 두 칸 중 하나가 접히면 나누개도 접는다 */
 #center.solo #split { display: none; }
+
+/* ── 영상 스크러빙 슬라이더 ─────────────────────────────────────── */
+#vseek { padding: 6px 10px 0; background: var(--panel); }
+#vslider {
+  width: 100%; margin: 0; padding: 0; height: 18px;
+  background: transparent; border: none; -webkit-appearance: none; appearance: none;
+  cursor: pointer;
+}
+#vslider::-webkit-slider-runnable-track {
+  height: 5px; border-radius: 3px; background: #2f353f;
+}
+#vslider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: #4ea1ff; border: none; margin-top: -4px;
+}
+#vslider:disabled::-webkit-slider-thumb { background: #4a5160; }
