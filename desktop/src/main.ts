@@ -166,19 +166,45 @@ function buildSeries(s: hlog.Session) {
     az[i] = az_;
   }
 
+  // 이름은 영어가 기본이다. 클래스도 대회도 영어로 돌아가고, 코치가 다른
+  // 분석 도구와 나란히 볼 때 말이 맞아야 한다. 누르면 고칠 수 있다.
   series = [
-    { name: "속도 SOG", unit: "kn", color: "#4ea1ff", xs: navX, ys: sog },
-    { name: "힐 HEEL", unit: "°", color: "#ff7a59", xs: imuX, ys: heel, zeroCentered: true },
-    { name: "트림 PITCH", unit: "°", color: "#ffc857", xs: imuX, ys: pitch, zeroCentered: true },
-    { name: "돌아가는 속도 (yaw)", unit: "°/s", color: "#9d7bff", xs: imuX, ys: gz, zeroCentered: true },
-    { name: "상하 가속 (파도)", unit: "g", color: "#5ad19a", xs: imuX, ys: az },
-    { name: "침로 COG", unit: "°", color: "#77d4e8", xs: navX, ys: cog },
-    { name: "위성 수", unit: "개", color: "#8a8a8a", xs: navX, ys: sv },
+    { code: "SOG",   name: n("SOG", "Speed Over Ground"), unit: "kn",
+      color: "#4ea1ff", xs: navX, ys: sog },
+    { code: "HEEL",  name: n("HEEL", "Heel"), unit: "deg",
+      color: "#ff7a59", xs: imuX, ys: heel, zeroCentered: true },
+    { code: "TRIM",  name: n("TRIM", "Trim"), unit: "deg",
+      color: "#ffc857", xs: imuX, ys: pitch, zeroCentered: true },
+    { code: "YAW",   name: n("YAW", "Yaw Rate"), unit: "deg/s",
+      color: "#9d7bff", xs: imuX, ys: gz, zeroCentered: true },
+    { code: "HEAVE", name: n("HEAVE", "Vertical Accel"), unit: "g",
+      color: "#5ad19a", xs: imuX, ys: az },
+    { code: "COG",   name: n("COG", "Course Over Ground"), unit: "deg",
+      color: "#77d4e8", xs: navX, ys: cog },
+    { code: "SAT",   name: n("SAT", "Satellites"), unit: "count",
+      color: "#8a8a8a", xs: navX, ys: sv },
   ];
-  void cog; void sv;
 }
 
 const clamp = (v: number) => (v > 1 ? 1 : v < -1 ? -1 : v);
+
+// ── 줄 이름 ─────────────────────────────────────────────────────────────
+//
+// 이름은 사람마다 다르게 부른다. 어떤 코치는 "Trim", 어떤 코치는 "Pitch" 다.
+// 고쳐 쓸 수 있게 하고 남긴다.
+const NAMES_KEY = "seriesNames.v1";
+let names: Record<string, string> = {};
+try { names = JSON.parse(localStorage.getItem(NAMES_KEY) ?? "{}"); } catch { /* 처음 */ }
+const n = (code: string, def: string) => names[code] ?? def;
+
+function renameSeries(code: string, value: string) {
+  const v = value.trim();
+  if (v) names[code] = v; else delete names[code];
+  localStorage.setItem(NAMES_KEY, JSON.stringify(names));
+  const s = series.find((x) => x.code === code);
+  if (s) s.name = v || s.code;
+  redraw();
+}
 
 // ── 머리글 표시 ─────────────────────────────────────────────────────────
 
@@ -884,11 +910,51 @@ function wire() {
     return e.clientY - c.getBoundingClientRect().top >= top;
   };
 
+  // ── 이름 고치기 ────────────────────────────────────────────────────
+  //
+  // 이름 칸을 누르면 그 자리에 입력칸을 띄운다. 캔버스 위에 얹는 것이라
+  // 자리를 계산해서 놓아야 한다.
+  let editing: HTMLInputElement | null = null;
+  function closeEdit(commit: boolean) {
+    if (!editing) return;
+    const el = editing;
+    editing = null;
+    if (commit) renameSeries(el.dataset.code!, el.value);
+    el.remove();
+  }
+  function editLabel(row: number) {
+    closeEdit(true);
+    const s = series[row];
+    if (!s) return;
+    const box = tl.labelBox(c, series.length, row);
+    const inp = document.createElement("input");
+    inp.className = "labelEdit";
+    inp.value = s.name;
+    inp.dataset.code = s.code;
+    inp.style.left = `${box.left}px`;
+    inp.style.top = `${box.top}px`;
+    inp.style.width = `${box.width}px`;
+    inp.onkeydown = (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); closeEdit(true); }
+      if (ev.key === "Escape") { ev.preventDefault(); closeEdit(false); }
+      ev.stopPropagation();      // 화살표·스페이스가 타임라인으로 새지 않게
+    };
+    inp.onblur = () => closeEdit(true);
+    c.parentElement!.append(inp);
+    editing = inp;
+    inp.focus();
+    inp.select();
+  }
+
   // 누른 자리에서 거의 안 움직이고 떼면 "고정", 끌었으면 "밀기" 다.
   // 한 손으로 둘 다 하려면 이렇게 갈라야 한다.
   let moved = 0;
   c.addEventListener("pointerdown", (e) => {
     if (!session) return;
+    // 왼쪽 이름 칸이면 이름 고치기다. 그림을 건드리는 게 아니다.
+    const row = tl.rowAtY(c, series.length, e.clientX, e.clientY);
+    if (row >= 0) { editLabel(row); return; }
+    closeEdit(true);
     c.setPointerCapture(e.pointerId);
     moved = 0;
     if (inOverview(e)) {
@@ -925,9 +991,10 @@ function wire() {
       cursorMs = tl.msAtX(c, view, e.clientX);
     } else {
       const over = inOverview(e);
-      cursorMs = over ? null : tl.msAtX(c, view, e.clientX);
-      // 스크롤바 위에서는 손바닥. 잡아서 끌 수 있다는 뜻이다.
-      c.style.cursor = over ? "grab" : "crosshair";
+      const onLabel = tl.rowAtY(c, series.length, e.clientX, e.clientY) >= 0;
+      cursorMs = over || onLabel ? null : tl.msAtX(c, view, e.clientX);
+      // 스크롤바 위에서는 손바닥, 이름 칸에서는 글자 커서.
+      c.style.cursor = over ? "grab" : onLabel ? "text" : "crosshair";
     }
     // 고정 전에는 마우스를 따라 영상이 훑어진다. 고정한 뒤에는 안 움직인다 —
     // 박아 둔 자리를 보려고 고정한 것이다.

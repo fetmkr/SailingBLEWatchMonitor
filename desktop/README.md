@@ -55,6 +55,37 @@ F / 0                  전체 보기
 **확대할 때 커서 아래 시각이 제자리에 있어야 한다.** 가운데를 기준으로
 확대하면 보고 있던 곳이 화면 밖으로 달아난다.
 
+## 왼쪽 이름 칸 — Saleae 방식
+
+값 그림 바깥에 이름 칸을 둔다. 이름을 그림 안에 얹으면 값과 겹쳐서 둘 다
+읽기 어렵다.
+
+```
+SOG                 6.9 kn
+Speed Over Ground   ~~~~~~~~
+                    3.9 kn
+```
+
+**두 줄이면 된다.** 짧은 표시(색깔)와 이름이다. 단위는 세로축 숫자에 붙인다 —
+이름 칸에 한 줄 더 쓰면 세 줄이 되어 어지럽다. Saleae 가 `5 V` 라고 축에
+적는 것과 같다.
+
+**이름을 누르면 고칠 수 있다.** 사람마다 다르게 부른다 — 어떤 코치는 "Trim",
+어떤 코치는 "Pitch" 다. 고친 것은 남는다. `Enter` 로 넣고 `Esc` 로 물린다.
+
+기본 이름은 영어다. 클래스도 대회도 영어로 돌아가고, 다른 분석 도구와
+나란히 볼 때 말이 맞아야 한다.
+
+```
+SOG    Speed Over Ground     kn
+HEEL   Heel                  deg
+TRIM   Trim                  deg
+YAW    Yaw Rate              deg/s
+HEAVE  Vertical Accel        g
+COG    Course Over Ground    deg
+SAT    Satellites            count
+```
+
 ## 시간 축 — Saleae 방식
 
 축을 **위**에 둔다. 눈이 먼저 가는 자리다.

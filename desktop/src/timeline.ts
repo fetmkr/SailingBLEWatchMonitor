@@ -10,6 +10,9 @@
 // 그 봉우리가 우리가 100 Hz 로 기록한 이유다.
 
 export interface Series {
+  /** 짧은 표시. 왼쪽 칸에 색깔로 작게 나온다 ("SOG", "HEEL") */
+  code: string;
+  /** 사람이 고칠 수 있는 이름. 왼쪽 칸에 크게 나온다 */
   name: string;
   unit: string;
   color: string;
@@ -126,7 +129,14 @@ export interface DrawOpts {
   full?: View;
 }
 
-const AXIS_W = 62;
+/**
+ * 왼쪽 이름 칸. Saleae 처럼 값 그림 바깥에 둔다.
+ *
+ * 이름을 그림 안에 얹으면 값과 겹쳐서 둘 다 읽기 어렵다. 밖으로 빼면
+ * 이름은 이름대로, 값은 값대로 읽힌다. 여기를 누르면 이름을 고친다.
+ */
+const LABEL_W = 148;
+const AXIS_W = LABEL_W + 62;
 /** 시간 축. Saleae 처럼 **위**에 둔다 — 눈이 먼저 가는 자리다 */
 const TIME_H = 26;
 const GAP = 8;
@@ -171,6 +181,10 @@ export function draw(o: DrawOpts): void {
   g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
   g.textBaseline = "top";
 
+  // 왼쪽 이름 칸 바탕
+  g.fillStyle = "#181b21";
+  g.fillRect(0, 0, LABEL_W, cssH);
+
   // 축 바탕
   g.fillStyle = "#181b21";
   g.fillRect(0, 0, cssW, TIME_H);
@@ -211,7 +225,7 @@ export function draw(o: DrawOpts): void {
   g.fillStyle = ink;
   g.textAlign = "left";
   g.font = "bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";
-  g.fillText(formatDuration(base), 4, 6);
+  g.fillText(formatDuration(base), LABEL_W + 4, 6);
   g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
 
   // ── 마킹 ────────────────────────────────────────────────────────────
@@ -304,16 +318,40 @@ export function draw(o: DrawOpts): void {
       g.stroke();
     }
 
-    // 이름과 눈금
+    // ── 세로축 눈금 ──
+    //
+    // 단위는 **여기** 붙인다. 이름 칸에 한 줄 더 쓰면 세 줄이 되어 어지럽다.
+    // Saleae 가 "5 V" 라고 축에 적는 것과 같다.
     g.fillStyle = dim;
     g.textAlign = "right";
-    g.fillText(rhi.toFixed(rhi >= 100 ? 0 : 1), AXIS_W - 6, top);
-    g.fillText(rlo.toFixed(rlo <= -100 ? 0 : 1), AXIS_W - 6, bot - 12);
-    g.fillStyle = s.color;
-    g.textAlign = "left";
-    g.fillText(`${s.name} (${s.unit})`, AXIS_W + 6, top + 2);
+    g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    g.fillText(`${rhi.toFixed(rhi >= 100 ? 0 : 1)} ${s.unit}`, AXIS_W - 6, top);
+    g.fillText(`${rlo.toFixed(rlo <= -100 ? 0 : 1)} ${s.unit}`, AXIS_W - 6, bot - 12);
 
+    // ── 왼쪽 이름 칸 — 두 줄이면 된다 ──
+    const midY = top + rowH / 2;
+    g.fillStyle = s.color;
+    g.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
+    g.textAlign = "left";
+    g.fillText(s.code, 10, midY - 15);
+
+    g.fillStyle = ink;
+    g.font = "13px -apple-system, system-ui, sans-serif";
+    g.fillText(s.name, 10, midY - 1);
+
+    // 줄 나눔선
     g.strokeStyle = grid;
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(0, Math.round(bot + GAP / 2) + 0.5);
+    g.lineTo(cssW, Math.round(bot + GAP / 2) + 0.5);
+    g.stroke();
+
+    // 이름 칸과 그림 사이 경계
+    g.beginPath();
+    g.moveTo(LABEL_W + 0.5, top - GAP / 2);
+    g.lineTo(LABEL_W + 0.5, bot + GAP / 2);
+    g.stroke();
     g.beginPath();
     g.moveTo(AXIS_W + 0.5, top);
     g.lineTo(AXIS_W + 0.5, bot);
@@ -406,3 +444,29 @@ export function msAtX(canvas: HTMLCanvasElement, view: View, clientX: number): n
 }
 
 export const PLOT_LEFT = AXIS_W;
+export const LABEL_WIDTH = LABEL_W;
+
+/** 이름 칸에서 마우스가 몇 번째 줄에 있나. 밖이면 -1 */
+export function rowAtY(
+  canvas: HTMLCanvasElement, count: number, clientX: number, clientY: number,
+): number {
+  const r = canvas.getBoundingClientRect();
+  const x = clientX - r.left;
+  if (x < 0 || x > LABEL_W) return -1;
+  const y = clientY - r.top - TIME_H;
+  const bodyH = r.height - TIME_H - OVER_H;
+  const rowH = Math.max(24, (bodyH - GAP * (count - 1)) / count);
+  const i = Math.floor(y / (rowH + GAP));
+  return i >= 0 && i < count && y >= 0 ? i : -1;
+}
+
+/** 그 줄의 이름을 고칠 입력칸을 놓을 자리 (캔버스 기준 픽셀) */
+export function labelBox(
+  canvas: HTMLCanvasElement, count: number, row: number,
+): { left: number; top: number; width: number } {
+  const r = canvas.getBoundingClientRect();
+  const bodyH = r.height - TIME_H - OVER_H;
+  const rowH = Math.max(24, (bodyH - GAP * (count - 1)) / count);
+  const top = TIME_H + row * (rowH + GAP) + rowH / 2 - 15;
+  return { left: 6, top, width: LABEL_W - 12 };
+}
