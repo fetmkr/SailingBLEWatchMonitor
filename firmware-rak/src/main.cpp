@@ -1909,6 +1909,87 @@ static void doSdBench(uint32_t rows) {
 }
 
 
+// ── 저장 버튼 ────────────────────────────────────────────────────────────
+//
+// 기능명세 「조작」의 "저장 버튼을 눌러 기록 시작/종료 — 선수가 명확히 통제".
+//
+// RAK19007 에는 리셋 버튼밖에 없다 [확인: 데이터시트 261번째 줄]. 그래서
+// 2.54 mm 헤더에 직접 단다. **J10 헤더의 1번(BOOT = GPIO0)과 2번(GND)** 이
+// 바로 옆에 붙어 있어서 버튼 두 다리를 그대로 꽂으면 된다.
+//
+// 쓸 수 있는 핀인지 짐작하지 않고 쟀다 (`pin` 명령).
+//   GPIO0  풀업 HIGH, 아무도 안 건드림  → 쓸 수 있다
+//   GPIO21 풀업인데 LOW 로 붙어 있음     → 못 쓴다 (J11 의 IO1)
+//   GPIO14 센서 전원 스위치라 못 쓴다 (J11 의 IO2)
+//
+// ★ 주의: GPIO0 은 부팅할 때 눌려 있으면 보드가 다운로드 모드로 들어간다.
+//   전원을 넣는 순간 누르고 있으면 안 된다. 최종 보드에서는 전용 핀을 쓴다.
+//
+// 누르는 법
+//   짧게(0.05~1초)  이벤트 표식 (마킹)
+//   길게(2초 이상)  기록 시작 / 종료
+//
+// 시작·종료를 길게로 둔 이유는 실수로 세션이 끊기면 안 되기 때문이다.
+// 훈련 중에 자주 쓰는 건 마킹 쪽이다.
+static constexpr int      kButtonPin   = 0;
+static constexpr uint32_t kBtnLongMs   = 2000;
+static constexpr uint32_t kBtnDebounce = 50;
+
+static bool     gBtnDown     = false;
+static uint32_t gBtnDownAt   = 0;
+static bool     gBtnLongDone = false;  // 길게가 이미 먹었나 (떼면서 또 먹지 않게)
+
+static bool logStartNow();             // 아래 "기록 (hlog)" 항목
+
+static void buttonBegin() {
+    pinMode(kButtonPin, INPUT_PULLUP);
+    delay(5);
+    if (digitalRead(kButtonPin) == LOW) {
+        Serial.println("[BTN] GPIO0 이 LOW 입니다 — 버튼이 눌려 있거나 잘못 달렸습니다.");
+    } else {
+        Serial.printf("[BTN] 저장 버튼 GPIO%d (J10 헤더 1번-2번). "
+                      "짧게=마킹, 2초=시작/종료\n", kButtonPin);
+    }
+}
+
+static void buttonPoll(uint32_t nowMs) {
+    const bool down = (digitalRead(kButtonPin) == LOW);
+
+    if (down && !gBtnDown) {
+        gBtnDown = true;
+        gBtnDownAt = nowMs;
+        gBtnLongDone = false;
+        return;
+    }
+
+    // 누르고 있는 동안 2초가 지나면 그 자리에서 먹는다.
+    // 떼야 반응하면 "먹었나?" 를 알 수가 없다. 지금은 LED 로 바로 알려준다.
+    if (down && gBtnDown && !gBtnLongDone && nowMs - gBtnDownAt >= kBtnLongMs) {
+        gBtnLongDone = true;
+        if (hlog::recording()) {
+            Serial.println("[BTN] 길게 — 기록 종료");
+            hlog::stop();
+        } else {
+            Serial.println("[BTN] 길게 — 기록 시작");
+            logStartNow();
+        }
+        return;
+    }
+
+    if (!down && gBtnDown) {
+        const uint32_t held = nowMs - gBtnDownAt;
+        gBtnDown = false;
+        if (gBtnLongDone) return;                 // 이미 길게로 먹었다
+        if (held < kBtnDebounce) return;          // 튐
+        if (hlog::recording()) {
+            Serial.printf("[BTN] 짧게(%ums) — 마킹\n", (unsigned)held);
+            hlog::mark();
+        } else {
+            Serial.println("[BTN] 짧게 — 기록 중이 아닙니다 (2초 누르면 시작)");
+        }
+    }
+}
+
 // ── 기록 (hlog) ──────────────────────────────────────────────────────────
 //
 // 규격은 docs/spec/로그포맷_v1.0_draft_2026-08-24.md, 계획과 실측은 SDLOG.md.
@@ -2022,7 +2103,7 @@ static void logWriteText(uint32_t nowMs) {
     hlog::writeText(buildNav(nowMs), t);
 }
 
-static bool logStartNow() {
+bool logStartNow() {
     hlog::Header h;
     esp_read_mac(h.mac, ESP_MAC_WIFI_STA);
     h.fwVersion = 0x0100;
@@ -2366,6 +2447,7 @@ static void printHelp() {
     Serial.println("  sdbench [줄수] SD 쓰기 속도·최대 멈춤 실측 (기본 3600줄)");
     Serial.println("  rec           ★ 기록 상태. rec on / rec off / rec mark");
     Serial.println("  rec ls / rec check [번호]   파일 목록 / 되읽어 검사");
+    Serial.println("  pin <번호>    그 GPIO 를 5초 지켜본다 (버튼 달 자리 찾기)");
     Serial.println("  oled          화면을 나중에 꽂았을 때 다시 붙이기");
     Serial.println("  gps           UART1 원시 NMEA 5초 (GPS 가 슬롯 A)");
     Serial.println("  gps d         같은 것 (GPS 가 슬롯 D — IO6 로 리셋 해제)");
@@ -2400,6 +2482,42 @@ static void handleCommand(String line) {
     if (line == "batt")                { printBattery(); return; }
     if (line == "imu")                 { doImu();      return; }
     if (line == "sd")                  { doSd();       return; }
+    // 어떤 핀에 버튼을 달 수 있나. 그 핀을 누가 이미 쓰고 있는지 재 본다.
+    // 짐작하지 않는다 — GPS 가 슬롯 A 의 IO1 로 PPS 를 낼 수도 있다.
+    if (line.startsWith("pin ")) {
+        const int g = line.substring(4).toInt();
+        pinMode(g, INPUT_PULLUP);
+        delay(5);
+        Serial.printf("[PIN] GPIO%d 를 5초 봅니다 (내부 풀업). 눌러 보세요.\n", g);
+        int last = digitalRead(g);
+        uint32_t changes = 0, lowMs = 0, t0 = millis(), lastT = t0;
+        while (millis() - t0 < 5000) {
+            const int v = digitalRead(g);
+            if (v != last) {
+                const uint32_t now2 = millis();
+                if (last == LOW) lowMs += now2 - lastT;
+                lastT = now2;
+                last = v;
+                ++changes;
+            }
+            delayMicroseconds(200);
+        }
+        Serial.printf("[PIN] 바뀐 횟수 %u,  LOW 로 있던 시간 %u ms,  지금 %s\n",
+                      (unsigned)changes, (unsigned)lowMs, last == LOW ? "LOW" : "HIGH");
+        if (changes == 0 && last == LOW) {
+            // 내부 풀업을 걸었는데도 LOW 면 누가 끌어내리고 있다는 뜻이다.
+            Serial.println("      ★ 풀업을 걸었는데 LOW 입니다. 누가 이 선을 끌어내리고");
+            Serial.println("        있습니다. 버튼을 달면 눌린 것과 구별이 안 됩니다.");
+        } else if (changes == 0) {
+            Serial.println("      아무도 안 건드립니다 — 버튼 달아도 됩니다.");
+        } else if (changes >= 8) {
+            Serial.println("      ★ 누가 이 선을 흔들고 있습니다 (PPS 같은 것). 다른 핀을 쓰세요.");
+        } else {
+            Serial.println("      몇 번 바뀌었습니다. 누른 게 아니라면 다른 핀을 쓰세요.");
+        }
+        return;
+    }
+
     if (line == "loopstat") {
         gLoopStat = !gLoopStat;
         Serial.printf("[STAT] 루프 시간 출력 %s\n", gLoopStat ? "켬" : "끔");
@@ -2821,6 +2939,8 @@ void setup() {
     Serial.printf("[GPS] UART1 %lubps / %u Hz (RX GPIO%d / TX GPIO%d)\n",
                   (unsigned long)kGpsBaud, gGpsHz, rak::kUART1_RX, rak::kUART1_TX);
 
+    buttonBegin();
+
     if (imuBegin()) {
         imuFifoBegin();
         Serial.printf("[IMU] MPU-9250 붙음 | 자력계 %s\n",
@@ -2920,6 +3040,9 @@ void loop() {
         checkSensors();
         hlog::healthCheck();
     }
+
+    // 1e) 저장 버튼. 사람 손가락이라 자주 볼 필요 없다.
+    buttonPoll(now);
 
     // 1d) 초록 LED — 기록 중이면 1초에 한 번 깜박인다 (기능명세 「조작」).
     //     화면이 없는 실제 모듈에서는 이게 유일한 표시가 된다.
