@@ -64,6 +64,7 @@ static NimBLECharacteristic* gTelemetryChr = nullptr;
 
 static volatile bool gConnected     = false; // 중앙장치 연결 여부
 static volatile bool gAdvNeedsApply = true;  // 광고 모드 재적용 필요
+static bool          gBleUp         = false; // BLE 가 올라와 있나 (WiFi 켜면 내린다)
 static volatile bool gSubscribed    = false; // notify 구독 여부(로그용)
 
 static uint8_t   gSeq = 0; // manufacturer data 시퀀스
@@ -1696,7 +1697,7 @@ static void doSd() {
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
 
     // 4 MHz 로 시작한다. 붙고 나서 필요하면 올린다.
-    if (!SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
         Serial.println("  마운트 실패.");
         Serial.println("");
         Serial.println("  ★ 진짜 이유는 바로 위의 [E] 로 시작하는 줄에 있습니다.");
@@ -1754,7 +1755,7 @@ static void doSdBench(uint32_t rows) {
                   (unsigned)rows, rows / 10.0f);
 
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
         Serial.println("  마운트 실패 — 먼저 sd 로 확인하세요.");
         Serial.println("──────────────────────────────────────────");
         return;
@@ -2950,6 +2951,61 @@ static void handleCommand(String line) {
 // netsrv 가 AP 이름으로 쓴다. 헤더를 서로 물게 하지 않으려고 함수 하나로 낸다.
 const char* sailFullName() { return gFullName; }
 
+// ── BLE 올리기 / 내리기 ──────────────────────────────────────────────────
+//
+// WiFi 를 켤 때 BLE 를 내려야 한다. 안 내리면 칩이 이렇게 말하고 죽는다.
+//
+//   E wifi: Error! Should enable WiFi modem sleep when both WiFi and
+//           Bluetooth are enabled!!!!!!
+//   abort()
+//   [확인: 보드 시리얼 출력 2026-08-24]
+//
+// 둘이 안테나 하나를 나눠 쓰기 때문이다. 같이 켜면 칩이 번갈아 쓰느라
+// WiFi 를 계속 재워야 하고, 그러면 파일 보내는 속도가 안 나온다.
+//
+// 어차피 WiFi 는 훈련이 끝나고 부두에서 잠깐만 켠다. 그때는 워치도 아이폰도
+// 볼 값이 없다. 파일을 다 받고 `wifi off` 하면 BLE 가 다시 올라온다.
+void sailBleStart() {
+    if (gBleUp) return;
+
+    NimBLEDevice::init(gFullName);
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9); // 최대 송신 출력
+
+    gServer = NimBLEDevice::createServer();
+    gServer->setCallbacks(new ServerCallbacks());
+    // 광고 재개는 applyAdvertising() 이 모드까지 맞춰서 직접 처리한다.
+    gServer->advertiseOnDisconnect(false);
+
+    NimBLEService* svc = gServer->createService(sail::kServiceUUID);
+    gTelemetryChr      = svc->createCharacteristic(
+        sail::kTelemetryUUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    gTelemetryChr->setCallbacks(new TelemetryCallbacks());
+
+    uint8_t initial[sail::kTelemetryExtLen];
+    sail::encodeTelemetryExt(gLatest, buildExtra(), initial);
+    gTelemetryChr->setValue(initial, sizeof(initial));
+
+    // NimBLE 2.x 에서는 서버가 시작될 때 서비스도 함께 시작된다(svc->start() 는 no-op).
+    gServer->start();
+
+    gBleUp = true;
+    applyAdvertising();
+    gAdvNeedsApply = false;
+}
+
+void sailBleStop() {
+    if (!gBleUp) return;
+    gBleUp = false;                       // 먼저 내려야 loop 가 안 건드린다
+    // deinit(true) 는 서버·서비스·characteristic 을 다 지운다.
+    // [확인: .pio/libdeps/rak3112/NimBLE-Arduino/src/NimBLEDevice.cpp:1029]
+    NimBLEDevice::deinit(true);
+    gServer       = nullptr;
+    gTelemetryChr = nullptr;
+    gConnected    = false;
+    Serial.println("[BLE] 내렸습니다 (WiFi 쓰는 동안). wifi off 하면 돌아옵니다.");
+}
+
 static void pollSerial() {
     static String buf;
     while (Serial.available() > 0) {
@@ -3043,29 +3099,7 @@ void setup() {
 
     gLatest = buildTelemetry(millis());
 
-    NimBLEDevice::init(gFullName);
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9); // 최대 송신 출력
-
-    gServer = NimBLEDevice::createServer();
-    gServer->setCallbacks(new ServerCallbacks());
-    // 광고 재개는 applyAdvertising() 이 모드까지 맞춰서 직접 처리한다.
-    gServer->advertiseOnDisconnect(false);
-
-    NimBLEService* svc = gServer->createService(sail::kServiceUUID);
-    gTelemetryChr      = svc->createCharacteristic(
-        sail::kTelemetryUUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-    gTelemetryChr->setCallbacks(new TelemetryCallbacks());
-
-    uint8_t initial[sail::kTelemetryExtLen];
-    sail::encodeTelemetryExt(gLatest, buildExtra(), initial);
-    gTelemetryChr->setValue(initial, sizeof(initial));
-
-    // NimBLE 2.x 에서는 서버가 시작될 때 서비스도 함께 시작된다(svc->start() 는 no-op).
-    gServer->start();
-
-    applyAdvertising();
-    gAdvNeedsApply = false;
+    sailBleStart();
 
     digitalWrite(rak::kLedGreen, HIGH); // 초록 = 살아서 광고 중
 }
@@ -3150,23 +3184,25 @@ void loop() {
 
         // 12바이트 뒤에 9축과 GPS 상태를 덧붙여 보낸다. 옛 앱은 앞 12바이트만
         // 읽으므로 그대로 돈다 (PROTOCOL.md §7).
-        uint8_t packet[sail::kTelemetryExtLen];
-        sail::encodeTelemetryExt(gLatest, buildExtra(), packet);
-        gTelemetryChr->setValue(packet, sizeof(packet)); // Read 용 값도 항상 최신
-        if (gConnected) {
-            gTelemetryChr->notify(); // 구독자가 없으면 NimBLE 가 알아서 무시
+        if (gBleUp) {
+            uint8_t packet[sail::kTelemetryExtLen];
+            sail::encodeTelemetryExt(gLatest, buildExtra(), packet);
+            gTelemetryChr->setValue(packet, sizeof(packet)); // Read 용 값도 항상 최신
+            if (gConnected) {
+                gTelemetryChr->notify(); // 구독자가 없으면 NimBLE 가 알아서 무시
+            }
         }
         secDone(gStNotify, micros() - tN);
     }
 
     // 4) 광고 모드 전환 (연결/해제 직후, 또는 이름 변경 직후 한 번)
-    if (gAdvNeedsApply) {
+    if (gBleUp && gAdvNeedsApply) {
         gAdvNeedsApply = false;
         applyAdvertising();
     }
 
     // 5) 1 Hz — 광고 페이로드 갱신
-    if (now - lastAdv >= sail::kAdvRefreshMs) {
+    if (gBleUp && now - lastAdv >= sail::kAdvRefreshMs) {
         lastAdv = now;
         refreshAdvPayload();
     }

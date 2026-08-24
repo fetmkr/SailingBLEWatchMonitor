@@ -119,6 +119,13 @@ static constexpr int kSPI_MOSI = 11;
 static constexpr int kSPI_CLK  = 13;
 static constexpr int kSPI_CS   = 12;
 
+// SD 카드 SPI 속도. 여기 한 군데서만 고친다.
+//
+// 4 MHz 로 시작했는데 파일 보내는 게 느렸다. 실측으로 갈라 보니 161 KB 파일
+// 한 개에 SD 읽기 0.39초 / WiFi 쓰기 0.53초였다 (netsrv 의 handleFile 이
+// 찍는다). SD 도 절반을 먹고 있었다.
+static constexpr uint32_t kSdHz = 20000000;
+
 // ── 베이스보드 LED ───────────────────────────────────────────────────────
 // 빨강 LED 는 충전 표시라 MCU 가 건드릴 수 없다.
 static constexpr int kLedGreen = 46;

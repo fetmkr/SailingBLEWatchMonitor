@@ -13,6 +13,9 @@
 
 // main.cpp 가 준다. 헤더를 서로 물게 하지 않으려고 함수 하나로 받는다.
 extern const char* sailFullName();
+// BLE 를 내렸다 올린다. WiFi 와 같이 켜면 칩이 죽는다 — main.cpp 의 주석 참조.
+extern void sailBleStop();
+extern void sailBleStart();
 
 namespace netsrv {
 namespace {
@@ -34,7 +37,7 @@ bool      gSdUp = false;
 bool sdUp() {
     if (gSdUp) return true;
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    gSdUp = SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5);
+    gSdUp = SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5);
     return gSdUp;
 }
 
@@ -246,11 +249,16 @@ void handleFile() {
     // 4 KB 씩 흘려보낸다. SD 읽기와 WiFi 보내기가 같은 크기라 편하다.
     uint8_t buf[4096];
     uint32_t left = len;
+    uint32_t usRead = 0, usWrite = 0;    // 어디서 시간을 쓰는지 갈라 본다
     while (left > 0) {
         const size_t want = (left > sizeof(buf)) ? sizeof(buf) : left;
+        uint32_t t = micros();
         const int got = f.read(buf, want);
+        usRead += micros() - t;
         if (got <= 0) break;
+        t = micros();
         gServer.client().write(buf, (size_t)got);
+        usWrite += micros() - t;
         left -= (uint32_t)got;
     }
     f.close();
@@ -258,9 +266,11 @@ void handleFile() {
     const uint32_t dt = millis() - t0;
     ++gServedFiles;
     gServedBytes += (len - left);
-    Serial.printf("[NET] %s  %lu 바이트  %.1f초  %.0f KB/초\n",
+    Serial.printf("[NET] %s  %lu 바이트  %.1f초  %.0f KB/초"
+                  "  (SD 읽기 %.2f초  WiFi 쓰기 %.2f초)\n",
                   path, (unsigned long)(len - left), dt / 1000.0f,
-                  dt ? (len - left) / 1.024f / dt : 0.0f);
+                  dt ? (len - left) / 1.024f / dt : 0.0f,
+                  usRead / 1e6f, usWrite / 1e6f);
 }
 
 // 지우기. **파일 안의 세션 번호를 확인 값으로 받는다.**
@@ -374,10 +384,42 @@ void startMdns() {
     }
 }
 
+// WiFi 만 얼마나 나오는지. SD 를 안 건드리고 램에서 바로 보낸다.
+//
+// 파일 받기가 느릴 때 어디가 느린지 갈라 보려고 둔다. 이것과 파일 받기가
+// 비슷하면 WiFi 가 한계고, 이것만 빠르면 SD 나 파일 코드가 느린 것이다.
+//
+//   curl -o /dev/null http://<주소>/api/speed?mb=2
+void handleSpeed() {
+    cors();
+    uint32_t mb = 2;
+    if (gServer.hasArg("mb")) mb = (uint32_t)gServer.arg("mb").toInt();
+    if (mb < 1) mb = 1;
+    if (mb > 32) mb = 32;
+
+    static uint8_t buf[4096];
+    memset(buf, 0x5A, sizeof(buf));
+
+    const uint32_t total = mb * 1024UL * 1024UL;
+    const uint32_t t0 = millis();
+    gServer.setContentLength(total);
+    gServer.send(200, "application/octet-stream", "");
+    for (uint32_t left = total; left; ) {
+        const size_t want = left > sizeof(buf) ? sizeof(buf) : left;
+        gServer.client().write(buf, want);
+        left -= want;
+    }
+    const uint32_t dt = millis() - t0;
+    Serial.printf("[NET] 속도시험 %lu MB  %.1f초  %.0f KB/초\n",
+                  (unsigned long)mb, dt / 1000.0f,
+                  dt ? total / 1.024f / dt : 0.0f);
+}
+
 void routes() {
     gServer.on("/", HTTP_GET, handleRoot);
     gServer.on("/api/status", HTTP_GET, handleStatus);
     gServer.on("/api/files", HTTP_GET, handleFiles);
+    gServer.on("/api/speed", HTTP_GET, handleSpeed);
     gServer.onNotFound([]() {
         if (gServer.uri().startsWith("/file/")) {
             if (gServer.method() == HTTP_DELETE) handleDelete();
@@ -397,13 +439,25 @@ void routes() {
 bool startAP() {
     stop();
     snprintf(gSsid, sizeof(gSsid), "%s", ::sailFullName());
+    ::sailBleStop();          // 이름을 읽은 뒤에 내린다
 
     WiFi.mode(WIFI_AP);
     if (!WiFi.softAP(gSsid, SAIL_AP_PASS)) {
         Serial.println("[NET] AP 를 못 열었습니다.");
         WiFi.mode(WIFI_OFF);
+        ::sailBleStart();
         return false;
     }
+    // 라디오를 재우지 않는다.
+    //
+    // ESP32-S3 는 기본이 WIFI_PS_MIN_MODEM 이다. 비컨과 비컨 사이에 라디오를
+    // 꺼서 전기를 아끼는데, 그동안은 아무것도 못 보낸다.
+    // [확인: framework-arduinoespressif32/libraries/WiFi/src/WiFiGeneric.cpp:769]
+    //
+    // 파일을 내보내는 동안에는 전기보다 속도가 중요하다. 어차피 wifi 는
+    // 훈련이 끝난 뒤 잠깐만 켠다 — 그때는 배가 부두에 있다.
+    WiFi.setSleep(false);
+
     snprintf(gIp, sizeof(gIp), "%s", WiFi.softAPIP().toString().c_str());
     routes();
     gServer.begin();
@@ -427,6 +481,7 @@ bool startJoin(uint32_t timeoutMs) {
         return false;
     }
     stop();
+    ::sailBleStop();
     WiFi.mode(WIFI_STA);
     WiFi.begin(SAIL_WIFI_SSID, SAIL_WIFI_PASS);
     Serial.printf("[NET] %s 에 붙는 중", SAIL_WIFI_SSID);
@@ -440,8 +495,12 @@ bool startJoin(uint32_t timeoutMs) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[NET] 못 붙었습니다. 이름·비밀번호를 보세요.");
         WiFi.mode(WIFI_OFF);
+        ::sailBleStart();
         return false;
     }
+    // 라디오를 재우지 않는다. 자세히는 startAP 의 주석.
+    WiFi.setSleep(false);
+
     snprintf(gSsid, sizeof(gSsid), "%s", SAIL_WIFI_SSID);
     snprintf(gIp, sizeof(gIp), "%s", WiFi.localIP().toString().c_str());
     routes();
@@ -454,7 +513,8 @@ bool startJoin(uint32_t timeoutMs) {
 }
 
 void stop() {
-    if (gMode != Mode::Off) {
+    const bool wasUp = (gMode != Mode::Off);
+    if (wasUp) {
         gServer.stop();
         sdDown();
     }
@@ -462,6 +522,8 @@ void stop() {
     WiFi.mode(WIFI_OFF);
     gMode = Mode::Off;
     gIp[0] = '\0';
+    // WiFi 를 끄면 BLE 를 되살린다. 워치와 아이폰이 다시 붙는다.
+    if (wasUp) ::sailBleStart();
 }
 
 void poll() {

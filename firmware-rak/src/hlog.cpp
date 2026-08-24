@@ -199,7 +199,7 @@ bool start(const Header& h) {
     if (!cardPresent()) { gLastError = "카드가 안 꽂혀 있습니다"; return false; }
 
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
         gLastError = "마운트 실패 — sd 명령으로 이유를 보세요";
         return false;
     }
@@ -331,7 +331,7 @@ void stop() {
     //
     // 전원이 그냥 끊겨서 여기까지 못 오면 closed 가 0 으로 남는다. 데스크탑
     // 앱은 그런 파일도 받을 수 있어야 한다 — 안에는 값이 다 들어 있다.
-    if (SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+    if (SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
         File h = SD.open(gPath, "r+");
         if (h) {
             uint8_t hdr[kHeaderSize];
@@ -510,7 +510,7 @@ void verify(uint32_t session) {
     if (!cardPresent()) { Serial.println("[검사] 카드가 없습니다."); return; }
 
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
         Serial.println("[검사] 마운트 실패 — sd 명령으로 이유를 보세요.");
         return;
     }
@@ -632,7 +632,7 @@ void listFiles() {
     if (gRecording) { Serial.println("[목록] 기록 중에는 못 합니다."); return; }
     if (!cardPresent()) { Serial.println("[목록] 카드가 없습니다."); return; }
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
         Serial.println("[목록] 마운트 실패."); return;
     }
     File dir = SD.open("/LOGS");
