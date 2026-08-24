@@ -14,6 +14,7 @@ import * as lib from "./library";
 import * as vid from "./video";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import * as tl from "./timeline";
+import { TrackMap, type TrackPoint } from "./map";
 import "./styles.css";
 
 // ── 상태 ────────────────────────────────────────────────────────────────
@@ -24,6 +25,8 @@ let series: tl.Series[] = [];
 let marks: tl.Mark[] = [];
 /** 파일에서 읽은 마킹의 시각. 감추기·메모의 열쇠로 쓴다 */
 let fileMarks: number[] = [];
+/** 지도에 그릴 항적. 위성을 잡은 줄만 들어 있다 */
+let track: TrackPoint[] = [];
 let view: tl.View = { from: 0, to: 1 };
 let fullSpan: tl.View = { from: 0, to: 1 };
 /** 마우스가 있는 시각. 마우스를 떼면 사라진다 */
@@ -150,6 +153,7 @@ function loadBytes(buf: Uint8Array, name: string): hlog.Session | null {
     }
   }
 
+  refreshMap();
   redraw();
   return s;
 }
@@ -182,6 +186,7 @@ function buildSeries(s: hlog.Session) {
   const cog = new Float32Array(s.nav.length);
   const sv = new Float32Array(s.nav.length);
   fileMarks = [];
+  track = [];
   for (let i = 0; i < s.nav.length; i++) {
     const r = s.nav[i];
     navX[i] = r.ms - t0;
@@ -190,6 +195,11 @@ function buildSeries(s: hlog.Session) {
     cog[i] = r.cogDeg ?? NaN;
     sv[i] = r.numSv;
     if (r.event & 0x01) fileMarks.push(r.ms - t0);
+    // 지도에 그릴 항적. 위성을 못 잡은 줄은 건너뛴다 — 없는 자리를 0,0 으로
+    // 채우면 배가 아프리카 앞바다(위도 0, 경도 0)를 지나간 것처럼 보인다.
+    if (r.lat !== null && r.lon !== null) {
+      track.push({ ms: r.ms - t0, lat: r.lat, lon: r.lon, sogKn: r.sogKn });
+    }
   }
 
   // 힐·피치를 어느 축에서 봤나. 머리글에 적혀 있다 (hlog.h 의 표).
@@ -393,7 +403,41 @@ function clampView() {
   if (view.to > fullSpan.to) { view.to = fullSpan.to; view.from = view.to - span; }
 }
 
+// ── 지도 ────────────────────────────────────────────────────────────────
+//
+// 처음 볼 때까지 안 띄운다. 남의 타일 서버를 쓰는 일이라 안 보는 사람 몫까지
+// 받아 오면 안 된다.
+let tmap: TrackMap | null = null;
+
+function mapUp(): TrackMap | null {
+  if (!layout.map) return tmap;              // 접혀 있으면 띄우지 않는다
+  if (!tmap) {
+    tmap = new TrackMap($("map"));
+    tmap.onHover = (ms) => { cursorMs = ms; redraw(); };
+    tmap.onPick = (ms) => { pinMs = ms; cursorMs = ms; seekVideoTo(ms); redraw(); };
+    tmap.start();
+    tmap.setSeamark(($("seamark") as HTMLInputElement).checked);
+    tmap.setColorBySog(($("bySog") as HTMLInputElement).checked);
+    tmap.setTrack(track);
+    // 만드는 중에만 밖에서 만질 수 있게 내놓는다. 배포판에는 없다.
+    if (import.meta.env.DEV) (window as any).__map = tmap;
+  }
+  return tmap;
+}
+
+/** 항적이 바뀌었을 때. 위치가 없으면 안내를 띄운다. */
+function refreshMap() {
+  const has = track.length >= 2;
+  $("mapNone").style.display = has ? "none" : "flex";
+  $("mapBar").style.display = has ? "flex" : "none";
+  const m = mapUp();
+  if (m) { m.setTrack(track); m.resize(); }
+}
+
 function redraw() {
+  // 지도의 배 표시는 그래프 칸이 꺼져 있어도 따라와야 한다
+  tmap?.setBoat(pinMs !== null ? pinMs : cursorMs);
+
   const c = canvas();
   // 꺼진 칸은 크기가 0 이라 그릴 것도 없다
   if (c.clientWidth < 2 || c.clientHeight < 2) return;
@@ -777,18 +821,18 @@ async function fetchFile(name: string, size?: number) {
 // 싶을 때가 많다. 그래서 각각 끈다. 끈 칸의 자리는 남은 칸이 나눠 쓴다.
 //
 // 마지막 하나까지 끄면 볼 게 없어진다. 그건 막는다.
-type PaneKey = "lib" | "video" | "data" | "info";
+type PaneKey = "lib" | "video" | "map" | "data" | "info";
 const PANE_EL: Record<PaneKey, string> = {
-  lib: "left", video: "videoPane", data: "dataPane", info: "right",
+  lib: "left", video: "videoPane", map: "mapPane", data: "dataPane", info: "right",
 };
 const LAYOUT_KEY = "layout.v1";
 
 let layout: Record<PaneKey, boolean> = {
-  lib: true, video: true, data: true, info: true,
+  lib: true, video: true, map: true, data: true, info: true,
 };
 
 const PANE_NAME: Record<PaneKey, string> = {
-  lib: "보관함", video: "영상", data: "데이터", info: "정보",
+  lib: "보관함", video: "영상", map: "지도", data: "데이터", info: "정보",
 };
 
 /**
@@ -846,7 +890,7 @@ function applyLayout() {
     const big = el.querySelector<HTMLButtonElement>(".handles .big");
     if (big) {
       big.textContent = alone ? "⤡" : "⤢";
-      big.title = alone ? "넷 다 펼치기" : `${PANE_NAME[k]}만 크게 보기`;
+      big.title = alone ? "다 펼치기" : `${PANE_NAME[k]}만 크게 보기`;
     }
   });
 
@@ -859,6 +903,9 @@ function applyLayout() {
   }
 
   localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+  // 지도는 자기 크기를 스스로 모른다. 칸이 바뀌면 알려 줘야 한다.
+  // 접혀 있던 칸을 펴는 순간이 지도를 처음 띄우는 자리이기도 하다.
+  if (layout.map) { const m = mapUp(); requestAnimationFrame(() => m?.resize()); }
   redraw();
 }
 
@@ -883,10 +930,10 @@ function toggle(k: PaneKey) {
 function only(k: PaneKey) {
   const on = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]);
   if (on.length === 1 && on[0] === k) {
-    layout = { lib: true, video: true, data: true, info: true };
-    setStatus("넷 다 켰습니다.");
+    layout = { lib: true, video: true, map: true, data: true, info: true };
+    setStatus("다 켰습니다.");
   } else {
-    layout = { lib: false, video: false, data: false, info: false, [k]: true };
+    layout = { lib: false, video: false, map: false, data: false, info: false, [k]: true };
     // 손잡이(⤢)는 한 번, 위 띠 단추는 두 번이다. 둘 다 맞는 말로 적는다.
     setStatus(`${PANE_NAME[k]}만 크게 봅니다. 옆의 얇은 띠를 누르면 다시 펼쳐집니다.`);
   }
@@ -903,8 +950,10 @@ function loadLayout() {
         layout = { ...layout, ...l };
         // 다 꺼진 상태로 저장돼 있으면 되돌린다
         if (!Object.values(layout).some(Boolean)) {
-          layout = { lib: true, video: true, data: true, info: true };
+          layout = { lib: true, video: true, map: true, data: true, info: true };
         }
+        // 지도를 나중에 넣었다. 옛 저장값에는 map 이 없어서 undefined 가 된다.
+        if (typeof (layout as any).map !== "boolean") layout.map = true;
       }
     }
   } catch { /* 처음이면 없는 게 정상이다 */ }
@@ -1061,6 +1110,22 @@ function wire() {
   $("sample").onclick = loadSample;
   $("list").onclick = listBoard;
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
+  // ── 지도 단추들 ──
+  const baseSel = $("baseSel") as HTMLSelectElement;
+  baseSel.innerHTML = TrackMap.bases()
+    .map((b) => `<option value="${b.id}">${b.label}</option>`).join("");
+  baseSel.onchange = () => mapUp()?.setBase(baseSel.value);
+  ($("seamark") as HTMLInputElement).onchange = (e) =>
+    mapUp()?.setSeamark((e.target as HTMLInputElement).checked);
+  ($("bySog") as HTMLInputElement).onchange = (e) =>
+    mapUp()?.setColorBySog((e.target as HTMLInputElement).checked);
+  $("mapFit").onclick = () => mapUp()?.fit();
+
+  $("addMark").onclick = () => {
+    if (!session) { setStatus("먼저 파일을 여세요.", "bad"); return; }
+    if (pinMs === null) { setStatus("파란 고정선이 없습니다.", "bad"); return; }
+    addMarkAt(pinMs);
+  };
   $("openVideo").onclick = openVideo;
 
   // ── 영상 조작 ──────────────────────────────────────────────────────
@@ -1449,44 +1514,21 @@ function wire() {
     redraw();
   });
 
-  addEventListener("keydown", (e) => {
-    if (!session) return;
-    const span = view.to - view.from;
-    const step = span * (e.shiftKey ? 0.5 : 0.12);
-    const mid = (view.from + view.to) / 2;
-    switch (e.key) {
-      case "ArrowLeft":  panBy(-step); break;
-      case "ArrowRight": panBy(step); break;
-      case "+": case "=": zoomAt(cursorMs ?? mid, 0.6); break;
-      case "-": case "_": zoomAt(cursorMs ?? mid, 1 / 0.6); break;
-      case "Home": panBy(fullSpan.from - view.from); break;
-      case "End":  panBy(fullSpan.to - view.to); break;
-      case "f": case "F": case "0": view = { ...fullSpan }; break;
-      // 숫자만 누르면 켜고 끄기, 시프트를 같이 누르면 그 칸만 크게
-      case "1": case "!": (e.shiftKey ? only : toggle)("lib"); break;
-      case "2": case "@": (e.shiftKey ? only : toggle)("video"); break;
-      case "3": case "#": (e.shiftKey ? only : toggle)("data"); break;
-      case "4": case "$": (e.shiftKey ? only : toggle)("info"); break;
-      case "m": case "M":
-        if (pinMs !== null) addMarkAt(pinMs);
-        break;
-      case "Escape":
-        // 선을 없애지는 않는다. 없으면 싱크를 걸 자리가 없어진다.
-        pinMs = view.from;
-        setStatus("고정을 화면 왼쪽 끝으로 옮겼습니다.");
-        break;
-      case " ": {
-        const vv = video();
-        if (videoOn) { vv.paused ? vv.play() : vv.pause(); renderVbar(); }
-        break;
-      }
-      default: return;
-    }
-    e.preventDefault();
-    redraw();
-  });
+  // 단축키는 뺐다.
+  //
+  // 창 전체에서 키를 받고 있었다. 그래서 보드 주소에 192.168.0.76 을 치려고
+  // 1 을 누르면 왼쪽 칸이 닫혔다. 1~4 가 칸 켜고 끄기였다.
+  //
+  // 초점이 입력칸에 있으면 넘기는 식으로 막을 수도 있지만, 지금 있는 일은
+  // 전부 단추와 마우스로 된다. 없는 게 낫다.
+  //
+  //   칸 켜고 끄기   칸마다 있는 ⤢ 와 ✕
+  //   전체 보기      위쪽 단추
+  //   당기고 밀기    휠, 그리고 스크롤바 끌기
+  //   마킹 더하기    위쪽 "＋ 마킹" 단추
+  //   영상 재생      영상 밑 단추
 
-  addEventListener("resize", redraw);
+  addEventListener("resize", () => { tmap?.resize(); redraw(); });
   addEventListener("dragover", (e) => e.preventDefault());
 }
 

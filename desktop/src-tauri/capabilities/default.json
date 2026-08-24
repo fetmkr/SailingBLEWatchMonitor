@@ -14,21 +14,33 @@
     "fs:allow-appdata-read-recursive",
     {
       "identifier": "http:default",
+      "comment": [
+        "보드에만 붙는다. 숫자 주소 전부와 .local 이름만 허용한다.",
+        "",
+        "★ 숫자 자리에 별표를 섞으면 안 된다.",
+        "  http://192.168.*.*/* 로 적었더니 보드에 못 붙었다. 화면에 이렇게 떴다.",
+        "     url not allowed on the configured scope: http://192.168.0.76/api/files",
+        "",
+        "  검사는 URLPattern 규격을 따르는데(tauri-plugin-http-2.5.9/src/scope.rs),",
+        "  이 규격이 앞의 192.168 을 IPv4 줄임 표기로 읽어 192.0.0.168 로 펴 버린다.",
+        "  그래서 패턴이 192.0.0.168*.* 이 되고 무슨 주소를 넣어도 안 맞는다.",
+        "  [확인: 크롬에서 new URLPattern({hostname:'192.168.*.*'}).hostname 이",
+        "         '192.0.0.168*.*' 로 나온다]",
+        "",
+        "  *.*.*.* 은 숫자가 안 섞여서 그대로 남고 제대로 걸린다."
+      ],
       "allow": [
         {
-          "url": "http://192.168.4.1/*"
+          "url": "http://*.*.*.*/*"
+        },
+        {
+          "url": "http://*.*.*.*:*/*"
         },
         {
           "url": "http://*.local/*"
         },
         {
-          "url": "http://192.168.*.*/*"
-        },
-        {
-          "url": "http://10.*.*.*/*"
-        },
-        {
-          "url": "http://172.16.*.*/*"
+          "url": "http://*.local:*/*"
         }
       ]
     },

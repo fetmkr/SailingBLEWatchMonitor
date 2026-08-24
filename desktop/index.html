@@ -14,6 +14,7 @@
         <button id="openVideo">영상 열기</button>
         <span class="sep"></span>
         <button id="fit">전체 보기</button>
+        <button id="addMark" title="파란 고정선 자리에 깃발을 답니다">＋ 마킹</button>
         <span id="range" class="dim"></span>
         <span style="flex:1"></span>
       </div>
@@ -65,6 +66,16 @@
             <button id="p10">+10초</button>
             <span id="voff" class="mono dim"></span>
           </div>
+        </div>
+        <div id="mapPane">
+          <div id="map"></div>
+          <div id="mapBar">
+            <select id="baseSel" title="바탕 지도"></select>
+            <label><input id="seamark" type="checkbox" /> 해도 표시</label>
+            <label><input id="bySog" type="checkbox" checked /> 속도로 색칠</label>
+            <button id="mapFit" title="항적 전체가 보이게">항적 맞춤</button>
+          </div>
+          <div id="mapNone" class="dim">위치가 없는 세션입니다.</div>
         </div>
         <div id="split"></div>
         <div id="dataPane">

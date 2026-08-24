@@ -17,7 +17,8 @@
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-fs": "^2.5.1",
     "@tauri-apps/plugin-http": "^2.5.9",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "maplibre-gl": "^6.5.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

@@ -365,10 +365,19 @@ void handleRoot() {
 // 한 대씩 IP 를 찾아다닐 수는 없다. `_sail._tcp` 를 찾으면 켜져 있는 보드가
 // 다 나온다 (TRANSFER.md §3).
 void startMdns() {
-    // 이름에 쓸 수 없는 글자를 뺀다. "SAIL-random()" → "sail-random"
+    // ★ 이름은 **배 이름**으로 짓는다. 붙은 WiFi 이름으로 지으면 안 된다.
+    //
+    // 예전에는 gSsid 를 썼다. AP 모드에서는 gSsid 가 배 이름이라 맞았는데,
+    // 접속 모드에서는 붙은 WiFi 이름이 들어간다. 그래서 공유기에 붙였더니
+    // 보드가 자기를 fetm2g.local 이라고 불렀다 (실측).
+    //
+    // 배가 30대면 30대가 전부 fetm2g.local 을 자기 이름이라고 우긴다.
+    // 이름으로 찾는 게 통째로 망가진다.
+    //
+    // 이름에 쓸 수 없는 글자는 뺀다. "SAIL-random()" → "sail-random"
     char host[32];
     size_t j = 0;
-    for (const char* p = gSsid; *p && j < sizeof(host) - 1; ++p) {
+    for (const char* p = ::sailFullName(); *p && j < sizeof(host) - 1; ++p) {
         const char c = *p;
         if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') host[j++] = c;
         else if (c >= 'A' && c <= 'Z') host[j++] = (char)(c - 'A' + 'a');
@@ -379,7 +388,9 @@ void startMdns() {
     if (MDNS.begin(host)) {
         MDNS.addService("sail", "tcp", 80);
         MDNS.addService("http", "tcp", 80);
-        MDNS.addServiceTxt("sail", "tcp", "name", String(gSsid));
+        // 앱이 목록을 그릴 때 쓰는 값들. 붙어 보지 않고도 배를 고를 수 있게.
+        MDNS.addServiceTxt("sail", "tcp", "name", String(::sailFullName()));
+        MDNS.addServiceTxt("sail", "tcp", "net", String(gSsid));   // 붙은 WiFi
         Serial.printf("[NET] 이름으로도 됩니다 — http://%s.local/\n", host);
     }
 }
