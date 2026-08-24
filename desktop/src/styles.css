@@ -180,3 +180,42 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 }
 
 #syncBtn.on { background: #3b74d1; border-color: #3b74d1; color: #fff; }
+
+/* ── 깃발 고치기 창 ──────────────────────────────────────────────── */
+.flagPanel {
+  position: absolute; z-index: 7; width: 230px; padding: 8px;
+  background: #1b1e24; border: 1px solid #f0a020; border-radius: 6px;
+  box-shadow: 0 6px 18px #0008;
+}
+.flagPanel .frow {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  font-size: 12px;
+}
+.flagPanel .frow:last-child { margin: 6px 0 0; justify-content: flex-end; }
+.flagPanel .fnote { width: 100%; }
+.flagPanel .fdel { border-color: #7a3a3a; color: #ff9a9a; }
+.flagPanel .fdel:hover { background: #4a2020; }
+
+/* ── 진행률 ──────────────────────────────────────────────────────── */
+#prog { display: none; align-items: center; gap: 8px; margin-top: 4px; }
+#prog.on { display: flex; }
+#progBar {
+  flex: 1; height: 5px; border-radius: 3px; background: #2a2e36;
+  position: relative; overflow: hidden;
+}
+#progBar::after {
+  content: ""; position: absolute; inset: 0 auto 0 0;
+  width: var(--p, 0%); background: #4ea1ff; border-radius: 3px;
+  transition: width .1s linear;
+}
+/* 얼마나 걸릴지 모를 때는 좌우로 오간다 */
+#prog.busy #progBar::after {
+  width: 30%; animation: sweep 1.1s ease-in-out infinite;
+}
+@keyframes sweep { 0% { left: -30%; } 100% { left: 100%; } }
+#progText { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); }
+
+.file .get {
+  padding: 3px 9px; font-size: 12px; margin-top: 4px;
+}
+.file.got .get { opacity: .6; }

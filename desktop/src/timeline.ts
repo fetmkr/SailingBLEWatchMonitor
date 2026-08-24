@@ -115,12 +115,20 @@ function tickStep(spanMs: number, want: number): number {
   return 3600000;
 }
 
+/** 마킹 하나. 파일에서 온 것과 사람이 더한 것이 섞인다 */
+export interface Mark {
+  ms: number;
+  note: string;
+  /** file = 배에서 버튼으로 찍은 것, user = 사람이 나중에 더한 것 */
+  from: "file" | "user";
+}
+
 export interface DrawOpts {
   canvas: HTMLCanvasElement;
   series: Series[];
   view: View;
-  /** 마킹이 찍힌 시각 (ms) */
-  marks: number[];
+  /** 마킹 */
+  marks: Mark[];
   /** 마우스가 있는 시각. 옅게 그린다. null 이면 안 그린다 */
   cursorMs: number | null;
   /** 눌러서 고정한 시각. 진하게 그린다 */
@@ -153,6 +161,35 @@ export function labelWidth(): number { return LABEL_W; }
 export function setLabelWidth(px: number): void {
   LABEL_W = Math.min(360, Math.max(70, Math.round(px)));
 }
+// 마지막으로 그린 자리들. 마우스가 그 위에 있는지 보려고 기억해 둔다.
+let pillBox: { x: number; y: number; w: number; h: number } | null = null;
+const flagBoxes: { i: number; x: number; y: number; w: number; h: number }[] = [];
+
+/** 마우스가 파란 알약(고정 손잡이) 위에 있나 */
+export function onPinPill(canvas: HTMLCanvasElement, cx: number, cy: number): boolean {
+  if (!pillBox) return false;
+  const r = canvas.getBoundingClientRect();
+  const x = cx - r.left, y = cy - r.top;
+  return x >= pillBox.x - 3 && x <= pillBox.x + pillBox.w + 3 &&
+         y >= pillBox.y - 3 && y <= pillBox.y + pillBox.h + 3;
+}
+
+/** 마우스 밑에 깃발이 있으면 그 번호, 없으면 -1 */
+export function flagAt(canvas: HTMLCanvasElement, cx: number, cy: number): number {
+  const r = canvas.getBoundingClientRect();
+  const x = cx - r.left, y = cy - r.top;
+  for (const b of flagBoxes) {
+    if (x >= b.x && x <= b.x + b.w && y >= b.y - 2 && y <= b.y + b.h + 2) return b.i;
+  }
+  return -1;
+}
+
+/** 그 깃발 옆에 입력칸을 놓을 자리 */
+export function flagBox(i: number): { left: number; top: number } | null {
+  const b = flagBoxes.find((f) => f.i === i);
+  return b ? { left: b.x, top: b.y + 14 } : null;
+}
+
 /** 마우스가 위 시간 축에 있나 (거기를 끌면 화면이 밀린다) */
 export function onTimeAxis(canvas: HTMLCanvasElement, clientY: number): boolean {
   return clientY - canvas.getBoundingClientRect().top < TIME_H;
@@ -272,7 +309,9 @@ export function draw(o: DrawOpts): void {
   // 선수가 배에서 버튼을 눌러 "이 순간" 이라고 찍어 둔 자리다. 주황 점선만
   // 그으면 뭔지 알 수가 없어서 위에 깃발과 번호를 붙인다.
   const MARK = "#f0a020";
-  o.marks.forEach((m, i) => {
+  flagBoxes.length = 0;
+  o.marks.forEach((mk, i) => {
+    const m = mk.ms;
     if (m < view.from || m > view.to) return;
     const x = Math.round(xOf(m)) + 0.5;
     g.strokeStyle = MARK;
@@ -284,19 +323,32 @@ export function draw(o: DrawOpts): void {
     g.stroke();
     g.setLineDash([]);
 
-    // 깃발
+    // 깃발 + 메모. 눌러서 고치거나 지울 수 있게 자리를 기억해 둔다.
+    g.font = "10px -apple-system, system-ui, sans-serif";
+    const note = mk.note.trim();
+    const nw = note ? g.measureText(note).width + 6 : 0;
+    const fw = 16 + nw;
+
     g.fillStyle = MARK;
     g.beginPath();
     g.moveTo(x, bodyTop);
-    g.lineTo(x + 15, bodyTop + 5);
-    g.lineTo(x, bodyTop + 10);
+    g.lineTo(x + fw, bodyTop);
+    g.lineTo(x + fw + 5, bodyTop + 6);
+    g.lineTo(x + fw, bodyTop + 12);
+    g.lineTo(x, bodyTop + 12);
     g.closePath();
     g.fill();
+
     g.fillStyle = "#0b0e12";
-    g.font = "bold 8px ui-monospace, SFMono-Regular, Menlo, monospace";
     g.textAlign = "left";
     g.textBaseline = "top";
-    g.fillText(String(i + 1), x + 3, bodyTop + 1);
+    g.font = "bold 8px ui-monospace, SFMono-Regular, Menlo, monospace";
+    g.fillText(String(i + 1), x + 3, bodyTop + 2);
+    if (note) {
+      g.font = "10px -apple-system, system-ui, sans-serif";
+      g.fillText(note, x + 13, bodyTop + 1);
+    }
+    flagBoxes.push({ i, x, y: bodyTop, w: fw + 5, h: 12 });
     g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
   });
 
@@ -466,6 +518,7 @@ export function draw(o: DrawOpts): void {
     const pw = tw + 12, ph = 17;
     let px = x - pw / 2;
     px = Math.max(axisW(), Math.min(px, cssW - pw - 2));
+    pillBox = { x: px, y: 4, w: pw, h: ph };
     g.fillStyle = PIN;
     g.beginPath();
     g.roundRect(px, 4, pw, ph, 4);

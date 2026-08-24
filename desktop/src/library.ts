@@ -72,6 +72,17 @@ export interface Entry {
   /** 훈련 묶음. 같은 날 같은 세션에 여러 척이 나가면 같은 값을 준다 */
   group: string;
   starred: boolean;
+
+  /**
+   * 마킹에 코치가 손댄 것.
+   *
+   * **원본 파일은 안 건드린다.** 배에서 찍힌 마킹은 파일 안에 그대로 있고,
+   * 여기에는 "무슨 메모를 붙였나 / 어느 것을 감췄나 / 어느 것을 더했나" 만
+   * 둔다. 그래야 나중에 원본을 다시 읽어도 코치가 적은 것이 안 날아간다.
+   */
+  markNotes?: Record<string, string>;   // 시각(ms) → 메모
+  markHidden?: number[];                // 감춘 파일 마킹의 시각(ms)
+  markAdded?: { ms: number; note: string }[];
 }
 
 export interface Library {
@@ -143,6 +154,7 @@ export async function put(
       title: "", sailor: "", boatClass: "", venue: "",
       windKn: "", windDir: "", waves: "", rig: "", notes: "",
       group: "", starred: false,
+      markNotes: {}, markHidden: [], markAdded: [],
     }),
     id, file, bytes: bytes.length,
     module: header.module,

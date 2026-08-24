@@ -20,7 +20,10 @@ import "./styles.css";
 
 let session: hlog.Session | null = null;
 let series: tl.Series[] = [];
-let marks: number[] = [];
+/** 화면에 보이는 마킹. 파일에서 온 것 + 코치가 더한 것 */
+let marks: tl.Mark[] = [];
+/** 파일에서 읽은 마킹의 시각. 감추기·메모의 열쇠로 쓴다 */
+let fileMarks: number[] = [];
 let view: tl.View = { from: 0, to: 1 };
 let fullSpan: tl.View = { from: 0, to: 1 };
 /** 마우스가 있는 시각. 마우스를 떼면 사라진다 */
@@ -76,6 +79,27 @@ const originMs = () => (timeOrigin === "video" && videoOn ? sync.offsetMs : 0);
 const $ = (id: string) => document.getElementById(id)!;
 const canvas = () => $("plot") as HTMLCanvasElement;
 
+/**
+ * 진행률.
+ *
+ * 보드에서 목록을 받는 데도 시간이 걸린다 — 파일마다 머리글을 읽기 때문이다.
+ * 90 MB 를 내려받으면 더 오래 걸린다. 아무 표시가 없으면 사람은 앱이 멈춘
+ * 줄 안다.
+ *
+ *   pct 가 null 이면 "얼마나 걸릴지 모름" — 막대가 좌우로 오간다
+ */
+function setProgress(text: string | null, pct: number | null = null) {
+  const box = $("prog");
+  if (text === null) {
+    box.className = "";
+    $("progText").textContent = "";   // 끝났는데 글자가 남아 있으면 안 된다
+    return;
+  }
+  box.className = pct === null ? "on busy" : "on";
+  $("progText").textContent = text;
+  if (pct !== null) $("progBar").style.setProperty("--p", `${Math.round(pct * 100)}%`);
+}
+
 function setStatus(text: string, kind: "" | "bad" | "good" = "") {
   const el = $("status");
   el.textContent = text;
@@ -108,6 +132,7 @@ function loadBytes(buf: Uint8Array, name: string): hlog.Session | null {
 
   session = s;
   buildSeries(s);
+  rebuildMarks();
   renderHeader(s, name, ms, buf.length);
   fitAll();
 
@@ -138,6 +163,7 @@ async function intake(buf: Uint8Array, name: string) {
     const r = await lib.put(library, buf, s.header, c.ok, c.problems);
     library = r.lib;
     openId = r.entry.id;
+    rebuildMarks();
     renderSide();
     renderDetails();
   } catch (e) {
@@ -155,7 +181,7 @@ function buildSeries(s: hlog.Session) {
   const sog = new Float32Array(s.nav.length);
   const cog = new Float32Array(s.nav.length);
   const sv = new Float32Array(s.nav.length);
-  marks = [];
+  fileMarks = [];
   for (let i = 0; i < s.nav.length; i++) {
     const r = s.nav[i];
     navX[i] = r.ms - t0;
@@ -163,7 +189,7 @@ function buildSeries(s: hlog.Session) {
     sog[i] = r.sogKn ?? NaN;
     cog[i] = r.cogDeg ?? NaN;
     sv[i] = r.numSv;
-    if (r.event & 0x01) marks.push(r.ms - t0);
+    if (r.event & 0x01) fileMarks.push(r.ms - t0);
   }
 
   // 힐·피치를 어느 축에서 봤나. 머리글에 적혀 있다 (hlog.h 의 표).
@@ -213,6 +239,68 @@ function buildSeries(s: hlog.Session) {
 }
 
 const clamp = (v: number) => (v > 1 ? 1 : v < -1 ? -1 : v);
+
+// ── 마킹 ────────────────────────────────────────────────────────────────
+//
+// 배에서 찍힌 것은 파일 안에 있고 못 고친다. 코치가 붙이는 메모, 감춘 것,
+// 나중에 더한 것은 보관함(library.json)에만 둔다. **원본은 안 건드린다.**
+function entryNow(): lib.Entry | undefined {
+  return library.entries.find((e) => e.id === openId);
+}
+
+function rebuildMarks() {
+  const e = entryNow();
+  const notes = e?.markNotes ?? {};
+  const hidden = new Set(e?.markHidden ?? []);
+  const added = e?.markAdded ?? [];
+
+  marks = [
+    ...fileMarks.filter((m) => !hidden.has(m))
+      .map((m): tl.Mark => ({ ms: m, note: notes[String(m)] ?? "", from: "file" })),
+    ...added.map((a): tl.Mark => ({
+      ms: a.ms, note: notes[String(a.ms)] ?? a.note, from: "user",
+    })),
+  ].sort((a, b) => a.ms - b.ms);
+}
+
+function saveMarks(patch: Partial<lib.Entry>) {
+  if (!openId) return;
+  library = lib.update(library, openId, patch);
+  rebuildMarks();
+  redraw();
+}
+
+function addMarkAt(ms: number) {
+  const e = entryNow();
+  if (!e) { setStatus("보관함에 없는 파일이라 표식을 못 답니다.", "bad"); return; }
+  const added = [...(e.markAdded ?? []), { ms, note: "" }];
+  saveMarks({ markAdded: added });
+  setStatus(`${tl.formatDuration(ms - originMs())} 에 표식을 달았습니다.`);
+}
+
+function removeMark(i: number) {
+  const m = marks[i];
+  const e = entryNow();
+  if (!m || !e) return;
+  if (m.from === "file") {
+    // 배에서 찍힌 것은 지우지 않고 감춘다. 원본에는 그대로 남아 있다.
+    saveMarks({ markHidden: [...(e.markHidden ?? []), m.ms] });
+    setStatus("배에서 찍힌 표식이라 화면에서만 감췄습니다. 파일에는 남아 있습니다.");
+  } else {
+    saveMarks({ markAdded: (e.markAdded ?? []).filter((a) => a.ms !== m.ms) });
+    setStatus("표식을 지웠습니다.");
+  }
+}
+
+function noteMark(i: number, note: string) {
+  const m = marks[i];
+  const e = entryNow();
+  if (!m || !e) return;
+  const notes = { ...(e.markNotes ?? {}) };
+  const v = note.trim();
+  if (v) notes[String(m.ms)] = v; else delete notes[String(m.ms)];
+  saveMarks({ markNotes: notes });
+}
 
 // ── 줄 이름 ─────────────────────────────────────────────────────────────
 //
@@ -343,10 +431,10 @@ function renderReadout() {
     );
   }
   // 가까운 마킹이 있으면 알려 준다. 주황 점선이 뭔지 물어볼 일이 없게.
-  const near = marks.findIndex((m) => Math.abs(m - at) < (view.to - view.from) * 0.01);
+  const near = marks.findIndex((m) => Math.abs(m.ms - at) < (view.to - view.from) * 0.01);
   if (near >= 0) {
     parts.splice(1, 0,
-      `<b style="color:#f0a020">⚑ 마킹 ${near + 1}</b>`);
+      `<b style="color:#f0a020">⚑ ${near + 1}${marks[near].note ? " " + esc(marks[near].note) : ""}</b>`);
   }
   $("readout").innerHTML = parts.join("　");
 }
@@ -385,13 +473,17 @@ function boardUrl(): string {
 
 async function listBoard() {
   setStatus("보드에 물어보는 중…");
+  // 보드가 파일마다 머리글을 읽어야 해서 몇 초 걸린다. 그동안 표시를 둔다.
+  setProgress("보드에서 파일 목록을 받는 중…");
   try {
     const r = await netFetch(`${boardUrl()}/api/files`, { method: "GET" });
     const j = (await r.json()) as { ok: boolean; files: FileInfo[] };
     boardFiles = j.files ?? [];
     renderSide();
-    setStatus(`파일 ${j.files?.length ?? 0}개`, "good");
+    setProgress(null);
+    setStatus(`파일 ${j.files?.length ?? 0}개 — 받을 것을 고르세요`, "good");
   } catch (e) {
+    setProgress(null);
     const why = e instanceof TypeError
       ? "주소가 맞는지, 보드 WiFi 에 붙어 있는지 보세요"
       : String(e);
@@ -465,6 +557,7 @@ async function openEntry(id: string) {
   setStatus("읽는 중…");
   openId = id;
   loadBytes(await lib.readEntry(e), e.title || e.sailor || e.file);
+  rebuildMarks();
   renderSide();
   renderDetails();
 }
@@ -535,28 +628,86 @@ function renderFileList(files: FileInfo[]) {
       // 이미 받은 것은 흐리게. 같은 걸 두 번 받을 이유가 없다.
       const mine = f.module && f.session !== undefined
         && have.has(lib.entryId(f.module, f.session));
-      return `<div class="file ${mine ? "got" : ""}" data-name="${f.name}">
+      return `<div class="file ${mine ? "got" : ""}" data-name="${f.name}" data-size="${f.size}">
         <div><b>${f.name}</b> <span class="dim">${(f.size / 1048576).toFixed(2)} MB</span>
           ${mine ? "<span class='good'>받음</span>" : ""}</div>
         <div class="dim">세션 ${f.session ?? "?"} · ${when} · ${dur} ${bad} ${notClosed}</div>
+        <button class="get">${mine ? "다시 받기" : "받기"}</button>
       </div>`;
     })
     .join("");
 
-  box.querySelectorAll<HTMLElement>(".file").forEach((el) => {
-    el.onclick = () => fetchFile(el.dataset.name!);
+  // 줄을 누르는 것만으로는 안 받는다. 90 MB 를 실수로 받으면 안 된다.
+  box.querySelectorAll<HTMLElement>(".file .get").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const el = (btn as HTMLElement).closest<HTMLElement>(".file")!;
+      fetchFile(el.dataset.name!, Number(el.dataset.size) || undefined);
+    };
   });
 }
 
-async function fetchFile(name: string) {
+const MB = (n: number) => (n / 1048576).toFixed(2);
+
+let fetching = false;
+
+async function fetchFile(name: string, size?: number) {
+  if (fetching) { setStatus("이미 하나 받는 중입니다.", "bad"); return; }
+  fetching = true;
+  document.querySelectorAll<HTMLButtonElement>(".file .get")
+    .forEach((b) => { b.disabled = true; });
   setStatus(`${name} 받는 중…`);
+  setProgress(size ? `${name}  0 / ${MB(size)} MB` : `${name} 받는 중…`, size ? 0 : null);
+  const t0 = performance.now();
   try {
     const r = await netFetch(`${boardUrl()}/file/${name}`, { method: "GET" });
-    if (!r.ok) { setStatus(`받기 실패 — HTTP ${r.status}`, "bad"); return; }
-    const buf = new Uint8Array(await r.arrayBuffer());
+    if (!r.ok) {
+      setProgress(null);
+      setStatus(`받기 실패 — HTTP ${r.status}`, "bad");
+      return;
+    }
+
+    const total = Number(r.headers.get("content-length")) || size || 0;
+    let buf: Uint8Array;
+
+    // 조각조각 받으면서 얼마나 왔는지 보여준다. 90 MB 를 아무 말 없이
+    // 기다리게 두면 안 된다.
+    if (r.body) {
+      const reader = r.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let got = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        got += value.length;
+        setProgress(
+          `${name}  ${MB(got)} / ${total ? MB(total) + " MB" : "?"}` +
+          `  ·  ${(got / 1024 / ((performance.now() - t0) / 1000)).toFixed(0)} KB/초`,
+          total ? got / total : null,
+        );
+      }
+      buf = new Uint8Array(got);
+      let at = 0;
+      for (const ch of chunks) { buf.set(ch, at); at += ch.length; }
+    } else {
+      buf = new Uint8Array(await r.arrayBuffer());
+    }
+
+    const sec = (performance.now() - t0) / 1000;
+    setProgress(`${name} 검사하는 중…`);
     await intake(buf, name);
+    setProgress(null);
+    setStatus(
+      `${name} 받았습니다 — ${MB(buf.length)} MB, ${sec.toFixed(1)}초 ` +
+      `(${(buf.length / 1024 / sec).toFixed(0)} KB/초)`, "good");
   } catch (e) {
+    setProgress(null);
     setStatus(`받기 실패 — ${e}`, "bad");
+  } finally {
+    fetching = false;
+    document.querySelectorAll<HTMLButtonElement>(".file .get")
+      .forEach((b) => { b.disabled = false; });
   }
 }
 
@@ -1012,7 +1163,7 @@ function wire() {
   }, { passive: false });
 
   // 끌기 — 본 화면이면 밀기, 아래 띠면 그 자리로
-  type Drag = { kind: "pan" | "over" | "scrub"; x: number; from: number };
+  type Drag = { kind: "pan" | "over" | "scrub" | "pill"; x: number; from: number };
   let drag: Drag | null = null;
 
   const inOverview = (e: PointerEvent) => {
@@ -1056,6 +1207,49 @@ function wire() {
     inp.select();
   }
 
+  // ── 깃발 고치기 ────────────────────────────────────────────────────
+  //
+  // 깃발을 누르면 그 옆에 작은 창이 뜬다. 메모를 적거나 지운다.
+  let flagPanel: HTMLElement | null = null;
+  function closeFlag() { flagPanel?.remove(); flagPanel = null; }
+
+  function editFlag(i: number) {
+    closeFlag();
+    const m = marks[i];
+    const box = tl.flagBox(i);
+    if (!m || !box) return;
+
+    const el = document.createElement("div");
+    el.className = "flagPanel";
+    el.style.left = `${box.left}px`;
+    el.style.top = `${box.top}px`;
+    el.innerHTML = `
+      <div class="frow"><b>⚑ ${i + 1}</b>
+        <span class="dim">${tl.formatDuration(m.ms - originMs())}</span>
+        <span class="dim">${m.from === "file" ? "배에서 찍음" : "직접 단 것"}</span>
+      </div>
+      <input class="fnote" placeholder="메모 (예: 태킹 좋았음)" />
+      <div class="frow"><button class="fdel">지우기</button><button class="fok">확인</button></div>`;
+    c.parentElement!.append(el);
+    flagPanel = el;
+
+    const inp = el.querySelector<HTMLInputElement>(".fnote")!;
+    inp.value = m.note;
+    inp.onkeydown = (ev) => {
+      ev.stopPropagation();
+      if (ev.key === "Enter") { noteMark(i, inp.value); closeFlag(); }
+      if (ev.key === "Escape") closeFlag();
+    };
+    el.querySelector<HTMLButtonElement>(".fok")!.onclick = () => {
+      noteMark(i, inp.value); closeFlag();
+    };
+    el.querySelector<HTMLButtonElement>(".fdel")!.onclick = () => {
+      removeMark(i); closeFlag();
+    };
+    inp.focus();
+    inp.select();
+  }
+
   // ── 끌면 훑는다 ────────────────────────────────────────────────────
   //
   // 그림 위를 끌면 고정 자리가 따라오고 영상도 같이 훑어진다. 영상 편집기
@@ -1075,6 +1269,19 @@ function wire() {
       c.setPointerCapture(e.pointerId);
       return;
     }
+    // 깃발을 누르면 고치기 창
+    const fi = tl.flagAt(c, e.clientX, e.clientY);
+    if (fi >= 0) { editFlag(fi); return; }
+    closeFlag();
+
+    // 파란 알약을 잡으면 고정 자리를 끌어 옮긴다
+    if (tl.onPinPill(c, e.clientX, e.clientY)) {
+      drag = { kind: "pill", x: e.clientX, from: view.from };
+      c.setPointerCapture(e.pointerId);
+      c.style.cursor = "grabbing";
+      return;
+    }
+
     // 왼쪽 이름 칸이면 이름 고치기다. 그림을 건드리는 게 아니다.
     const row = tl.rowAtY(c, series.length, e.clientX, e.clientY);
     if (row >= 0) { editLabel(row); return; }
@@ -1119,6 +1326,11 @@ function wire() {
       jumpTo(tl.msAtOverviewX(c, fullSpan, e.clientX));
       cursorMs = null;
       c.style.cursor = "grabbing";
+    } else if (drag?.kind === "pill") {
+      // 알약을 끌면 고정 자리가 따라온다. 영상도 (물려 있으면) 같이 간다.
+      pinMs = tl.msAtX(c, view, e.clientX);
+      cursorMs = pinMs;
+      seekVideoTo(pinMs);
     } else if (drag?.kind === "scrub") {
       pinMs = tl.msAtX(c, view, e.clientX);
       cursorMs = pinMs;
@@ -1135,11 +1347,16 @@ function wire() {
     } else {
       const over = inOverview(e);
       const edge = tl.onLabelEdge(c, e.clientX);
-      const axis = tl.onTimeAxis(c, e.clientY);
+      const pill = tl.onPinPill(c, e.clientX, e.clientY);
+      const flag = tl.flagAt(c, e.clientX, e.clientY) >= 0;
+      const axis = !pill && tl.onTimeAxis(c, e.clientY);
       const onLabel = !edge && tl.rowAtY(c, series.length, e.clientX, e.clientY) >= 0;
-      cursorMs = over || onLabel || edge || axis ? null : tl.msAtX(c, view, e.clientX);
+      cursorMs = over || onLabel || edge || axis || pill || flag
+        ? null : tl.msAtX(c, view, e.clientX);
       c.style.cursor = edge ? "col-resize"
-        : over || axis ? "grab"        // 스크롤 막대와 시간 축은 잡아서 미는 자리
+        : pill ? "grab"                // 파란 알약은 잡아서 옮기는 손잡이
+        : flag ? "pointer"             // 깃발은 눌러서 고치는 것
+        : over || axis ? "grab"
         : onLabel ? "text"
         : "crosshair";
       // 물려 있고 아직 고정 안 했으면 마우스만 움직여도 영상이 따라온다.
@@ -1190,6 +1407,9 @@ function wire() {
       case "2": case "@": (e.shiftKey ? only : toggle)("video"); break;
       case "3": case "#": (e.shiftKey ? only : toggle)("data"); break;
       case "4": case "$": (e.shiftKey ? only : toggle)("info"); break;
+      case "m": case "M":
+        if (pinMs !== null) addMarkAt(pinMs);
+        break;
       case "Escape":
         // 선을 없애지는 않는다. 없으면 싱크를 걸 자리가 없어진다.
         pinMs = view.from;
