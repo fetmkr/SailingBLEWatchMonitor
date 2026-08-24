@@ -76,6 +76,21 @@ function loadBytes(buf: Uint8Array, name: string): hlog.Session | null {
   buildSeries(s);
   renderHeader(s, name, ms, buf.length);
   fitAll();
+
+  // 세션을 바꾸면 영상 싱크를 다시 짐작한다.
+  //
+  // 싱크는 "영상 0초가 이 세션의 몇 초냐" 다. 세션마다 시작한 시각이 다르니
+  // 앞 세션에서 맞춘 값은 새 세션에서 뜻이 없다. 그대로 두면 엉뚱한 자리를
+  // 가리키는데 사람은 맞는 줄 안다.
+  if (videoOn) {
+    const first = s.imu[0]?.ms ?? s.nav[0]?.ms ?? 0;
+    sync = vid.guessOffset(sync.fileTime, s.header.utcStart, first);
+    renderVbar();
+    if (!sync.guessed) {
+      setStatus("세션이 바뀌어서 영상 싱크를 다시 맞춰야 합니다.", "bad");
+    }
+  }
+
   redraw();
   return s;
 }
@@ -262,6 +277,12 @@ interface FileInfo {
   dropped?: number; fixed?: boolean;
 }
 
+// 앱에서는 Tauri 의 http 를 쓴다. 브라우저에서는 그게 없으니 보통 fetch 로
+// 넘어간다 — 만드는 동안 보드 없이 화면을 시험할 수 있게 하려는 것이다.
+// (앱에서 Tauri 것을 쓰는 이유는 브라우저의 출처 제한을 안 받기 때문이다)
+const inApp = typeof (globalThis as any).__TAURI_INTERNALS__ !== "undefined";
+const netFetch: typeof fetch = inApp ? (tfetch as unknown as typeof fetch) : fetch;
+
 function boardUrl(): string {
   const v = ($("host") as HTMLInputElement).value.trim();
   return v.startsWith("http") ? v.replace(/\/$/, "") : `http://${v || "192.168.4.1"}`;
@@ -270,13 +291,16 @@ function boardUrl(): string {
 async function listBoard() {
   setStatus("보드에 물어보는 중…");
   try {
-    const r = await tfetch(`${boardUrl()}/api/files`, { method: "GET" });
+    const r = await netFetch(`${boardUrl()}/api/files`, { method: "GET" });
     const j = (await r.json()) as { ok: boolean; files: FileInfo[] };
     boardFiles = j.files ?? [];
     renderSide();
     setStatus(`파일 ${j.files?.length ?? 0}개`, "good");
   } catch (e) {
-    setStatus(`보드에 못 붙었습니다 — ${e}`, "bad");
+    const why = e instanceof TypeError
+      ? "주소가 맞는지, 보드 WiFi 에 붙어 있는지 보세요"
+      : String(e);
+    setStatus(`보드에 못 붙었습니다 — ${why}`, "bad");
   }
 }
 
@@ -432,7 +456,7 @@ function renderFileList(files: FileInfo[]) {
 async function fetchFile(name: string) {
   setStatus(`${name} 받는 중…`);
   try {
-    const r = await tfetch(`${boardUrl()}/file/${name}`, { method: "GET" });
+    const r = await netFetch(`${boardUrl()}/file/${name}`, { method: "GET" });
     if (!r.ok) { setStatus(`받기 실패 — HTTP ${r.status}`, "bad"); return; }
     const buf = new Uint8Array(await r.arrayBuffer());
     await intake(buf, name);

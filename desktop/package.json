@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "fixture": "python3 ../tools/hlog_make_fixture.py public/sample.HLG --minutes 6 --session 7 && node -e \"require('fs').existsSync('public/sample.mp4')||process.exit(1)\" || ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc=size=640x360:rate=30:duration=360 -f lavfi -i sine=frequency=440:duration=360 -c:v libx264 -pix_fmt yuv420p -preset ultrafast -crf 32 -c:a aac -shortest -movflags +faststart -metadata creation_time=2026-08-24T01:47:00Z public/sample.mp4",
+    "fixture": "python3 ../tools/hlog_make_fixture.py public/sample.HLG --minutes 6 --session 7 && python3 ../tools/hlog_make_fixture.py public/sample8.HLG --minutes 12 --session 8 --utc 1787540000 && node -e \"require('fs').existsSync('public/sample.mp4')||process.exit(1)\" || ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc=size=640x360:rate=30:duration=360 -f lavfi -i sine=frequency=440:duration=360 -c:v libx264 -pix_fmt yuv420p -preset ultrafast -crf 32 -c:a aac -shortest -movflags +faststart -metadata creation_time=2026-08-24T01:47:00Z public/sample.mp4",
     "predev": "npm run fixture",
     "prebuild": "npm run fixture"
   },
