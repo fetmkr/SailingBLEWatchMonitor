@@ -8,18 +8,23 @@
   <body>
     <header>
       <div class="bar">
+        <button id="tglLib" class="ghost" title="보관함 여닫기">☰</button>
         <button id="open">파일 열기</button>
         <button id="sample">시험용 데이터</button>
         <span class="sep"></span>
+        <button id="openVideo">영상 열기</button>
+        <span class="sep"></span>
         <button id="fit">전체 보기</button>
         <span id="range" class="dim"></span>
+        <span style="flex:1"></span>
+        <button id="tglInfo" class="ghost" title="훈련 정보 여닫기">ⓘ</button>
       </div>
       <div id="meta"></div>
       <div id="status"></div>
     </header>
 
     <main>
-      <aside>
+      <aside id="left">
         <div class="tabs">
           <button id="tabLib" class="tab on">보관함</button>
           <button id="tabBoard" class="tab">보드</button>
@@ -34,9 +39,36 @@
         <div id="files"></div>
       </aside>
 
-      <section>
-        <canvas id="plot"></canvas>
-        <div id="readout"></div>
+      <!-- 가운데를 좌우 반반으로 — 왼쪽 영상, 오른쪽 데이터 -->
+      <section id="center">
+        <div id="videoPane">
+          <div class="vwrap">
+            <video id="vid" playsinline></video>
+            <div id="vdrop">
+              <div>
+                <b>영상을 여기에 끌어다 놓으세요</b><br />
+                <span class="dim">MP4 / MOV · 고프로 · DJI</span>
+              </div>
+            </div>
+          </div>
+          <div id="vbar">
+            <button id="play">▶</button>
+            <span id="vtime" class="mono dim">0:00</span>
+            <span class="sep"></span>
+            <span class="dim">싱크</span>
+            <button id="syncHere" title="지금 보이는 영상 화면이 타임라인 커서 자리라고 알려 준다">여기 맞춤</button>
+            <button id="n10">−10초</button>
+            <button id="n1">−1초</button>
+            <button id="p1">+1초</button>
+            <button id="p10">+10초</button>
+            <span id="voff" class="mono dim"></span>
+          </div>
+        </div>
+        <div id="split"></div>
+        <div id="dataPane">
+          <canvas id="plot"></canvas>
+          <div id="readout"></div>
+        </div>
       </section>
 
       <aside id="right">

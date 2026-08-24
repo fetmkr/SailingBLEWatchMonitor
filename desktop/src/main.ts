@@ -11,6 +11,8 @@ import { readFile } from "@tauri-apps/plugin-fs";
 import { fetch as tfetch } from "@tauri-apps/plugin-http";
 import * as hlog from "./hlog";
 import * as lib from "./library";
+import * as vid from "./video";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import * as tl from "./timeline";
 import "./styles.css";
 
@@ -29,6 +31,13 @@ let openId: string | null = null;       // 지금 보고 있는 세션
 let query = "";
 /** 왼쪽에 무엇을 보여줄지. 보관함이 기본이다 — 코치는 대개 이미 받은 걸 본다 */
 let pane: "library" | "board" = "library";
+
+// 영상
+let sync: vid.Sync = { offsetMs: 0, guessed: false, fileTime: null };
+let videoOn = false;
+/** 타임라인이 영상을 움직이는 중인가. 서로 밀지 않게 한 쪽만 몰게 한다 */
+let seeking = false;
+export const _seeking = () => seeking;
 
 const $ = (id: string) => document.getElementById(id)!;
 const canvas = () => $("plot") as HTMLCanvasElement;
@@ -429,6 +438,88 @@ async function fetchFile(name: string) {
   }
 }
 
+// ── 영상 ────────────────────────────────────────────────────────────────
+//
+// 왼쪽 반은 영상, 오른쪽 반은 데이터다. 둘의 시각을 맞춰 놓으면 태킹하는
+// 순간의 힐 값과 그때 화면이 같이 보인다.
+//
+// 고프로·DJI 가 적어 둔 시각은 틀린 경우가 잦아서 (시계를 안 맞췄거나
+// 시간대를 지역 시각으로 적거나) **첫 짐작으로만** 쓰고 사람이 맞춘다.
+
+const video = () => $("vid") as HTMLVideoElement;
+
+async function openVideo() {
+  const path = await open({
+    multiple: false,
+    filters: [{ name: "영상", extensions: ["mp4", "MP4", "mov", "MOV", "m4v"] }],
+  });
+  if (!path || typeof path !== "string") return;
+  await useVideoUrl(convertFileSrc(path), path.split("/").pop() ?? path,
+                    await readFile(path).then((b) => new Blob([new Uint8Array(b)])));
+}
+
+async function useVideoUrl(url: string, name: string, blob: Blob | null) {
+  const v = video();
+  v.src = url;
+  v.preload = "auto";
+  v.load();
+  v.classList.add("on");
+  $("vdrop").classList.add("hide");
+  videoOn = true;
+
+  // 파일이 적어 둔 시각으로 첫 짐작을 만든다
+  let ft: Date | null = null;
+  if (blob) { try { ft = await vid.mp4CreationTime(blob); } catch { /* 못 읽어도 된다 */ } }
+  const first = session?.imu[0]?.ms ?? session?.nav[0]?.ms ?? 0;
+  sync = vid.guessOffset(ft, session?.header.utcStart ?? 0, first);
+
+  setStatus(
+    ft
+      ? `${name} — 파일이 적어 둔 시각 ${ft.toLocaleString()}${sync.guessed ? " 로 맞춰 봤습니다" : ""}. 어긋나면 아래에서 맞추세요.`
+      : `${name} — 파일에 시각이 없습니다. 아래에서 맞추세요.`,
+  );
+  renderVbar();
+}
+
+function renderVbar() {
+  const v = video();
+  $("vtime").textContent = tl.formatDuration(v.currentTime * 1000);
+  $("voff").textContent = videoOn
+    ? `영상 0초 = 세션 ${vid.formatOffset(sync.offsetMs)}` +
+      (sync.guessed ? "  (파일 시각으로 짐작)" : "")
+    : "";
+  ($("play") as HTMLButtonElement).textContent = v.paused ? "▶" : "⏸";
+}
+
+/** 타임라인 커서 → 영상 위치 */
+function seekVideoTo(sessionMs: number) {
+  if (!videoOn) return;
+  const v = video();
+  const t = vid.sessionToVideo(sync, sessionMs);
+  if (t < 0 || t > (v.duration || Infinity)) return;
+  if (Math.abs(v.currentTime - t) < 0.03) return;
+  seeking = true;
+  v.currentTime = t;
+}
+
+function nudge(ms: number) {
+  sync = { ...sync, offsetMs: sync.offsetMs + ms, guessed: false };
+  renderVbar();
+  redraw();
+}
+
+/** 지금 영상 화면이 커서 자리라고 알려 준다. 눈으로 맞추는 길이다. */
+function syncHere() {
+  if (!videoOn || cursorMs === null) {
+    setStatus("타임라인에서 맞출 자리에 커서를 두고 누르세요.", "bad");
+    return;
+  }
+  sync = { ...sync, offsetMs: cursorMs - video().currentTime * 1000, guessed: false };
+  setStatus(`맞췄습니다 — ${vid.formatOffset(sync.offsetMs)}`, "good");
+  renderVbar();
+  redraw();
+}
+
 // ── 붙이기 ──────────────────────────────────────────────────────────────
 
 /** 시험용 데이터. 보드가 없어도 화면을 볼 수 있게 넣어 둔다. */
@@ -436,6 +527,15 @@ async function loadSample() {
   setStatus("시험용 데이터를 읽는 중…");
   const r = await fetch("/sample.HLG");
   await intake(new Uint8Array(await r.arrayBuffer()), "sample.HLG (시험용)");
+
+  // 시험용 영상도 있으면 같이 연다. 만드는 동안 싱크를 눈으로 보려는 것이다.
+  try {
+    const vr = await fetch("/sample.mp4");
+    if (vr.ok) {
+      const blob = await vr.blob();
+      await useVideoUrl(URL.createObjectURL(blob), "sample.mp4 (시험용)", blob);
+    }
+  } catch { /* 없으면 그만이다 */ }
 }
 
 function wire() {
@@ -443,6 +543,85 @@ function wire() {
   $("sample").onclick = loadSample;
   $("list").onclick = listBoard;
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
+  $("openVideo").onclick = openVideo;
+  $("tglLib").onclick = () => {
+    const el = $("left");
+    el.style.display = el.style.display === "none" ? "" : "none";
+    redraw();
+  };
+  $("tglInfo").onclick = () => {
+    const el = $("right");
+    el.style.display = el.style.display === "none" ? "" : "none";
+    redraw();
+  };
+
+  // ── 영상 조작 ──────────────────────────────────────────────────────
+  const v = video();
+  $("play").onclick = () => { v.paused ? v.play() : v.pause(); renderVbar(); };
+  $("syncHere").onclick = syncHere;
+  // 누른 부호대로 아래 숫자가 움직인다. 반대로 두면 사람이 헷갈린다.
+  $("n10").onclick = () => nudge(-10000);
+  $("n1").onclick = () => nudge(-1000);
+  $("p1").onclick = () => nudge(1000);
+  $("p10").onclick = () => nudge(10000);
+
+  // 영상이 돌면 타임라인 커서가 따라간다.
+  // requestVideoFrameCallback 은 프레임이 바뀔 때마다 불러 줘서 timeupdate
+  // (초당 4번쯤)보다 훨씬 매끄럽다. Safari 15.4 부터 있다.
+  const follow = () => {
+    if (!v.paused) {
+      cursorMs = vid.videoToSession(sync, v.currentTime);
+      // 커서가 화면 밖으로 나가면 따라 밀어 준다
+      if (cursorMs < view.from || cursorMs > view.to) {
+        const span = view.to - view.from;
+        view.from = cursorMs - span * 0.3;
+        view.to = view.from + span;
+        clampView();
+      }
+      renderVbar();
+      redraw();
+    }
+    if ("requestVideoFrameCallback" in v) {
+      (v as any).requestVideoFrameCallback(follow);
+    }
+  };
+  if ("requestVideoFrameCallback" in v) (v as any).requestVideoFrameCallback(follow);
+  else (v as HTMLVideoElement).addEventListener("timeupdate", follow);
+
+  v.addEventListener("seeked", () => { seeking = false; renderVbar(); });
+  v.addEventListener("play", renderVbar);
+  v.addEventListener("pause", renderVbar);
+  v.addEventListener("loadedmetadata", renderVbar);
+
+  // 끌어다 놓기
+  const drop = $("vdrop");
+  const wrap = drop.parentElement!;
+  ["dragenter", "dragover"].forEach((k) =>
+    wrap.addEventListener(k, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((k) =>
+    wrap.addEventListener(k, () => drop.classList.remove("over")));
+  wrap.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    const f = (e as DragEvent).dataTransfer?.files?.[0];
+    if (f) await useVideoUrl(URL.createObjectURL(f), f.name, f);
+  });
+
+  // 가운데 나누개
+  const sp = $("split");
+  let spDrag = false;
+  sp.addEventListener("pointerdown", (e) => {
+    spDrag = true; sp.setPointerCapture((e as PointerEvent).pointerId);
+  });
+  sp.addEventListener("pointermove", (e) => {
+    if (!spDrag) return;
+    const box = $("center").getBoundingClientRect();
+    const f = Math.min(0.8, Math.max(0.2, ((e as PointerEvent).clientX - box.left) / box.width));
+    $("videoPane").style.flex = `1 1 ${f * 100}%`;
+    $("dataPane").style.flex = `1 1 ${(1 - f) * 100}%`;
+    redraw();
+  });
+  sp.addEventListener("pointerup", () => { spDrag = false; });
+
   $("tabLib").onclick = () => { pane = "library"; renderSide(); };
   $("tabBoard").onclick = () => { pane = "board"; renderSide(); };
   ($("q") as HTMLInputElement).oninput = (e) => {
@@ -538,6 +717,8 @@ function wire() {
     } else {
       cursorMs = inOverview(e) ? null : tl.msAtX(c, view, e.clientX);
     }
+    // 커서를 끌면 영상이 따라온다. 태킹 순간을 짚으면 그때 화면이 뜬다.
+    if (cursorMs !== null && video().paused) seekVideoTo(cursorMs);
     redraw();
   });
 
@@ -566,6 +747,11 @@ function wire() {
       case "Home": panBy(fullSpan.from - view.from); break;
       case "End":  panBy(fullSpan.to - view.to); break;
       case "f": case "F": case "0": view = { ...fullSpan }; break;
+      case " ": {
+        const vv = video();
+        if (videoOn) { vv.paused ? vv.play() : vv.pause(); renderVbar(); }
+        break;
+      }
       default: return;
     }
     e.preventDefault();

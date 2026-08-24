@@ -38,7 +38,7 @@ input {
 
 main { flex: 1; display: flex; min-height: 0; }
 aside {
-  width: 280px; border-right: 1px solid var(--line); overflow: auto;
+  width: 260px; border-right: 1px solid var(--line); overflow: auto;
   padding: 8px; background: var(--panel);
 }
 .file {
@@ -47,7 +47,37 @@ aside {
 }
 .file:hover { background: #232830; border-color: var(--line); }
 
-section { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 8px; }
+/* 가운데를 좌우 반반. 왼쪽 영상, 오른쪽 데이터. */
+#center { flex: 1; display: flex; min-width: 0; }
+#videoPane { flex: 1 1 50%; min-width: 220px; display: flex; flex-direction: column; }
+#dataPane  { flex: 1 1 50%; min-width: 260px; display: flex; flex-direction: column;
+             padding: 8px; }
+#split { width: 5px; cursor: col-resize; background: var(--line); flex: none; }
+#split:hover { background: #3d4a59; }
+
+.vwrap {
+  flex: 1; min-height: 0; position: relative;
+  background: #000; display: flex; align-items: center; justify-content: center;
+}
+#vid { max-width: 100%; max-height: 100%; display: none; }
+#vid.on { display: block; }
+#vdrop {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; text-align: center; color: var(--dim);
+  border: 2px dashed var(--line); margin: 10px; border-radius: 8px;
+}
+#vdrop.hide { display: none; }
+#vdrop.over { border-color: #4ea1ff; color: var(--ink); }
+
+#vbar {
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  border-top: 1px solid var(--line); background: var(--panel); flex-wrap: wrap;
+}
+#vbar button { padding: 4px 8px; }
+.mono { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ghost { background: transparent; border-color: transparent; color: var(--dim); }
+.ghost:hover { background: #262b33; }
+
 canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 #readout {
   height: 26px; padding-top: 5px; border-top: 1px solid var(--line);
