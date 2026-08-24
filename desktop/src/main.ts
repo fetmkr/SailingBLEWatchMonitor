@@ -471,12 +471,60 @@ function boardUrl(): string {
   return v.startsWith("http") ? v.replace(/\/$/, "") : `http://${v || "192.168.4.1"}`;
 }
 
+/**
+ * 보드에 요청한다. **반드시 제한 시간을 건다.**
+ *
+ * 안 걸었더니 이런 일이 있었다. 맥이 보드 WiFi 에 안 붙은 채로 목록을 눌렀는데,
+ * 192.168.4.1 로 간 요청이 집 공유기로 나갔다가 사라졌다. 앱은 "받는 중" 을
+ * 띄운 채 영원히 기다렸다. 사용자는 앱이 멈춘 줄 알았다.
+ *
+ * 두 가지를 건다.
+ *   붙는 데까지    connectTimeout — Tauri 의 http 가 rust 쪽에 넘긴다
+ *   전체          AbortSignal    — 붙은 뒤 응답이 안 와도 끝낸다
+ *
+ * [확인: node_modules/@tauri-apps/plugin-http/dist-js/index.js:46,113]
+ *   init.signal 을 보고 rust 쪽 요청까지 취소한다.
+ */
+const CONNECT_MS = 4000;
+
+async function askBoard(
+  path: string, wholeMs: number | null, ac = new AbortController(),
+): Promise<Response> {
+  const timer = wholeMs === null ? null
+    : setTimeout(() => ac.abort(new Error("응답이 없습니다")), wholeMs);
+  try {
+    return await netFetch(`${boardUrl()}${path}`, {
+      method: "GET",
+      signal: ac.signal,
+      ...(inApp ? { connectTimeout: CONNECT_MS } : {}),
+    } as RequestInit);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** 왜 못 붙었는지 사람 말로. 원문도 같이 남긴다 — 감추면 다음에 못 고친다. */
+function boardWhy(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  const s = raw.toLowerCase();
+  if (s.includes("abort") || s.includes("응답이 없습니다") || s.includes("timed out")
+      || s.includes("timeout")) {
+    return `보드가 대답이 없습니다. 맥이 보드 WiFi 에 붙어 있는지 보세요 (${raw})`;
+  }
+  if (s.includes("connect") || s.includes("unreachable") || s.includes("refused")
+      || e instanceof TypeError) {
+    return `보드에 닿지 못했습니다. 주소와 WiFi 를 보세요 (${raw})`;
+  }
+  return raw;
+}
+
 async function listBoard() {
   setStatus("보드에 물어보는 중…");
   // 보드가 파일마다 머리글을 읽어야 해서 몇 초 걸린다. 그동안 표시를 둔다.
   setProgress("보드에서 파일 목록을 받는 중…");
   try {
-    const r = await netFetch(`${boardUrl()}/api/files`, { method: "GET" });
+    // 파일이 많으면 머리글 읽는 데 오래 걸린다. 그래도 25초면 충분하다.
+    const r = await askBoard("/api/files", 25000);
     const j = (await r.json()) as { ok: boolean; files: FileInfo[] };
     boardFiles = j.files ?? [];
     renderSide();
@@ -484,10 +532,7 @@ async function listBoard() {
     setStatus(`파일 ${j.files?.length ?? 0}개 — 받을 것을 고르세요`, "good");
   } catch (e) {
     setProgress(null);
-    const why = e instanceof TypeError
-      ? "주소가 맞는지, 보드 WiFi 에 붙어 있는지 보세요"
-      : String(e);
-    setStatus(`보드에 못 붙었습니다 — ${why}`, "bad");
+    setStatus(`보드에 못 붙었습니다 — ${boardWhy(e)}`, "bad");
   }
 }
 
@@ -659,8 +704,21 @@ async function fetchFile(name: string, size?: number) {
   setStatus(`${name} 받는 중…`);
   setProgress(size ? `${name}  0 / ${MB(size)} MB` : `${name} 받는 중…`, size ? 0 : null);
   const t0 = performance.now();
+
+  // 90 MB 는 몇 분 걸릴 수 있으니 전체 제한 시간은 안 건다. 대신 **끊긴 것을
+  // 본다** — 20초 동안 한 바이트도 안 오면 그만둔다. 배가 멀어져서 WiFi 가
+  // 끊기면 받기가 그냥 멈춰 있는데, 그걸 영원히 기다리면 안 된다.
+  const STALL_MS = 20000;
+  const ac = new AbortController();
+  let stall = setTimeout(() => ac.abort(new Error("20초 동안 아무것도 안 왔습니다")), STALL_MS);
+  const alive = () => {
+    clearTimeout(stall);
+    stall = setTimeout(() => ac.abort(new Error("20초 동안 아무것도 안 왔습니다")), STALL_MS);
+  };
+
   try {
-    const r = await netFetch(`${boardUrl()}/file/${name}`, { method: "GET" });
+    const r = await askBoard(`/file/${name}`, null, ac);
+    alive();
     if (!r.ok) {
       setProgress(null);
       setStatus(`받기 실패 — HTTP ${r.status}`, "bad");
@@ -679,6 +737,7 @@ async function fetchFile(name: string, size?: number) {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        alive();
         chunks.push(value);
         got += value.length;
         setProgress(
@@ -703,8 +762,9 @@ async function fetchFile(name: string, size?: number) {
       `(${(buf.length / 1024 / sec).toFixed(0)} KB/초)`, "good");
   } catch (e) {
     setProgress(null);
-    setStatus(`받기 실패 — ${e}`, "bad");
+    setStatus(`받기 실패 — ${boardWhy(e)}`, "bad");
   } finally {
+    clearTimeout(stall);
     fetching = false;
     document.querySelectorAll<HTMLButtonElement>(".file .get")
       .forEach((b) => { b.disabled = false; });
