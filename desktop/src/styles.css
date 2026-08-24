@@ -1,0 +1,56 @@
+:root {
+  --bg: #14161a;
+  --panel: #1b1e24;
+  --ink: #e6e8ec;
+  --dim: #8b919a;
+  --grid: #2a2e36;
+  --line: #2a2e36;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%;
+  background: var(--bg); color: var(--ink);
+  font: 13px/1.55 -apple-system, "Pretendard", "Apple SD Gothic Neo",
+        "Malgun Gothic", system-ui, sans-serif;
+}
+body { display: flex; flex-direction: column; }
+
+header { padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.bar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.sep { width: 1px; height: 18px; background: var(--line); }
+button {
+  background: #262b33; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 5px 11px; font: inherit; cursor: pointer;
+}
+button:hover { background: #2f353f; }
+input {
+  background: #101317; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 5px 9px; font: inherit; width: 160px;
+}
+.dim { color: var(--dim); }
+.bad { color: #ff6b6b; }
+.good { color: #5ad19a; }
+#status { margin-top: 4px; min-height: 18px; }
+#status.bad { color: #ff6b6b; }
+#status.good { color: #5ad19a; }
+#meta .row { margin: 1px 0; }
+
+main { flex: 1; display: flex; min-height: 0; }
+aside {
+  width: 280px; border-right: 1px solid var(--line); overflow: auto;
+  padding: 8px; background: var(--panel);
+}
+.file {
+  padding: 8px; border-radius: 6px; cursor: pointer;
+  border: 1px solid transparent; margin-bottom: 4px;
+}
+.file:hover { background: #232830; border-color: var(--line); }
+
+section { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 8px; }
+canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
+#readout {
+  height: 26px; padding-top: 5px; border-top: 1px solid var(--line);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap; overflow: hidden;
+}

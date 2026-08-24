@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sail Analyzer</title>
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <button id="open">파일 열기</button>
+        <button id="sample">시험용 데이터</button>
+        <span class="sep"></span>
+        <input id="host" value="192.168.4.1" spellcheck="false" />
+        <button id="list">보드에서 목록</button>
+        <span class="sep"></span>
+        <button id="fit">전체 보기</button>
+        <span id="range" class="dim"></span>
+      </div>
+      <div id="meta"></div>
+      <div id="status"></div>
+    </header>
+
+    <main>
+      <aside id="files"></aside>
+      <section>
+        <canvas id="plot"></canvas>
+        <div id="readout"></div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

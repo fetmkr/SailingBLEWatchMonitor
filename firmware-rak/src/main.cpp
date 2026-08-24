@@ -2131,6 +2131,12 @@ bool logStartNow() {
     h.gnssHz    = gGpsHz;
     h.sogSrc    = 0;                    // 도플러 원본
     h.quatSrc   = 1;                    // 융합 없음 — 가속·자이로 원본만
+    h.heelAxis  = gHeelAxis;
+    h.heelSign  = (gHeelSign < 0.0f) ? 1 : 0;
+    h.pitchAxis = gPitchAxis;
+    h.pitchSign = (gPitchSign < 0.0f) ? 1 : 0;
+    h.heelOff   = gHeelOffsetDeg;
+    h.pitchOff  = gPitchOffsetDeg;
     if (gGpsDyModel != 255) {
         h.gnssDyn = gGpsDyModel;            // 모듈에서 실제로 읽은 값이 있으면 그것
     } else {

@@ -257,6 +257,13 @@ bool start(const Header& h) {
     hdr[kOffGnssHz]   = h.gnssHz;
     hdr[kOffSogSrc]   = h.sogSrc;
     hdr[kOffQuatSrc]  = h.quatSrc;
+    // 힐·피치를 어느 축에서 봤나. 없으면 나중에 이 파일로 힐을 못 구한다.
+    hdr[kOffHeelAxis]  = h.heelAxis;
+    hdr[kOffHeelSign]  = h.heelSign;
+    hdr[kOffPitchAxis] = h.pitchAxis;
+    hdr[kOffPitchSign] = h.pitchSign;
+    memcpy(hdr + kOffHeelOff,  &h.heelOff,  4);
+    memcpy(hdr + kOffPitchOff, &h.pitchOff, 4);
     const uint16_t hcrc = crc16(hdr, 126);
     hdr[126] = (uint8_t)hcrc; hdr[127] = (uint8_t)(hcrc >> 8);
     gBin.write(hdr, sizeof(hdr));

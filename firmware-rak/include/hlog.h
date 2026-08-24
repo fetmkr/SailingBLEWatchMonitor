@@ -86,6 +86,27 @@ constexpr size_t kOffImuRows   = 56;  // U4
 constexpr size_t kOffDropped   = 60;  // U4  0 이 아니면 구멍 난 세션이다
 constexpr size_t kOffClosed    = 64;  // U1  1 이면 제대로 닫힌 파일
 
+// ── 힐·피치를 어느 가속도 축에서 봤나 ────────────────────────────────────
+//
+// ★ 이게 없으면 나중에 이 파일로 힐을 못 구한다.
+//
+// 규격은 자세를 쿼터니언으로 저장하기로 되어 있는데, 우리 시제품에는 융합이
+// 없어서 가속도 원본만 남긴다. 그러면 읽는 쪽이 "어느 축이 힐이었나" 를
+// 알아야 하는데, 보드는 그걸 NVS 에만 갖고 있었다. 파일에 안 남으면
+// 데스크탑 앱이 짐작해야 한다.
+//
+// 실제로 우리는 힐 축을 X → Y 로, 부호도 한 번 뒤집었다. 그 전후 파일을
+// 같은 규칙으로 읽으면 값이 틀린다.
+//
+//   힐   = asin(heel_sign  * 그 축의 g / 중력 크기) - heel_off
+//   피치 = asin(pitch_sign * 그 축의 g / 중력 크기) - pitch_off
+constexpr size_t kOffHeelAxis   = 65;  // U1  0=X 1=Y 2=Z
+constexpr size_t kOffHeelSign   = 66;  // U1  0=+ 1=-
+constexpr size_t kOffPitchAxis  = 67;
+constexpr size_t kOffPitchSign  = 68;
+constexpr size_t kOffHeelOff    = 69;  // R4  기준각 (도)
+constexpr size_t kOffPitchOff   = 73;  // R4
+
 constexpr uint8_t kImuBNO085  = 0;
 constexpr uint8_t kImuMPU9250 = 1;
 
@@ -135,6 +156,12 @@ struct Header {
     uint8_t  gnssHz     = 0;
     uint8_t  sogSrc     = 0;
     uint8_t  quatSrc    = 1;
+    uint8_t  heelAxis   = 1;    // 0=X 1=Y 2=Z
+    uint8_t  heelSign   = 1;    // 0=+ 1=-
+    uint8_t  pitchAxis  = 2;
+    uint8_t  pitchSign  = 0;
+    float    heelOff    = 0.0f;
+    float    pitchOff   = 0.0f;
 };
 
 // 한 시점을 눈으로 볼 값 (10초에 한 줄 나가는 텍스트용).
