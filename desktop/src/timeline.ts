@@ -135,8 +135,33 @@ export interface DrawOpts {
  * 이름을 그림 안에 얹으면 값과 겹쳐서 둘 다 읽기 어렵다. 밖으로 빼면
  * 이름은 이름대로, 값은 값대로 읽힌다. 여기를 누르면 이름을 고친다.
  */
-const LABEL_W = 148;
-const AXIS_W = LABEL_W + 62;
+let LABEL_W = 148;
+/** 세로축 숫자가 들어갈 폭 */
+const AXIS_NUM_W = 62;
+const axisW = () => LABEL_W + AXIS_NUM_W;
+
+/** 이름 칸 너비. 경계를 끌어서 바꾼다 (이름이 길면 넘치기 때문이다) */
+export function labelWidth(): number { return LABEL_W; }
+export function setLabelWidth(px: number): void {
+  LABEL_W = Math.min(360, Math.max(70, Math.round(px)));
+}
+/** 마우스가 이름 칸 경계에 있나 (끌어서 넓히는 자리) */
+export function onLabelEdge(canvas: HTMLCanvasElement, clientX: number): boolean {
+  const x = clientX - canvas.getBoundingClientRect().left;
+  return Math.abs(x - LABEL_W) <= 4;
+}
+
+/** 칸을 넘치면 말줄임으로 자른다. 넘쳐서 잘리면 뭐가 잘렸는지 모른다. */
+function fitText(g: CanvasRenderingContext2D, text: string, max: number): string {
+  if (g.measureText(text).width <= max) return text;
+  let lo = 0, hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (g.measureText(text.slice(0, mid) + "…").width <= max) lo = mid;
+    else hi = mid - 1;
+  }
+  return text.slice(0, lo) + "…";
+}
 /** 시간 축. Saleae 처럼 **위**에 둔다 — 눈이 먼저 가는 자리다 */
 const TIME_H = 26;
 const GAP = 8;
@@ -156,14 +181,14 @@ export function draw(o: DrawOpts): void {
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, cssW, cssH);
 
-  const plotW = Math.max(1, cssW - AXIS_W - 8);
+  const plotW = Math.max(1, cssW - axisW() - 8);
   const rows = series.length || 1;
   const bodyTop = TIME_H;                       // 시간 축이 위에 있다
   const bodyH = cssH - TIME_H - OVER_H;
   const rowH = Math.max(24, (bodyH - GAP * (rows - 1)) / rows);
   const cols = Math.max(1, Math.floor(plotW));
   const span = Math.max(1, view.to - view.from);
-  const xOf = (ms: number) => AXIS_W + ((ms - view.from) / span) * plotW;
+  const xOf = (ms: number) => axisW() + ((ms - view.from) / span) * plotW;
 
   const css = getComputedStyle(document.documentElement);
   const ink = css.getPropertyValue("--ink").trim() || "#e6e6e6";
@@ -214,7 +239,7 @@ export function draw(o: DrawOpts): void {
     g.stroke();
 
     // 맨 왼쪽 눈금은 기준 시각과 겹친다. 기준이 이미 "0 부터" 라고 말한다.
-    if (x > AXIS_W + 46) {
+    if (x > axisW() + 46) {
       g.fillStyle = dim;
       g.textAlign = "center";
       g.fillText(formatOffsetTick(t - base), x, 6);
@@ -262,7 +287,7 @@ export function draw(o: DrawOpts): void {
       const y = Math.round(yOf(0)) + 0.5;
       g.strokeStyle = grid;
       g.beginPath();
-      g.moveTo(AXIS_W, y);
+      g.moveTo(axisW(), y);
       g.lineTo(cssW, y);
       g.stroke();
     }
@@ -309,7 +334,7 @@ export function draw(o: DrawOpts): void {
       g.beginPath();
       for (let c = 0; c < cols; c++) {
         if (!band.has[c]) continue;
-        const x = AXIS_W + c + 0.5;
+        const x = axisW() + c + 0.5;
         const y1 = yOf(band.max[c]);
         const y2 = yOf(band.min[c]);
         g.moveTo(x, y1);
@@ -325,8 +350,8 @@ export function draw(o: DrawOpts): void {
     g.fillStyle = dim;
     g.textAlign = "right";
     g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
-    g.fillText(`${rhi.toFixed(rhi >= 100 ? 0 : 1)} ${s.unit}`, AXIS_W - 6, top);
-    g.fillText(`${rlo.toFixed(rlo <= -100 ? 0 : 1)} ${s.unit}`, AXIS_W - 6, bot - 12);
+    g.fillText(`${rhi.toFixed(rhi >= 100 ? 0 : 1)} ${s.unit}`, axisW() - 6, top);
+    g.fillText(`${rlo.toFixed(rlo <= -100 ? 0 : 1)} ${s.unit}`, axisW() - 6, bot - 12);
 
     // ── 왼쪽 이름 칸 — 한 줄이면 된다 ──
     //
@@ -342,7 +367,8 @@ export function draw(o: DrawOpts): void {
     g.fillStyle = ink;
     g.font = "13px -apple-system, system-ui, sans-serif";
     g.textAlign = "left";
-    g.fillText(s.name, 24, midY - 9);
+    // 칸을 넘치면 잘라 준다. 그냥 넘치면 옆 칸 숫자와 겹쳐서 둘 다 못 읽는다.
+    g.fillText(fitText(g, s.name, LABEL_W - 32), 24, midY - 9);
 
     // 줄 나눔선
     g.strokeStyle = grid;
@@ -358,8 +384,8 @@ export function draw(o: DrawOpts): void {
     g.lineTo(LABEL_W + 0.5, bot + GAP / 2);
     g.stroke();
     g.beginPath();
-    g.moveTo(AXIS_W + 0.5, top);
-    g.lineTo(AXIS_W + 0.5, bot);
+    g.moveTo(axisW() + 0.5, top);
+    g.lineTo(axisW() + 0.5, bot);
     g.stroke();
   });
 
@@ -410,17 +436,17 @@ export function draw(o: DrawOpts): void {
     const oy = cssH - OVER_H + 3;
     const oh = OVER_H - 6;
     const fSpan = o.full.to - o.full.from;
-    const fx = (ms: number) => AXIS_W + ((ms - o.full!.from) / fSpan) * plotW;
+    const fx = (ms: number) => axisW() + ((ms - o.full!.from) / fSpan) * plotW;
 
     g.fillStyle = "#1b1e24";
-    g.fillRect(AXIS_W, oy, plotW, oh);
+    g.fillRect(axisW(), oy, plotW, oh);
 
     const wx = fx(view.from);
     const ww = Math.max(14, fx(view.to) - wx);   // 너무 짧으면 잡을 수가 없다
     g.fillStyle = "#4a5160";
     g.beginPath();
     const rr = oh / 2;
-    g.roundRect(Math.min(wx, AXIS_W + plotW - ww), oy, ww, oh, rr);
+    g.roundRect(Math.min(wx, axisW() + plotW - ww), oy, ww, oh, rr);
     g.fill();
   }
 }
@@ -435,21 +461,20 @@ export function msAtOverviewX(
   canvas: HTMLCanvasElement, full: View, clientX: number,
 ): number {
   const rect = canvas.getBoundingClientRect();
-  const plotW = Math.max(1, rect.width - AXIS_W - 8);
-  const x = clientX - rect.left - AXIS_W;
+  const plotW = Math.max(1, rect.width - axisW() - 8);
+  const x = clientX - rect.left - axisW();
   return full.from + (x / plotW) * (full.to - full.from);
 }
 
 /** 화면 x 좌표 → 시각(ms) */
 export function msAtX(canvas: HTMLCanvasElement, view: View, clientX: number): number {
   const rect = canvas.getBoundingClientRect();
-  const plotW = Math.max(1, rect.width - AXIS_W - 8);
-  const x = clientX - rect.left - AXIS_W;
+  const plotW = Math.max(1, rect.width - axisW() - 8);
+  const x = clientX - rect.left - axisW();
   return view.from + (x / plotW) * (view.to - view.from);
 }
 
-export const PLOT_LEFT = AXIS_W;
-export const LABEL_WIDTH = LABEL_W;
+export const plotLeft = () => axisW();
 
 /** 이름 칸에서 마우스가 몇 번째 줄에 있나. 밖이면 -1 */
 export function rowAtY(

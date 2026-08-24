@@ -192,6 +192,12 @@ const clamp = (v: number) => (v > 1 ? 1 : v < -1 ? -1 : v);
 //
 // 이름은 사람마다 다르게 부른다. 어떤 코치는 "Trim", 어떤 코치는 "Pitch" 다.
 // 고쳐 쓸 수 있게 하고 남긴다.
+const LABELW_KEY = "labelWidth.v1";
+{
+  const w = Number(localStorage.getItem(LABELW_KEY));
+  if (w > 0) tl.setLabelWidth(w);
+}
+
 const NAMES_KEY = "seriesNames.v1";
 let names: Record<string, string> = {};
 try { names = JSON.parse(localStorage.getItem(NAMES_KEY) ?? "{}"); } catch { /* 처음 */ }
@@ -949,8 +955,16 @@ function wire() {
   // 누른 자리에서 거의 안 움직이고 떼면 "고정", 끌었으면 "밀기" 다.
   // 한 손으로 둘 다 하려면 이렇게 갈라야 한다.
   let moved = 0;
+  // 이름 칸 경계를 끌면 넓어진다. 이름이 길면 넘치기 때문이다.
+  let edgeDrag = false;
+
   c.addEventListener("pointerdown", (e) => {
     if (!session) return;
+    if (tl.onLabelEdge(c, e.clientX)) {
+      edgeDrag = true;
+      c.setPointerCapture(e.pointerId);
+      return;
+    }
     // 왼쪽 이름 칸이면 이름 고치기다. 그림을 건드리는 게 아니다.
     const row = tl.rowAtY(c, series.length, e.clientX, e.clientY);
     if (row >= 0) { editLabel(row); return; }
@@ -976,6 +990,13 @@ function wire() {
 
   c.addEventListener("pointermove", (e) => {
     if (!session) return;
+    if (edgeDrag) {
+      tl.setLabelWidth(e.clientX - c.getBoundingClientRect().left);
+      localStorage.setItem(LABELW_KEY, String(tl.labelWidth()));
+      c.style.cursor = "col-resize";
+      redraw();
+      return;
+    }
     if (drag?.kind === "over") {
       jumpTo(tl.msAtOverviewX(c, fullSpan, e.clientX));
       cursorMs = null;
@@ -983,7 +1004,7 @@ function wire() {
     } else if (drag?.kind === "pan") {
       moved = Math.max(moved, Math.abs(e.clientX - drag.x));
       const rect = c.getBoundingClientRect();
-      const plotW = rect.width - tl.PLOT_LEFT - 8;
+      const plotW = rect.width - tl.plotLeft() - 8;
       const span = view.to - view.from;
       view.from = drag.from + ((drag.x - e.clientX) / plotW) * span;
       view.to = view.from + span;
@@ -991,10 +1012,11 @@ function wire() {
       cursorMs = tl.msAtX(c, view, e.clientX);
     } else {
       const over = inOverview(e);
-      const onLabel = tl.rowAtY(c, series.length, e.clientX, e.clientY) >= 0;
-      cursorMs = over || onLabel ? null : tl.msAtX(c, view, e.clientX);
-      // 스크롤바 위에서는 손바닥, 이름 칸에서는 글자 커서.
-      c.style.cursor = over ? "grab" : onLabel ? "text" : "crosshair";
+      const edge = tl.onLabelEdge(c, e.clientX);
+      const onLabel = !edge && tl.rowAtY(c, series.length, e.clientX, e.clientY) >= 0;
+      cursorMs = over || onLabel || edge ? null : tl.msAtX(c, view, e.clientX);
+      // 경계는 좌우 화살표, 스크롤바는 손바닥, 이름 칸은 글자 커서.
+      c.style.cursor = edge ? "col-resize" : over ? "grab" : onLabel ? "text" : "crosshair";
     }
     // 고정 전에는 마우스를 따라 영상이 훑어진다. 고정한 뒤에는 안 움직인다 —
     // 박아 둔 자리를 보려고 고정한 것이다.
@@ -1003,6 +1025,7 @@ function wire() {
   });
 
   c.addEventListener("pointerup", (e) => {
+    if (edgeDrag) { edgeDrag = false; return; }
     // 4픽셀 안에서 떼면 누른 것으로 본다. 밀려던 것이 아니다.
     if (drag?.kind === "pan" && moved < 4 && session) {
       pinMs = tl.msAtX(c, view, e.clientX);
@@ -1013,7 +1036,9 @@ function wire() {
     c.style.cursor = inOverview(e) ? "grab" : "crosshair";
     redraw();
   });
-  c.addEventListener("pointercancel", () => { drag = null; c.style.cursor = "crosshair"; });
+  c.addEventListener("pointercancel", () => {
+    drag = null; edgeDrag = false; c.style.cursor = "crosshair";
+  });
   c.addEventListener("pointerleave", () => {
     cursorMs = null; drag = null; c.style.cursor = "crosshair"; redraw();
   });
