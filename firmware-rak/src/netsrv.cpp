@@ -34,17 +34,25 @@ bool      gSdUp = false;
 // BLE 로 "WiFi 켜" 를 시키면 그 순간 BLE 가 내려간다. 그래서 언제 다시
 // 끌지가 중요하다. 켠 채로 남으면 전기를 먹고 BLE 도 안 돌아온다.
 //
-// **시간을 재서 끄는 건 마지막 수단이다.** 세 겹으로 둔다.
+// **시간을 재서 끄는 건 마지막 수단이다.** 네 겹으로 둔다.
 //
-//   1) 앱이 "다 받았다" 고 말한다        POST /api/wifi/off   ← 제일 정확하다
-//   2) 쓰던 상대가 사라지면 바로 끈다     아래 onWifiEvent()
-//        AP  마지막 한 대가 떨어지면
-//        접속  붙어 있던 공유기를 놓치면 (어차피 아무 일도 못 한다)
-//   3) 그래도 아무 일이 없으면 시간       gIdleOffMs
+//   1) 앱이 "다 받았다" 고 말한다        POST /api/wifi/off
+//   2) 앱이 숨을 안 쉰다                 아래 "빌림"       ← 평소엔 이게 끈다
+//   3) 쓰던 상대가 사라지면              아래 onWifiEvent()
+//   4) 아무것도 아니면 시간              gIdleOffMs
 //
-// 2번이 실제 사건이라 제일 빠르다. 노트북을 덮으면 몇 초 안에 꺼진다.
-// 3번은 "앱도 안 부르고 붙지도 않은" 경우만 걸린다 — 켜 놓고 잊은 때다.
+// ── 빌림(lease) ──
+//
+// 앱이 `GET /api/ping?lease=15` 로 "15초 동안 빌리겠다" 고 말한다. 그러고는
+// 몇 초에 한 번씩 다시 부른다. 부르기를 멈추면 15초 뒤에 꺼진다.
+//
+// 앱이 죽든, 노트북을 덮든, 배가 멀어지든 — 이유를 따질 필요가 없다.
+// **말이 끊기면 끄는 것**이다. 사람이 단추를 누를 일도 없다.
+//
+// 빌린 적이 없으면 이걸 안 본다. 브라우저로 보드 화면을 열어 놓고 읽는
+// 사람까지 15초 만에 끊어 버리면 안 되니까. 그때는 4번이 걸린다.
 uint32_t  gIdleOffMs = 5 * 60 * 1000;   // 0 이면 안 끈다
+uint32_t  gLeaseMs   = 0;               // 0 이면 아무도 안 빌렸다
 uint32_t  gLastUse = 0;
 
 // 상대가 떨어졌다. 곧 끈다.
@@ -534,6 +542,26 @@ void handleSpeed() {
                   dt ? total / 1.024f / dt : 0.0f);
 }
 
+// 앱이 숨 쉬는 자리.
+//
+//   GET /api/ping?lease=15    "15초 동안 빌리겠다"
+//   GET /api/ping             그냥 살아 있다는 표시
+//
+// 앱은 이걸 몇 초에 한 번씩 부른다. 멈추면 빌린 시간이 지나고 꺼진다.
+void handlePing() {
+    cors();                 // cors() 안에서 used() 가 불린다
+    if (gServer.hasArg("lease")) {
+        uint32_t sec = (uint32_t)gServer.arg("lease").toInt();
+        if (sec > 300) sec = 300;        // 너무 길게는 못 빌린다
+        gLeaseMs = sec * 1000UL;
+    }
+    char body[128];
+    snprintf(body, sizeof(body),
+             "{\"ok\":true,\"lease_s\":%lu,\"idle_s\":%lu}",
+             (unsigned long)(gLeaseMs / 1000), (unsigned long)(gIdleOffMs / 1000));
+    gServer.send(200, "application/json", body);
+}
+
 // 다 받았으면 앱이 이걸 부른다. 보드가 WiFi 를 끄고 BLE 로 돌아온다.
 //
 // 왜 BLE 로 안 끄냐면 — WiFi 가 켜져 있는 동안은 BLE 가 내려가 있어서
@@ -548,6 +576,7 @@ void handleWifiOff() {
 
 void routes() {
     gServer.on("/", HTTP_GET, handleRoot);
+    gServer.on("/api/ping", HTTP_GET, handlePing);
     gServer.on("/api/wifi/off", HTTP_POST, handleWifiOff);
     gServer.on("/api/wifi/off", HTTP_GET,  handleWifiOff);
     gServer.on("/api/status", HTTP_GET, handleStatus);
@@ -665,6 +694,7 @@ void stop() {
     WiFi.mode(WIFI_OFF);
     gMode = Mode::Off;
     gGoneAt = 0;
+    gLeaseMs = 0;      // 다음에 켤 때 앱이 다시 빌린다
     gIp[0] = '\0';
     // WiFi 를 끄면 BLE 를 되살린다. 워치와 아이폰이 다시 붙는다.
     if (wasUp) ::sailBleStart();
@@ -686,7 +716,15 @@ void poll() {
         }
     }
 
-    // 2) 아무 일도 없으면 시간으로. 켜 놓고 잊은 경우만 여기까지 온다.
+    // 2) 빌려 간 앱이 숨을 안 쉰다
+    if (gLeaseMs && millis() - gLastUse > gLeaseMs) {
+        Serial.printf("[NET] 앱이 %lu초 동안 말이 없어서 WiFi 를 끕니다.\n",
+                      (unsigned long)(gLeaseMs / 1000));
+        stop();
+        return;
+    }
+
+    // 3) 아무 일도 없으면 시간으로. 켜 놓고 잊은 경우만 여기까지 온다.
     if (gIdleOffMs && millis() - gLastUse > gIdleOffMs) {
         Serial.printf("[NET] %lu초 동안 아무도 안 써서 WiFi 를 끕니다.\n",
                       (unsigned long)(gIdleOffMs / 1000));

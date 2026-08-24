@@ -572,6 +572,9 @@ async function listBoard() {
     const r = await askBoard("/api/files", 25000);
     const j = (await r.json()) as { ok: boolean; files: FileInfo[] };
     boardFiles = j.files ?? [];
+    // 목록이 왔으면 붙어 있는 것이다. 주소를 손으로 친 경우도 여기서 숨을
+    // 쉬기 시작한다 — 그래야 앱을 닫았을 때 보드가 알아서 꺼진다.
+    breatheStart();
     renderSide();
     setProgress(null);
     setStatus(`파일 ${j.files?.length ?? 0}개 — 받을 것을 고르세요`, "good");
@@ -596,6 +599,9 @@ function renderSide() {
   ($("hostBar") as HTMLElement).style.display =
     pane === "board" && (byHand || !ble.usable) ? "flex" : "none";
   ($("boards") as HTMLElement).style.display = pane === "board" ? "block" : "none";
+  // 연결 해제는 붙어 있을 때만 뜬다. 숨을 쉬고 있으면 붙어 있는 것이다.
+  ($("btDrop") as HTMLElement).style.display =
+    pane === "board" && beat !== null ? "inline-block" : "none";
   if (pane === "board") { renderBoards(); renderFileList(boardFiles); }
   else { $("boards").innerHTML = ""; renderLibrary(); }
 }
@@ -724,6 +730,7 @@ async function wake(b: ble.Board) {
       return;
     }
     setStatus(`${b.name} 준비됐습니다 — ${found}`, "good");
+    breatheStart();
     await listBoard();
   } catch (e) {
     setProgress(null);
@@ -758,15 +765,55 @@ async function waitForBoard(hosts: string[], ms: number): Promise<string | null>
   return null;
 }
 
-/** 다 받았으면 보드 WiFi 를 끈다. 그래야 BLE 가 돌아오고 전기도 안 먹는다. */
-async function sleepBoard() {
+// ── 숨쉬기 ───────────────────────────────────────────────────────────────
+//
+// 보드 WiFi 를 켜 두면 전기를 먹고 BLE 도 안 돌아온다. 그러니 다 쓰면 꺼야
+// 하는데, 사람에게 "다 받았으면 이 단추를 누르세요" 라고 시킬 일이 아니다.
+// 안 누르고 노트북을 덮으면 그만이다.
+//
+// 그래서 앱이 몇 초에 한 번씩 보드에게 말을 건다. **말이 끊기면 보드가
+// 스스로 끈다.** 앱이 죽든 노트북을 덮든 배가 멀어지든 이유를 따질 필요가
+// 없다 — 말이 끊긴 것 하나면 충분하다.
+//
+//   빌리는 시간   15초    이만큼 말이 없으면 보드가 끈다
+//   숨 쉬는 주기   4초    네 번까지 놓쳐도 안 끊긴다
+const LEASE_S = 15;
+const BEAT_MS = 4000;
+let beat: ReturnType<typeof setInterval> | null = null;
+
+function breatheStart() {
+  if (beat) return;
+  const tick = async () => {
+    // 파일을 받는 중이면 쉰다. 보드는 한 번에 한 사람만 상대할 수 있고,
+    // 받는 동안에는 그것만으로도 살아 있다는 표시가 된다.
+    if (fetching) return;
+    try { await askBoard(`/api/ping?lease=${LEASE_S}`, 5000); }
+    catch { /* 한 번 놓치는 건 괜찮다. 네 번까지 견딘다 */ }
+  };
+  void tick();
+  beat = setInterval(() => void tick(), BEAT_MS);
+  renderSide();
+}
+
+function breatheStop() {
+  if (!beat) return;
+  clearInterval(beat);
+  beat = null;
+  renderSide();
+}
+
+/** 다 썼다고 알린다. 안 되면 그만이다 — 숨이 끊기면 보드가 알아서 끈다. */
+async function sleepBoard(quiet = false) {
+  breatheStop();
   try {
-    await askBoard("/api/wifi/off", 5000);
+    await askBoard("/api/wifi/off", 4000);
     boardFiles = [];
-    setStatus("보드 WiFi 를 껐습니다. 블루투스로 다시 찾을 수 있습니다.", "good");
-    renderSide();
+    if (!quiet) {
+      setStatus("보드 WiFi 를 껐습니다. 블루투스로 다시 찾을 수 있습니다.", "good");
+      renderSide();
+    }
   } catch (e) {
-    setStatus(`끄기 실패 — ${boardWhy(e)}`, "bad");
+    if (!quiet) setStatus(`끄기 실패 — ${boardWhy(e)}`, "bad");
   }
 }
 
@@ -900,12 +947,6 @@ function renderFileList(files: FileInfo[]) {
       </div>`;
     })
     .join("");
-
-  // 다 받았으면 끄는 단추. 켜 둔 채로 두면 전기를 먹고 BLE 도 안 돌아온다.
-  box.insertAdjacentHTML("beforeend",
-    `<div class="pad"><button id="sleepBoard" class="ghost">다 받았습니다 — 보드 WiFi 끄기</button></div>`);
-  const sb = document.getElementById("sleepBoard");
-  if (sb) (sb as HTMLButtonElement).onclick = () => void sleepBoard();
 
   // 줄을 누르는 것만으로는 안 받는다. 90 MB 를 실수로 받으면 안 된다.
   box.querySelectorAll<HTMLElement>(".file .get").forEach((btn) => {
@@ -1293,6 +1334,7 @@ function wire() {
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
   // ── 보드 찾기 단추들 ──
   $("btScan").onclick = () => void scanBoards();
+  $("btDrop").onclick = () => void sleepBoard();
   $("byHand").onclick = () => {
     byHand = !byHand;
     renderSide();
@@ -1718,6 +1760,12 @@ function wire() {
   //   영상 재생      영상 밑 단추
 
   addEventListener("resize", () => { tmap?.resize(); redraw(); });
+
+  // 앱을 닫으면 보드 WiFi 도 끈다.
+  //
+  // 이건 "빨리 끄기" 일 뿐이고 못 해도 괜찮다. 숨이 끊기면 보드가 15초 뒤에
+  // 스스로 끈다. 창이 닫히는 중이라 답을 기다릴 수도 없다.
+  addEventListener("beforeunload", () => { if (beat) void sleepBoard(true); });
   addEventListener("dragover", (e) => e.preventDefault());
 }
 
