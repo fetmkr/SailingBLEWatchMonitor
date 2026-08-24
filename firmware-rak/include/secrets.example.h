@@ -11,3 +11,7 @@
 // 접속할 WiFi. 쓰지 않으면 빈 문자열로 둔다.
 #define SAIL_WIFI_SSID ""
 #define SAIL_WIFI_PASS ""
+
+// 보드가 스스로 만드는 WiFi 의 비밀번호. 8자 이상이어야 한다.
+// 이걸 안 적으면 netsrv.cpp 의 기본값이 쓰인다.
+#define SAIL_AP_PASS ""

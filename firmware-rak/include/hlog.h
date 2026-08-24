@@ -78,6 +78,13 @@ constexpr size_t kOffGnssDyn  = 44;
 constexpr size_t kOffGnssHz   = 45;
 constexpr size_t kOffSogSrc   = 46;
 constexpr size_t kOffQuatSrc  = 47;
+// 세션을 닫을 때 채운다. 목록만 보고 뭘 받을지 정하려면 이게 있어야 한다
+// (TRANSFER.md §1). 못 채운 파일은 전부 0 이다 — 전원이 갑자기 끊긴 경우다.
+constexpr size_t kOffDurationS = 48;  // U4  세션 길이 (초)
+constexpr size_t kOffNavRows   = 52;  // U4
+constexpr size_t kOffImuRows   = 56;  // U4
+constexpr size_t kOffDropped   = 60;  // U4  0 이 아니면 구멍 난 세션이다
+constexpr size_t kOffClosed    = 64;  // U1  1 이면 제대로 닫힌 파일
 
 constexpr uint8_t kImuBNO085  = 0;
 constexpr uint8_t kImuMPU9250 = 1;
@@ -165,6 +172,9 @@ void writeNav(const NavSample& s);   // 10 Hz
 void writeImu(const ImuSample& s);   // 100 Hz
 void writeText(const NavSample& s, const TextSample& t); // 10초에 한 번
 void mark();                         // 다음 NAV 줄에 마킹 표식
+
+// 첫 fix 때 한 번 부른다. 세션을 닫을 때 머리글에 박는다.
+void noteUtcStart(uint32_t epochSec, uint16_t ms);
 bool recording();
 void getStatus(Status* out);
 void healthCheck();                  // 1 Hz. 카드가 빠졌는지 본다

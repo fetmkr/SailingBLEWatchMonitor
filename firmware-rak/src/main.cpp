@@ -35,6 +35,7 @@
 #include "board_rak.h"
 #include "display_rak.h"
 #include "hlog.h"
+#include "netsrv.h"
 #include "protocol.h"
 
 using sail::Telemetry;
@@ -2091,7 +2092,19 @@ static hlog::NavSample buildNav(uint32_t nowMs) {
 }
 
 static void logWriteNav(uint32_t nowMs) {
-    hlog::writeNav(buildNav(nowMs));
+    const hlog::NavSample a = buildNav(nowMs);
+    hlog::writeNav(a);
+
+    // 첫 fix 의 UTC 를 알려 둔다. 세션을 닫을 때 머리글에 박힌다.
+    // 이게 있어야 나중에 목록만 보고 언제 찍은 세션인지 안다.
+    if (a.fix && a.week != hlog::kWeekInvalid && a.itow != hlog::kItowInvalid) {
+        // GPS 주 번호 + 주중 밀리초 → UNIX 초
+        //   GPS 시각의 0점은 1980-01-06, UNIX 는 1970-01-01. 차이 315964800초.
+        //   ※ 우리는 NMEA 의 UTC 로 week/itow 를 만들었으므로 (헤더 time_ref=1)
+        //     여기서 윤초를 더하지 않는다. 그대로 UTC 다.
+        const uint32_t sec = 315964800UL + (uint32_t)a.week * 604800UL + a.itow / 1000UL;
+        hlog::noteUtcStart(sec, (uint16_t)(a.itow % 1000UL));
+    }
 }
 
 static void logWriteText(uint32_t nowMs) {
@@ -2448,6 +2461,7 @@ static void printHelp() {
     Serial.println("  rec           ★ 기록 상태. rec on / rec off / rec mark");
     Serial.println("  rec ls / rec check [번호]   파일 목록 / 되읽어 검사");
     Serial.println("  pin <번호>    그 GPIO 를 5초 지켜본다 (버튼 달 자리 찾기)");
+    Serial.println("  wifi          ★ 기록 파일을 WiFi 로 내보내기. wifi ap / join / off");
     Serial.println("  oled          화면을 나중에 꽂았을 때 다시 붙이기");
     Serial.println("  gps           UART1 원시 NMEA 5초 (GPS 가 슬롯 A)");
     Serial.println("  gps d         같은 것 (GPS 가 슬롯 D — IO6 로 리셋 해제)");
@@ -2515,6 +2529,59 @@ static void handleCommand(String line) {
         } else {
             Serial.println("      몇 번 바뀌었습니다. 누른 게 아니라면 다른 핀을 쓰세요.");
         }
+        return;
+    }
+
+    // WiFi 로 기록 파일 내보내기. 자세히는 netsrv.h.
+    if (line == "wifi" || line.startsWith("wifi ")) {
+        String arg = line.substring(4);
+        arg.trim(); arg.toLowerCase();
+
+        if (arg == "ap") {
+            if (hlog::recording()) {
+                Serial.println("[NET] 기록 중입니다. rec off 먼저 하세요.");
+                Serial.println("      파일을 보내는 동안 100 Hz 기록이 끊깁니다.");
+                return;
+            }
+            netsrv::startAP();
+            return;
+        }
+        if (arg == "join") {
+            if (hlog::recording()) {
+                Serial.println("[NET] 기록 중입니다. rec off 먼저 하세요.");
+                return;
+            }
+            netsrv::startJoin();
+            return;
+        }
+        if (arg == "off") {
+            netsrv::stop();
+            Serial.println("[NET] WiFi 껐습니다.");
+            return;
+        }
+
+        Serial.println("──────────────────────────────────────────");
+        switch (netsrv::mode()) {
+            case netsrv::Mode::Off:
+                Serial.println("  WiFi          꺼져 있음");
+                break;
+            case netsrv::Mode::AP:
+                Serial.printf("  WiFi          내가 만든 망\n");
+                Serial.printf("  이름          %s\n", netsrv::ssidText());
+                Serial.printf("  주소          http://%s/\n", netsrv::ipText());
+                break;
+            case netsrv::Mode::Join:
+                Serial.printf("  WiFi          %s 에 붙어 있음\n", netsrv::ssidText());
+                Serial.printf("  주소          http://%s/\n", netsrv::ipText());
+                break;
+        }
+        Serial.printf("  보낸 파일     %u개  %.2f MB\n",
+                      (unsigned)netsrv::servedFiles(),
+                      netsrv::servedBytes() / 1048576.0);
+        Serial.println("──────────────────────────────────────────");
+        Serial.println("  wifi ap    보드가 스스로 WiFi 를 만든다 (바닷가용)");
+        Serial.println("  wifi join  아는 WiFi 에 붙는다 (secrets.h)");
+        Serial.println("  wifi off   끈다");
         return;
     }
 
@@ -2875,6 +2942,9 @@ static void handleCommand(String line) {
     Serial.printf("[ID ] 알 수 없는 명령: %s   (help 입력)\n", line.c_str());
 }
 
+// netsrv 가 AP 이름으로 쓴다. 헤더를 서로 물게 하지 않으려고 함수 하나로 낸다.
+const char* sailFullName() { return gFullName; }
+
 static void pollSerial() {
     static String buf;
     while (Serial.available() > 0) {
@@ -3008,6 +3078,7 @@ void loop() {
     static uint32_t lastText   = 0;
 
     pollSerial();
+    netsrv::poll();
 
     // GPS 는 쉬지 않고 읽는다. UART 버퍼가 넘치면 문장 중간이 잘려 나간다.
     { const uint32_t t = micros(); gpsPoll(); secDone(gStGps, micros() - t); }

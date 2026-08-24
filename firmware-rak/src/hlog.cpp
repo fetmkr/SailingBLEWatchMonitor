@@ -69,6 +69,8 @@ const char* gLastError = nullptr;
 
 volatile uint8_t gPendingEvent = 0;
 bool gFirstNav = true;
+uint32_t gUtcStart = 0;     // 첫 fix 의 UNIX 시각 (초). 0 이면 아직 못 잡음
+uint16_t gUtcStartMs = 0;
 
 TaskHandle_t gWriter = nullptr;
 
@@ -279,6 +281,7 @@ bool start(const Header& h) {
     gTextUsed = 0;
     gTextLastFlush = gTextLastRow = millis();
     gFirstNav = true;
+    gUtcStart = 0; gUtcStartMs = 0;
     gHead = gTail = 0;
     gStartedMs = millis();
     gRecording = true;
@@ -302,10 +305,48 @@ void stop() {
         if (gDropped) gTxt.printf("# ★ 버린 줄이 있습니다. 이 세션은 구멍이 있습니다.\n");
     }
 
+    const uint32_t durS = (millis() - gStartedMs) / 1000;
+
     gRecording  = false;
     gStopWanted = true;
     const uint32_t t0 = millis();
     while (gStopWanted && millis() - t0 < 15000) delay(10);
+
+    // ── 머리글을 다시 쓴다 ──────────────────────────────────────────────
+    //
+    // 기록을 시작할 때는 첫 fix 의 UTC 도, 세션 길이도 모른다. 전원을 켠
+    // 직후에는 GPS 가 시각조차 모른다. 그런데 나중에 목록만 보고 "이게 오늘
+    // 오전 훈련인가 5분짜리 시험인가" 를 정하려면 그 값이 있어야 한다
+    // (TRANSFER.md §1).
+    //
+    // 그래서 세션을 닫으면서 파일 맨 앞 128바이트를 새로 쓴다. 그때는 다
+    // 알고 있다. CRC 도 다시 계산한다.
+    //
+    // 전원이 그냥 끊겨서 여기까지 못 오면 closed 가 0 으로 남는다. 데스크탑
+    // 앱은 그런 파일도 받을 수 있어야 한다 — 안에는 값이 다 들어 있다.
+    if (SD.begin(rak::kSPI_CS, SPI, 4000000, "/sd", 5)) {
+        File h = SD.open(gPath, "r+");
+        if (h) {
+            uint8_t hdr[kHeaderSize];
+            if (h.read(hdr, kHeaderSize) == (int)kHeaderSize &&
+                memcmp(hdr, "HHLG", 4) == 0) {
+                memcpy(hdr + 24, &gUtcStart, 4);
+                memcpy(hdr + 28, &gUtcStartMs, 2);
+                memcpy(hdr + kOffDurationS, &durS, 4);
+                memcpy(hdr + kOffNavRows, (const void*)&gNavRows, 4);
+                memcpy(hdr + kOffImuRows, (const void*)&gImuRows, 4);
+                memcpy(hdr + kOffDropped, (const void*)&gDropped, 4);
+                hdr[kOffClosed] = 1;
+                const uint16_t c = crc16(hdr, 126);
+                hdr[126] = (uint8_t)c; hdr[127] = (uint8_t)(c >> 8);
+                h.seek(0);
+                h.write(hdr, kHeaderSize);
+                h.flush();
+            }
+            h.close();
+        }
+        SD.end();
+    }
 
     Serial.printf("[LOG] 기록 끝 — %s  NAV %u줄 / IMU %u줄\n",
                   gPath, (unsigned)gNavRows, (unsigned)gImuRows);
@@ -412,6 +453,14 @@ void writeText(const NavSample& s, const TextSample& t) {
     }
 }
 
+void noteUtcStart(uint32_t epochSec, uint16_t ms) {
+    if (!gRecording || gUtcStart || !epochSec) return;
+    gUtcStart = epochSec;
+    gUtcStartMs = ms;
+    Serial.printf("[LOG] 첫 fix — UTC %lu.%03u 를 머리글에 적습니다\n",
+                  (unsigned long)epochSec, ms);
+}
+
 void mark() {
     gPendingEvent |= kEvMark;
     Serial.println("[LOG] 다음 줄에 표식을 붙입니다");
@@ -483,6 +532,22 @@ void verify(uint32_t session) {
     const uint16_t hwant = (uint16_t)hdr[126] | ((uint16_t)hdr[127] << 8);
     const bool hok = (memcmp(hdr, "HHLG", 4) == 0) && (hwant == crc16(hdr, 126));
     Serial.printf("  헤더           %s\n", hok ? "CRC 맞음" : "★ 깨졌습니다");
+    // 세션을 닫으면서 다시 쓴 값들. 목록만 보고 뭘 받을지 정하는 데 쓴다.
+    {
+        uint32_t utc, durS, nr, ir, dr;
+        memcpy(&utc,  hdr + 24, 4);
+        memcpy(&durS, hdr + kOffDurationS, 4);
+        memcpy(&nr,   hdr + kOffNavRows, 4);
+        memcpy(&ir,   hdr + kOffImuRows, 4);
+        memcpy(&dr,   hdr + kOffDropped, 4);
+        Serial.printf("  닫힘 표시      %s\n",
+                      hdr[kOffClosed] == 1 ? "제대로 닫혔음" : "★ 전원이 끊긴 파일");
+        Serial.printf("  세션 길이      %u분 %u초   NAV %u줄  IMU %u줄  버림 %u\n",
+                      (unsigned)(durS / 60), (unsigned)(durS % 60),
+                      (unsigned)nr, (unsigned)ir, (unsigned)dr);
+        if (utc) Serial.printf("  첫 fix UTC     %lu\n", (unsigned long)utc);
+        else     Serial.println("  첫 fix UTC     없음 (위성을 못 잡은 세션)");
+    }
     Serial.printf("  세션 %u  IMU %s  움직임종류 %u  %u/%u Hz\n",
                   (unsigned)(hdr[18] | (hdr[19] << 8) | (hdr[20] << 16) | ((uint32_t)hdr[21] << 24)),
                   hdr[kOffImuType] == kImuBNO085 ? "BNO085" : "MPU-9250",
