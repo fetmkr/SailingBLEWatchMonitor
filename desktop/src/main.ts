@@ -937,7 +937,7 @@ function wire() {
   }, { passive: false });
 
   // 끌기 — 본 화면이면 밀기, 아래 띠면 그 자리로
-  type Drag = { kind: "pan" | "over"; x: number; from: number };
+  type Drag = { kind: "pan" | "over" | "scrub"; x: number; from: number };
   let drag: Drag | null = null;
 
   const inOverview = (e: PointerEvent) => {
@@ -981,8 +981,14 @@ function wire() {
     inp.select();
   }
 
-  // 누른 자리에서 거의 안 움직이고 떼면 "고정", 끌었으면 "밀기" 다.
-  // 한 손으로 둘 다 하려면 이렇게 갈라야 한다.
+  // ── 끌면 훑는다 ────────────────────────────────────────────────────
+  //
+  // 그림 위를 끌면 고정 자리가 따라오고 영상도 같이 훑어진다. 영상 편집기
+  // 에서 재생 머리를 끄는 것과 같다.
+  //
+  // 밀기(pan)는 그림 위에서 안 한다. 이미 길이 셋이나 있다.
+  //   시프트 + 휠 / 트랙패드 좌우 / 아래 스크롤 막대 / 위 시간 축 끌기
+  // 그림 위까지 밀기로 쓰면 정작 훑을 데가 없어진다.
   let moved = 0;
   // 이름 칸 경계를 끌면 넓어진다. 이름이 길면 넘치기 때문이다.
   let edgeDrag = false;
@@ -1005,8 +1011,16 @@ function wire() {
       c.style.cursor = "grabbing";      // 잡고 있는 동안은 쥔 손
       jumpTo(tl.msAtOverviewX(c, fullSpan, e.clientX));
       redraw();
-    } else {
+    } else if (tl.onTimeAxis(c, e.clientY)) {
+      // 위 시간 축을 끌면 화면이 밀린다
       drag = { kind: "pan", x: e.clientX, from: view.from };
+      c.style.cursor = "grabbing";
+    } else {
+      // 그림 위를 끌면 훑는다
+      drag = { kind: "scrub", x: e.clientX, from: view.from };
+      pinMs = tl.msAtX(c, view, e.clientX);
+      seekVideoTo(pinMs);
+      redraw();
     }
   });
 
@@ -1030,6 +1044,10 @@ function wire() {
       jumpTo(tl.msAtOverviewX(c, fullSpan, e.clientX));
       cursorMs = null;
       c.style.cursor = "grabbing";
+    } else if (drag?.kind === "scrub") {
+      pinMs = tl.msAtX(c, view, e.clientX);
+      cursorMs = pinMs;
+      seekVideoTo(pinMs);
     } else if (drag?.kind === "pan") {
       moved = Math.max(moved, Math.abs(e.clientX - drag.x));
       const rect = c.getBoundingClientRect();
@@ -1042,27 +1060,25 @@ function wire() {
     } else {
       const over = inOverview(e);
       const edge = tl.onLabelEdge(c, e.clientX);
+      const axis = tl.onTimeAxis(c, e.clientY);
       const onLabel = !edge && tl.rowAtY(c, series.length, e.clientX, e.clientY) >= 0;
-      cursorMs = over || onLabel || edge ? null : tl.msAtX(c, view, e.clientX);
-      // 경계는 좌우 화살표, 스크롤바는 손바닥, 이름 칸은 글자 커서.
-      c.style.cursor = edge ? "col-resize" : over ? "grab" : onLabel ? "text" : "crosshair";
+      cursorMs = over || onLabel || edge || axis ? null : tl.msAtX(c, view, e.clientX);
+      c.style.cursor = edge ? "col-resize"
+        : over || axis ? "grab"        // 스크롤 막대와 시간 축은 잡아서 미는 자리
+        : onLabel ? "text"
+        : "crosshair";
+      // 아직 고정 안 했으면 마우스만 움직여도 영상이 따라온다.
+      if (pinMs === null && cursorMs !== null && video().paused) seekVideoTo(cursorMs);
     }
-    // 고정 전에는 마우스를 따라 영상이 훑어진다. 고정한 뒤에는 안 움직인다 —
-    // 박아 둔 자리를 보려고 고정한 것이다.
-    if (pinMs === null && cursorMs !== null && video().paused) seekVideoTo(cursorMs);
     redraw();
   });
 
   c.addEventListener("pointerup", (e) => {
     if (edgeDrag) { edgeDrag = false; return; }
-    // 4픽셀 안에서 떼면 누른 것으로 본다. 밀려던 것이 아니다.
-    if (drag?.kind === "pan" && moved < 4 && session) {
-      pinMs = tl.msAtX(c, view, e.clientX);
-      seekVideoTo(pinMs);
-      setStatus("이 자리에 고정했습니다. Esc 로 풉니다.");
-    }
+    if (drag?.kind === "scrub") setStatus("이 자리에 고정했습니다. Esc 로 풉니다.");
     drag = null;
-    c.style.cursor = inOverview(e) ? "grab" : "crosshair";
+    c.style.cursor = inOverview(e) ? "grab"
+      : tl.onTimeAxis(c, e.clientY) ? "grab" : "crosshair";
     redraw();
   });
   c.addEventListener("pointercancel", () => {

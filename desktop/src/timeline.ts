@@ -153,6 +153,11 @@ export function labelWidth(): number { return LABEL_W; }
 export function setLabelWidth(px: number): void {
   LABEL_W = Math.min(360, Math.max(70, Math.round(px)));
 }
+/** 마우스가 위 시간 축에 있나 (거기를 끌면 화면이 밀린다) */
+export function onTimeAxis(canvas: HTMLCanvasElement, clientY: number): boolean {
+  return clientY - canvas.getBoundingClientRect().top < TIME_H;
+}
+
 /** 마우스가 이름 칸 경계에 있나 (끌어서 넓히는 자리) */
 export function onLabelEdge(canvas: HTMLCanvasElement, clientX: number): boolean {
   const x = clientX - canvas.getBoundingClientRect().left;
