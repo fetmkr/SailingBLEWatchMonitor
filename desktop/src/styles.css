@@ -179,4 +179,4 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
   border: 1px solid #4ea1ff; border-radius: 4px;
 }
 
-#originBtn.on { background: #3b74d1; border-color: #3b74d1; color: #fff; }
+#syncBtn.on { background: #3b74d1; border-color: #3b74d1; color: #fff; }

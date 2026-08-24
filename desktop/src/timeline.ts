@@ -414,31 +414,58 @@ export function draw(o: DrawOpts): void {
   if (o.cursorMs !== null && o.cursorMs >= view.from && o.cursorMs <= view.to) {
     const x = Math.round(xOf(o.cursorMs)) + 0.5;
     g.strokeStyle = ink;
-    g.globalAlpha = 0.35;
+    g.globalAlpha = 0.55;
     g.lineWidth = 1;
+    g.setLineDash([3, 3]);
     g.beginPath();
     g.moveTo(x, bodyTop);
     g.lineTo(x, bodyTop + bodyH);
     g.stroke();
+    g.setLineDash([]);
     g.globalAlpha = 1;
   }
 
+  // ── 고정한 자리 ──
+  //
+  // 어두운 바탕에 얇은 선 하나면 눈에 안 들어온다. 굵게 긋고, 시간 축에
+  // 시각을 적은 알약을 붙이고, 위아래에 손잡이를 둔다.
   if (o.pinMs !== null && o.pinMs >= view.from && o.pinMs <= view.to) {
     const x = Math.round(xOf(o.pinMs)) + 0.5;
-    g.strokeStyle = "#4ea1ff";
-    g.lineWidth = 1.5;
+    const PIN = "#4ea1ff";
+
+    g.strokeStyle = PIN;
+    g.lineWidth = 2;
     g.beginPath();
-    g.moveTo(x, bodyTop - TIME_H + 2);
+    g.moveTo(x, TIME_H);
     g.lineTo(x, bodyTop + bodyH);
     g.stroke();
-    // 시간 축 안에 손잡이. 어느 것이 고정인지 한눈에 갈린다.
-    g.fillStyle = "#4ea1ff";
+
+    // 시간 축에 붙는 알약
+    const label = formatDuration(o.pinMs - origin);
+    g.font = "bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    const tw = g.measureText(label).width;
+    const pw = tw + 12, ph = 17;
+    let px = x - pw / 2;
+    px = Math.max(axisW(), Math.min(px, cssW - pw - 2));
+    g.fillStyle = PIN;
     g.beginPath();
-    g.moveTo(x - 5, 2);
-    g.lineTo(x + 5, 2);
-    g.lineTo(x, 11);
+    g.roundRect(px, 4, pw, ph, 4);
+    g.fill();
+    g.fillStyle = "#0b0e12";
+    g.textAlign = "center";
+    g.textBaseline = "top";
+    g.fillText(label, px + pw / 2, 8);
+
+    // 아래쪽 손잡이
+    g.fillStyle = PIN;
+    g.beginPath();
+    g.moveTo(x - 5, bodyTop + bodyH);
+    g.lineTo(x + 5, bodyTop + bodyH);
+    g.lineTo(x, bodyTop + bodyH - 8);
     g.closePath();
     g.fill();
+
+    g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
   }
 
   // ── 맨 아래 스크롤 막대 ─────────────────────────────────────────────

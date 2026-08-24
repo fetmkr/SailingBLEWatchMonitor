@@ -736,9 +736,9 @@ function renderVbar() {
   $("vtime").textContent =
     `${tl.formatDuration(v.currentTime * 1000)} / ${tl.formatDuration(dur * 1000)}`;
 
-  const ob = $("originBtn");
-  ob.textContent = timeOrigin === "video" ? "시각 기준: 영상" : "시각 기준: 세션";
-  ob.className = timeOrigin === "video" && videoOn ? "on" : "";
+  const sb = $("syncBtn");
+  sb.textContent = linked ? "싱크 ●" : "싱크";
+  sb.className = linked ? "on" : "";
 
   const sl = $("vslider") as HTMLInputElement;
   sl.disabled = !videoOn || dur <= 0;
@@ -749,12 +749,12 @@ function renderVbar() {
     off.textContent = "";
     off.className = "mono dim";
   } else if (linked) {
-    off.textContent = `물림 · 영상 0초 = 세션 ${vid.formatOffset(sync.offsetMs)}`;
+    off.textContent = `같이 움직임 · 영상 0초 = ${vid.formatOffset(sync.offsetMs)}`;
     off.className = "mono good";
   } else {
     // 안 물렸으면 그 사실을 먼저 말한다. 그래야 왜 따로 노는지 안다.
     off.textContent =
-      "따로 움직임 — 영상과 데이터를 같은 순간에 두고 [여기 맞춤]" +
+      "따로 움직임 — 같은 순간에 두고 [싱크]" +
       (sync.guessed ? `  (짐작 ${vid.formatOffset(sync.offsetMs)})` : "");
     off.className = "mono bad";
   }
@@ -779,18 +779,36 @@ function nudge(ms: number) {
 }
 
 /** 지금 영상 화면이 커서 자리라고 알려 준다. 눈으로 맞추는 길이다. */
-function syncHere() {
-  const at = pinMs !== null ? pinMs : cursorMs;
+/**
+ * 싱크 단추 하나로 다 한다.
+ *
+ *   안 물렸을 때 누르면   지금 영상 화면과 타임라인 자리를 맞추고 물린다
+ *   물렸을 때 누르면      푼다 (따로 움직인다)
+ *
+ * 전에는 `여기 맞춤` · `물림 풀기` · `시각 기준` 세 개였다. 하는 일이 결국
+ * 하나라 셋으로 나눌 이유가 없었다.
+ */
+function toggleSync() {
   if (!videoOn) { setStatus("영상을 먼저 여세요.", "bad"); return; }
+
+  if (linked) {
+    linked = false;
+    timeOrigin = "session";
+    setStatus("싱크를 풀었습니다. 영상과 데이터가 따로 움직입니다.");
+    renderVbar();
+    redraw();
+    return;
+  }
+
+  const at = pinMs !== null ? pinMs : cursorMs;
   if (at === null) {
-    setStatus("타임라인에서 맞출 자리를 눌러 고정하고 누르세요.", "bad");
+    setStatus("타임라인에서 맞출 자리를 먼저 누르세요.", "bad");
     return;
   }
   sync = { ...sync, offsetMs: at - video().currentTime * 1000, guessed: false };
-  // 맞췄으면 이제 물린다. 그리고 영상 시각을 기준으로 센다.
   linked = true;
-  timeOrigin = "video";
-  setStatus("맞췄습니다. 이제 영상과 데이터가 같이 움직입니다.", "good");
+  timeOrigin = "video";      // 이제 두 숫자가 같아진다
+  setStatus("싱크 맞췄습니다. 같이 움직입니다.", "good");
   renderVbar();
   redraw();
 }
@@ -839,21 +857,7 @@ function wire() {
   sl.addEventListener("input", slSeek);
   sl.addEventListener("change", () => { sliderHeld = false; slSeek(); });
   addEventListener("pointerup", () => { sliderHeld = false; });
-  $("syncHere").onclick = syncHere;
-  $("unlinkBtn").onclick = () => {
-    if (!linked) { setStatus("이미 따로 움직입니다.", "bad"); return; }
-    linked = false;
-    timeOrigin = "session";
-    setStatus("물림을 풀었습니다. 영상과 데이터가 따로 움직입니다.");
-    renderVbar();
-    redraw();
-  };
-  $("originBtn").onclick = () => {
-    if (!videoOn) { setStatus("영상을 먼저 여세요.", "bad"); return; }
-    timeOrigin = timeOrigin === "video" ? "session" : "video";
-    renderVbar();
-    redraw();
-  };
+  $("syncBtn").onclick = toggleSync;
   // 누른 부호대로 아래 숫자가 움직인다. 반대로 두면 사람이 헷갈린다.
   $("n10").onclick = () => nudge(-10000);
   $("n1").onclick = () => nudge(-1000);
