@@ -653,6 +653,8 @@ interface Found {
 let found: Found[] = [];
 let scanning = false;
 let byHand = false;          // 사람이 주소를 직접 치겠다고 했나
+/** USB 목록에서 우리 것 같지 않은 포트까지 보여줄지 */
+let usbAll = false;
 let waking: string | null = null;   // 지금 깨우는 중인 것의 열쇠
 
 function renderBoards() {
@@ -675,6 +677,16 @@ function renderBoards() {
       <button class="wake" ${busy ? "disabled" : ""}>${busy ? "깨우는 중…" : "연결"}</button>
     </div>`;
   }).join("");
+
+  // USB 를 보고 있으면 "다른 포트도 보기" 를 붙인다. 맥에는 늘 여러 개가
+  // 떠 있어서 기본은 우리 것 같은 것만 보여준다.
+  if (found.some((f) => f.via === "usb") || usbAll) {
+    box.insertAdjacentHTML("beforeend",
+      `<div class="pad"><label class="chk"><input id="usbAll" type="checkbox"
+        ${usbAll ? "checked" : ""}> 다른 USB 포트도 보기</label></div>`);
+    const chk = document.getElementById("usbAll") as HTMLInputElement | null;
+    if (chk) chk.onchange = () => { usbAll = chk.checked; void scanBoards(); };
+  }
 
   box.querySelectorAll<HTMLElement>(".board .wake").forEach((btn) => {
     btn.onclick = (e) => {
@@ -708,65 +720,82 @@ function mergeBle(list: ble.Board[]) {
 }
 
 /**
- * 블루투스와 USB 를 같이 본다.
+ * 배를 찾는다. **블루투스 먼저, 못 찾으면 USB.**
  *
- * USB 는 곧바로 답이 나오고, 블루투스는 몇 초 훑어야 한다. 그래서 USB 를
- * 먼저 보여주고 블루투스가 잡히는 대로 위에 얹는다.
+ * 둘 다 보여주면 같은 보드가 두 줄로 나온다. 블루투스가 되면 그쪽이 낫다 —
+ * 케이블이 필요 없고 배가 물에 떠 있어도 잡힌다. USB 는 블루투스가 없거나
+ * 아무것도 못 찾았을 때의 길이다.
  */
 async function scanBoards() {
   found = [];
   scanning = true;
   renderBoards();
-  setStatus("주변 배를 찾는 중…");
-
-  // ── USB 먼저 ──
-  let nUsb = 0;
-  if (usb.usable) {
-    try {
-      const ports = await usb.list();
-      nUsb = ports.length;
-      found = ports.map((p): Found => ({
-        via: "usb", key: p.path,
-        name: p.likely ? `◈ ${p.path}` : p.path,
-        sub: p.label.replace(p.path, "").replace(/^ — /, "") || "USB 로 꽂힘",
-      }));
-      renderBoards();
-    } catch (e) {
-      setStatus(`USB 를 못 봅니다 — ${e}`, "bad");
-    }
-  }
 
   // ── 블루투스 ──
   const st = await ble.ready();
-  if (!st.ok) {
+  if (st.ok) {
+    setStatus("블루투스로 주변 배를 찾는 중…");
+    try {
+      await ble.scan(6000, (list) => mergeBle(list));
+      await new Promise((r) => setTimeout(r, 6200));
+      await ble.scanStop();
+    } catch (e) {
+      setStatus(`블루투스 찾기 실패 — ${e}`, "bad");
+    }
+  }
+
+  const nBle = found.filter((f) => f.via === "ble").length;
+  if (nBle) {
     scanning = false;
     renderBoards();
-    if (nUsb) {
-      setStatus(`블루투스를 못 써서 USB 만 봤습니다 (${nUsb}개). — ${st.why}`);
-    } else {
-      setStatus(`블루투스도 USB 도 못 찾았습니다. — ${st.why}`, "bad");
-      byHand = true;
-      renderSide();
-    }
+    setStatus(`배 ${nBle}대 찾았습니다.`, "good");
     return;
   }
 
+  // ── 블루투스로 못 찾았다. USB 를 본다 ──
+  if (!usb.usable) {
+    scanning = false;
+    renderBoards();
+    setStatus(st.ok ? "못 찾았습니다. 보드가 켜져 있는지 보세요."
+                    : `블루투스도 USB 도 못 씁니다 — ${st.why}`, "bad");
+    byHand = true;
+    renderSide();
+    return;
+  }
+
+  setStatus(st.ok ? "블루투스로 못 찾았습니다. USB 를 봅니다…"
+                  : "블루투스를 못 씁니다. USB 를 봅니다…");
   try {
-    await ble.scan(6000, (list) => mergeBle(list));
-    setTimeout(() => {
-      scanning = false;
+    const ports = await usb.list(usbAll);
+    found = ports.map((p): Found => ({
+      via: "usb", key: p.path, name: p.path, sub: "듣는 중…",
+    }));
+    renderBoards();
+
+    // 아무것도 안 보내고 1.8초 들어 본다. 보드는 1초에 한 번 제 이름을 뱉는다.
+    for (const p of ports) {
+      const boat = await usb.sniff(p.path);
+      const row = found.find((f) => f.key === p.path);
+      if (!row) continue;
+      row.name = boat ?? p.path;
+      row.sub = boat ? p.path : "우리 보드인지 모름 · 눌러 보면 압니다";
       renderBoards();
-      const nBle = found.filter((f) => f.via === "ble").length;
-      const parts = [];
-      if (nBle) parts.push(`블루투스 ${nBle}대`);
-      if (nUsb) parts.push(`USB ${nUsb}개`);
-      setStatus(parts.length ? `찾았습니다 — ${parts.join(", ")}`
-                             : "못 찾았습니다. 보드가 켜져 있는지 보세요.",
-                parts.length ? "good" : "bad");
-    }, 6200);
+    }
+
+    scanning = false;
+    renderBoards();
+    const named = found.filter((f) => f.name.startsWith("SAIL-")).length;
+    setStatus(
+      ports.length === 0
+        ? (usbAll ? "USB 로 꽂힌 것이 없습니다." :
+           "USB 로 꽂힌 보드가 없습니다. 다른 포트도 보려면 아래를 누르세요.")
+        : named ? `USB 로 배 ${named}대 찾았습니다.`
+                : `USB 포트 ${ports.length}개 보입니다. 눌러 보세요.`,
+      ports.length ? "good" : "bad");
+    if (!ports.length) { byHand = true; renderSide(); }
   } catch (e) {
     scanning = false; renderBoards();
-    setStatus(`찾기 실패 — ${e}`, "bad");
+    setStatus(`USB 를 못 봅니다 — ${e}`, "bad");
   }
 }
 
@@ -837,14 +866,7 @@ async function wake(b: ble.Board) {
   }
 }
 
-// ── USB 로 깨우기 ────────────────────────────────────────────────────────
-//
-// 블루투스가 없는 컴퓨터의 길이다. 보드는 BLE 와 시리얼이 같은 명령을 쓰니
-// 통로만 갈아 끼우면 된다 (PROTOCOL.md §9).
-//
-// ★ 보내는 명령은 `wifi ap` 다. `wifi on`(붙기)은 보드가 WiFi 이름과
-//   비밀번호를 알아야 하는데, 그걸 넣는 게 제일 어려운 일이다. AP 는 그게
-//   아예 필요 없고 주소도 늘 192.168.4.1 이다.
+
 let usbBusy: string | null = null;
 
 /**

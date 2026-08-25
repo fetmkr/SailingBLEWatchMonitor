@@ -28,7 +28,9 @@ export const usable = inApp;
 export interface Port {
   path: string;
   label: string;      // 사람에게 보여줄 이름
-  likely: boolean;    // 우리 보드일 것 같은가
+  likely: boolean;    // 우리 보드일 것 같은가 (VID 로 짐작)
+  /** 들어 봐서 알아낸 배 이름. 확인된 것만 들어 있다 */
+  boat?: string;
 }
 
 /**
@@ -38,8 +40,8 @@ export interface Port {
  *   /dev/cu.usbmodem101   "USB JTAG/serial debug unit"   VID 303a
  * [확인: 실기기에서 pyserial 로 읽은 값]
  *
- * 확실히 가려낼 수는 없다. 그래서 **거르지 않고 다 보여주되 순서만 매긴다.**
- * 이름만으로 우리 것이 아니라고 단정하면, 다른 보드를 쓰는 사람이 막힌다.
+ * VID 만으로는 "ESP32-S3 를 쓰는 무언가" 까지만 안다. 확실히 하려면
+ * 들어 봐야 한다 — sniff() 참조.
  */
 const ESPRESSIF_VID = "303a";
 
@@ -50,24 +52,68 @@ function score(path: string, info: any): boolean {
   return t.includes("usbmodem") || t.includes("espressif") || t.includes("jtag");
 }
 
-export async function list(): Promise<Port[]> {
+/**
+ * 꽂혀 있는 것을 늘어놓는다.
+ *
+ * `all` 이 아니면 **우리 보드일 만한 것만** 준다. 맥에는 블루투스 가짜
+ * 포트를 비롯해 늘 여러 개가 떠 있어서, 다 보여주면 고를 수가 없다.
+ */
+export async function list(all = false): Promise<Port[]> {
   if (!inApp) return [];
   const raw = await SerialPort.available_ports();
   const out: Port[] = [];
   for (const [path, info] of Object.entries(raw ?? {})) {
-    // 블루투스 가짜 포트는 뺀다. 맥에 늘 떠 있는데 우리 것이 아니다.
-    if (/bluetooth|debug-console/i.test(path)) continue;
+    // 블루투스 가짜 포트는 늘 떠 있는데 우리 것이 아니다.
+    if (/bluetooth|debug-console|wlan/i.test(path)) continue;
     const i = info as any;
     const name = i?.product || i?.manufacturer || "";
-    out.push({
-      path,
-      label: name ? `${path} — ${name}` : path,
-      likely: score(path, i),
-    });
+    const likely = score(path, i);
+    if (!all && !likely) continue;
+    out.push({ path, label: name ? `${path} — ${name}` : path, likely });
   }
-  // 우리 것 같은 걸 위로
   out.sort((a, b) => Number(b.likely) - Number(a.likely) || a.path.localeCompare(b.path));
   return out;
+}
+
+/**
+ * 들어 보고 우리 보드인지 알아낸다. **아무것도 안 보낸다.**
+ *
+ * 보드가 1초에 한 번 이렇게 뱉는다.
+ *   [38459.4s] SAIL-random() | SOG --.-- kn | COG   ---° | HEEL   +1.8° | …
+ *
+ * 그래서 열고 듣기만 하면 된다. 남의 기기일 수도 있는데 거기에 글자를
+ * 써 넣는 건 예의가 아니다 — 듣기만 하면 아무 일도 안 일어난다.
+ *
+ * 못 알아내면 null. 그래도 목록에서 빼지는 않는다 — 기록 중이거나 말이
+ * 없는 상태일 수도 있고, 그럴 때도 [연결] 은 눌러 볼 수 있어야 한다.
+ */
+export async function sniff(path: string, ms = 1800): Promise<string | null> {
+  if (!inApp) return null;
+  let port: SerialPort | null = null;
+  let handle: { unwatch: () => Promise<void> } | null = null;
+  try {
+    port = new SerialPort({ path, baudRate: 115200 });
+    await port.open();
+    let seen = "";
+    let name: string | null = null;
+    handle = await port.watch({
+      onData: (d) => {
+        seen += typeof d === "string" ? d : new TextDecoder().decode(d);
+        const m = /\b(SAIL-[^\s|]+)/.exec(seen);
+        if (m) name = m[1];
+      },
+    });
+    const until = Date.now() + ms;
+    while (!name && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return name;
+  } catch {
+    return null;                 // 다른 프로그램이 잡고 있을 수도 있다
+  } finally {
+    try { await handle?.unwatch(); } catch { /* 이미 끝났으면 그만 */ }
+    try { await port?.close(); } catch { /* 같음 */ }
+  }
 }
 
 /**
