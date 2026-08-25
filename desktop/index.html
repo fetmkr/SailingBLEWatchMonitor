@@ -6,96 +6,151 @@
     <title>Sail Analyzer</title>
   </head>
   <body>
-    <header>
-      <div class="bar">
-        <button id="open">파일 열기</button>
-        <button id="sample">시험용 데이터</button>
-        <span class="sep"></span>
-        <button id="openVideo">영상 열기</button>
-        <span class="sep"></span>
-        <button id="fit">전체 보기</button>
-        <button id="addMark" title="파란 고정선 자리에 깃발을 답니다">＋ 마킹</button>
-        <span id="range" class="dim"></span>
-        <span style="flex:1"></span>
-      </div>
-      <div id="meta"></div>
-      <div id="status"></div>
-      <div id="prog"><div id="progBar"></div><span id="progText"></span></div>
+    <!--
+      화면을 사방으로 나눈다. Saleae Logic 2 가 하는 방식이다.
+
+        위     시키는 것 — 단추만 한 줄
+        가운데  보는 것 — 영상·지도(위) / 데이터(아래)
+        오른쪽  지금 것의 속성 — 서랍 하나를 아이콘으로 갈아 끼운다
+        아래    지금 상태 — 한 줄
+
+      왼쪽에는 서랍을 두지 않는다. 그 자리는 타임라인의 이름 칸이 쓴다.
+      양옆에 서랍을 두면 가운데가 양쪽에서 깎이는데, 타임라인은 너비가
+      생명이다.
+    -->
+    <header id="topbar">
+      <button id="open">파일 열기</button>
+      <button id="sample">시험용 데이터</button>
+      <span class="sep"></span>
+      <button id="openVideo">영상 열기</button>
+      <span class="sep"></span>
+      <button id="fit">전체 보기</button>
+      <button id="addMark" title="파란 고정선 자리에 깃발을 답니다">＋ 마킹</button>
+      <span class="sep"></span>
+      <button id="dirBtn" title="영상·지도와 데이터를 위아래로 놓을지 좌우로 놓을지">⇅ 위아래</button>
+      <button id="wideBtn" title="서랍을 접고 넓게 봅니다">넓게</button>
+      <span id="range" class="dim mono"></span>
+      <span style="flex: 1"></span>
+      <span id="fileTag" class="dim"></span>
     </header>
 
-    <main>
-      <aside id="left">
-        <div class="tabs">
-          <button id="tabLib" class="tab on">보관함</button>
-          <button id="tabBoard" class="tab">보드</button>
-        </div>
-        <div id="libBar" class="subbar">
-          <input id="q" placeholder="선수 · 장소 · 메모 찾기" spellcheck="false" />
-        </div>
-        <div id="boardBar" class="subbar" style="display:none">
-          <button id="btScan">배 찾기</button>
-          <button id="btDrop" class="ghost" style="display:none"
-                  title="보드 WiFi 를 끄고 블루투스로 돌아갑니다">연결 해제</button>
-          <span style="flex:1"></span>
-          <button id="byHand" class="ghost" title="주소를 직접 치겠다">주소로</button>
-        </div>
-        <div id="hostBar" class="subbar" style="display:none">
-          <input id="host" value="192.168.4.1" spellcheck="false" />
-          <button id="list">목록</button>
-        </div>
-        <div id="boards"></div>
-        <div id="files"></div>
-      </aside>
-
-      <!-- 가운데를 좌우 반반으로 — 왼쪽 영상, 오른쪽 데이터 -->
+    <main id="shell">
       <section id="center">
-        <div id="videoPane">
-          <div class="vwrap">
-            <video id="vid" playsinline></video>
-            <div id="vdrop">
-              <div>
-                <b>영상을 여기에 끌어다 놓으세요</b><br />
-                <span class="dim">MP4 / MOV · 고프로 · DJI</span>
+        <div id="mediaRow">
+          <div id="videoPane">
+            <div class="vwrap">
+              <video id="vid" playsinline></video>
+              <div id="vdrop">
+                <div>
+                  <b>영상을 여기에 끌어다 놓으세요</b><br />
+                  <span class="dim">MP4 / MOV · 고프로 · DJI</span>
+                </div>
               </div>
             </div>
+            <!-- 영상 스크러빙 슬라이더. 타임라인 없이도 영상만 훑을 수 있어야 한다 -->
+            <div id="vseek">
+              <input id="vslider" type="range" min="0" max="1000" value="0" step="1" />
+            </div>
+            <div id="vbar">
+              <button id="play">▶</button>
+              <span id="vtime" class="mono dim">0:00 / 0:00</span>
+              <span class="sep"></span>
+              <button id="syncBtn" title="지금 영상 화면과 타임라인 자리를 맞춰 물린다. 다시 누르면 푼다">싱크</button>
+              <button id="n10">−10초</button>
+              <button id="n1">−1초</button>
+              <button id="p1">+1초</button>
+              <button id="p10">+10초</button>
+              <span id="voff" class="mono dim"></span>
+            </div>
           </div>
-          <!-- 영상 스크러빙 슬라이더. 타임라인 없이도 영상만 훑을 수 있어야 한다 -->
-          <div id="vseek">
-            <input id="vslider" type="range" min="0" max="1000" value="0" step="1" />
-          </div>
-          <div id="vbar">
-            <button id="play">▶</button>
-            <span id="vtime" class="mono dim">0:00 / 0:00</span>
-            <span class="sep"></span>
-            <button id="syncBtn" title="지금 영상 화면과 타임라인 자리를 맞춰 물린다. 다시 누르면 푼다">싱크</button>
-            <button id="n10">−10초</button>
-            <button id="n1">−1초</button>
-            <button id="p1">+1초</button>
-            <button id="p10">+10초</button>
-            <span id="voff" class="mono dim"></span>
+          <div id="mapPane">
+            <div id="map"></div>
+            <div id="mapBar">
+              <select id="baseSel" title="바탕 지도"></select>
+              <label><input id="seamark" type="checkbox" /> 해도</label>
+              <label><input id="bySog" type="checkbox" checked /> 속도 색칠</label>
+              <button id="mapFit" title="항적 전체가 보이게">항적 맞춤</button>
+            </div>
+            <div id="mapNone" class="dim">위치가 없는 세션입니다.</div>
           </div>
         </div>
-        <div id="mapPane">
-          <div id="map"></div>
-          <div id="mapBar">
-            <select id="baseSel" title="바탕 지도"></select>
-            <label><input id="seamark" type="checkbox" /> 해도 표시</label>
-            <label><input id="bySog" type="checkbox" checked /> 속도로 색칠</label>
-            <button id="mapFit" title="항적 전체가 보이게">항적 맞춤</button>
-          </div>
-          <div id="mapNone" class="dim">위치가 없는 세션입니다.</div>
-        </div>
-        <div id="split"></div>
         <div id="dataPane">
           <canvas id="plot"></canvas>
-          <div id="readout"></div>
         </div>
       </section>
 
-      <aside id="right">
-        <div id="details"></div>
+      <!-- 서랍. 한 번에 하나만 열린다. -->
+      <aside id="dock">
+        <div class="drawer" data-tab="lib">
+          <div class="dhead">보관함</div>
+          <div class="subbar">
+            <input id="q" placeholder="선수 · 장소 · 메모 찾기" spellcheck="false" />
+          </div>
+          <div id="files"></div>
+        </div>
+
+        <div class="drawer" data-tab="board" hidden>
+          <div class="dhead">보드</div>
+          <div class="subbar">
+            <button id="btScan">배 찾기</button>
+            <button id="btDrop" class="ghost" style="display: none"
+                    title="보드 WiFi 를 끄고 블루투스로 돌아갑니다">연결 해제</button>
+            <span style="flex: 1"></span>
+            <button id="byHand" class="ghost" title="주소를 직접 치겠다">주소로</button>
+          </div>
+          <div id="hostBar" class="subbar" style="display: none">
+            <input id="host" value="192.168.4.1" spellcheck="false" />
+            <button id="list">목록</button>
+          </div>
+          <div id="boards"></div>
+          <div id="boardFiles"></div>
+        </div>
+
+        <div class="drawer" data-tab="info" hidden>
+          <div class="dhead">훈련 정보</div>
+          <div id="meta"></div>
+          <div id="details"></div>
+        </div>
+
+        <div class="drawer" data-tab="mark" hidden>
+          <div class="dhead">마킹</div>
+          <div id="markList"></div>
+        </div>
+
+        <div class="drawer" data-tab="set" hidden>
+          <div class="dhead">설정</div>
+          <div class="srow">
+            <span>화면</span>
+            <div class="seg" id="themeSeg">
+              <button data-theme="dark">어둡게</button>
+              <button data-theme="light">밝게</button>
+              <button data-theme="auto">맥 따라</button>
+            </div>
+          </div>
+          <div class="dim" style="font-size:12px; margin-top:6px">
+            맥 따라 를 고르면 시스템 설정을 그대로 씁니다.
+          </div>
+        </div>
       </aside>
+
+      <!-- 아이콘 줄. 늘 보인다 — 무엇이 있는지 알아야 하니까. -->
+      <nav id="rail">
+        <button class="rbtn on" data-tab="lib"   title="보관함"><span>▤</span>보관함</button>
+        <button class="rbtn"    data-tab="board" title="보드"><span>◈</span>보드</button>
+        <button class="rbtn"    data-tab="info"  title="훈련 정보"><span>ⓘ</span>정보</button>
+        <button class="rbtn"    data-tab="mark"  title="마킹"><span>⚑</span>마킹</button>
+        <span style="flex: 1"></span>
+        <button class="rbtn"    data-tab="set"   title="설정"><span>⚙</span>설정</button>
+      </nav>
     </main>
+
+    <footer id="statusbar">
+      <span id="readout" class="mono"></span>
+      <span style="flex: 1"></span>
+      <span id="prog"><span id="progBar"></span><span id="progText"></span></span>
+      <span id="status"></span>
+      <span id="boardTag" class="dim"></span>
+    </footer>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

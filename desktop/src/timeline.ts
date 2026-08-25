@@ -240,10 +240,20 @@ export function draw(o: DrawOpts): void {
   const span = Math.max(1, view.to - view.from);
   const xOf = (ms: number) => axisW() + ((ms - view.from) / span) * plotW;
 
+  // 색은 CSS 에서 읽는다. 어둡게·밝게를 바꾸면 여기가 같이 따라온다.
+  // 캔버스는 CSS 가 안 먹으니 이렇게 손으로 가져와야 한다.
   const css = getComputedStyle(document.documentElement);
-  const ink = css.getPropertyValue("--ink").trim() || "#e6e6e6";
-  const dim = css.getPropertyValue("--dim").trim() || "#8a8a8a";
-  const grid = css.getPropertyValue("--grid").trim() || "#2a2a2a";
+  const v = (name: string, fallback: string) =>
+    css.getPropertyValue(name).trim() || fallback;
+  const ink = v("--ink", "#e6e6e6");
+  const dim = v("--dim", "#8a8a8a");
+  const grid = v("--grid", "#2a2a2a");
+  const band = v("--tl-band", "#181b21");     // 시간 축·아래 띠 바탕
+  const plotBg = v("--tl-plot", "#0b0e12");   // 그림 바탕
+  const panel = v("--panel", "#1b1e24");
+  const thumb = v("--tl-thumb", "#4a5160");   // 아래 띠에서 지금 보는 자리
+  const MARK = v("--mark", "#f0a020");
+  const PIN = v("--pin", "#4ea1ff");
 
   // ── 시간 축 (위) ────────────────────────────────────────────────────
   //
@@ -257,11 +267,11 @@ export function draw(o: DrawOpts): void {
   g.textBaseline = "top";
 
   // 왼쪽 이름 칸 바탕
-  g.fillStyle = "#181b21";
+  g.fillStyle = band;
   g.fillRect(0, 0, LABEL_W, cssH);
 
   // 축 바탕
-  g.fillStyle = "#181b21";
+  g.fillStyle = band;
   g.fillRect(0, 0, cssW, TIME_H);
   g.strokeStyle = grid;
   g.lineWidth = 1;
@@ -308,7 +318,6 @@ export function draw(o: DrawOpts): void {
   //
   // 선수가 배에서 버튼을 눌러 "이 순간" 이라고 찍어 둔 자리다. 주황 점선만
   // 그으면 뭔지 알 수가 없어서 위에 깃발과 번호를 붙인다.
-  const MARK = "#f0a020";
   flagBoxes.length = 0;
   o.marks.forEach((mk, i) => {
     const m = mk.ms;
@@ -339,7 +348,7 @@ export function draw(o: DrawOpts): void {
     g.closePath();
     g.fill();
 
-    g.fillStyle = "#0b0e12";
+    g.fillStyle = plotBg;
     g.textAlign = "left";
     g.textBaseline = "top";
     g.font = "bold 8px ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -502,7 +511,6 @@ export function draw(o: DrawOpts): void {
   // 시각을 적은 알약을 붙이고, 위아래에 손잡이를 둔다.
   if (o.pinMs !== null && o.pinMs >= view.from && o.pinMs <= view.to) {
     const x = Math.round(xOf(o.pinMs)) + 0.5;
-    const PIN = "#4ea1ff";
 
     g.strokeStyle = PIN;
     g.lineWidth = 2;
@@ -523,7 +531,7 @@ export function draw(o: DrawOpts): void {
     g.beginPath();
     g.roundRect(px, 4, pw, ph, 4);
     g.fill();
-    g.fillStyle = "#0b0e12";
+    g.fillStyle = plotBg;
     g.textAlign = "center";
     g.textBaseline = "top";
     g.fillText(label, px + pw / 2, 8);
@@ -551,12 +559,12 @@ export function draw(o: DrawOpts): void {
     const fSpan = o.full.to - o.full.from;
     const fx = (ms: number) => axisW() + ((ms - o.full!.from) / fSpan) * plotW;
 
-    g.fillStyle = "#1b1e24";
+    g.fillStyle = panel;
     g.fillRect(axisW(), oy, plotW, oh);
 
     const wx = fx(view.from);
     const ww = Math.max(14, fx(view.to) - wx);   // 너무 짧으면 잡을 수가 없다
-    g.fillStyle = "#4a5160";
+    g.fillStyle = thumb;
     g.beginPath();
     const rr = oh / 2;
     g.roundRect(Math.min(wx, axisW() + plotW - ww), oy, ww, oh, rr);

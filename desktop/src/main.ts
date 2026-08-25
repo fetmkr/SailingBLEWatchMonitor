@@ -13,6 +13,7 @@ import * as hlog from "./hlog";
 import * as lib from "./library";
 import * as vid from "./video";
 import * as ble from "./ble";
+import * as panes from "./panes";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import * as tl from "./timeline";
 import { TrackMap, type TrackPoint } from "./map";
@@ -44,8 +45,6 @@ let pinMs: number | null = null;
 let library: lib.Library = { version: 1, entries: [] };
 let openId: string | null = null;       // 지금 보고 있는 세션
 let query = "";
-/** 왼쪽에 무엇을 보여줄지. 보관함이 기본이다 — 코치는 대개 이미 받은 걸 본다 */
-let pane: "library" | "board" = "library";
 
 // 영상
 let sync: vid.Sync = { offsetMs: 0, guessed: false, fileTime: null };
@@ -272,6 +271,7 @@ function rebuildMarks() {
       ms: a.ms, note: notes[String(a.ms)] ?? a.note, from: "user",
     })),
   ].sort((a, b) => a.ms - b.ms);
+  if (tab === "mark") renderMarkList();
 }
 
 function saveMarks(patch: Partial<lib.Entry>) {
@@ -346,6 +346,9 @@ function renderHeader(s: hlog.Session, name: string, parseMs: number, bytes: num
   const when = h.utcStart
     ? new Date(h.utcStart * 1000).toLocaleString()
     : "위성을 못 잡은 세션";
+
+  // 위 띠에는 이름만. 나머지는 오른쪽 서랍(정보)에 있다.
+  $("fileTag").textContent = `${name} · 세션 ${h.session}`;
 
   $("meta").innerHTML = `
     <div class="row"><b>${name}</b> <span class="dim">${(bytes / 1048576).toFixed(2)} MB · ${parseMs.toFixed(0)} ms 만에 읽음</span></div>
@@ -586,24 +589,14 @@ async function listBoard() {
 
 let boardFiles: FileInfo[] = [];
 
-// ── 왼쪽 칸 ─────────────────────────────────────────────────────────────
-//
-// 보관함이 기본이다. 코치는 대개 이미 받아 둔 걸 본다. 보드에서 받는 건
-// 훈련이 끝난 직후 한 번뿐이다.
-function renderSide() {
-  ($("tabLib") as HTMLElement).className = pane === "library" ? "tab on" : "tab";
-  ($("tabBoard") as HTMLElement).className = pane === "board" ? "tab on" : "tab";
-  ($("boardBar") as HTMLElement).style.display = pane === "board" ? "flex" : "none";
-  ($("libBar") as HTMLElement).style.display = pane === "library" ? "flex" : "none";
+// 보드 서랍 안의 작은 것들. 서랍을 그릴 때마다 맞춘다.
+function syncBoardBar() {
   // 주소 칸은 BLE 를 못 쓰거나 사람이 "주소로" 를 눌렀을 때만 보인다
   ($("hostBar") as HTMLElement).style.display =
-    pane === "board" && (byHand || !ble.usable) ? "flex" : "none";
-  ($("boards") as HTMLElement).style.display = pane === "board" ? "block" : "none";
+    (byHand || !ble.usable) ? "flex" : "none";
   // 연결 해제는 붙어 있을 때만 뜬다. 연락을 보내고 있으면 붙어 있는 것이다.
   ($("btDrop") as HTMLElement).style.display =
-    pane === "board" && pinger !== null ? "inline-block" : "none";
-  if (pane === "board") { renderBoards(); renderFileList(boardFiles); }
-  else { $("boards").innerHTML = ""; renderLibrary(); }
+    pinger !== null ? "inline-block" : "none";
 }
 
 // ── 보드 찾기 (BLE) ─────────────────────────────────────────────────────
@@ -920,8 +913,49 @@ function renderDetails() {
   };
 }
 
+/**
+ * 마킹 목록.
+ *
+ * 배에서 찍힌 것과 코치가 더한 것을 한 줄씩 늘어놓는다. 누르면 그 자리로
+ * 간다. 타임라인에서 작은 깃발을 찾아 누르는 것보다 빠르다.
+ */
+function renderMarkList() {
+  const box = $("markList");
+  if (!session) { box.innerHTML = "<div class='dim pad'>파일을 먼저 여세요.</div>"; return; }
+  if (!marks.length) {
+    box.innerHTML = "<div class='dim pad'>아직 마킹이 없습니다.<br>" +
+                    "파란 고정선을 옮기고 위의 ＋ 마킹 을 누르세요.</div>";
+    return;
+  }
+  box.innerHTML = marks.map((m, i) => `
+    <div class="file mrow" data-i="${i}">
+      <div><b>⚑ ${i + 1}</b>
+        <span class="mono dim">${tl.formatDuration(m.ms - originMs())}</span>
+        ${m.from === "file" ? "<span class='dim'>배</span>" : ""}</div>
+      <div class="dim">${m.note ? m.note : "<i>메모 없음</i>"}</div>
+    </div>`).join("");
+
+  box.querySelectorAll<HTMLElement>(".mrow").forEach((el) => {
+    el.onclick = () => {
+      const m = marks[+(el.dataset.i ?? -1)];
+      if (!m) return;
+      pinMs = m.ms;
+      cursorMs = m.ms;
+      // 화면 밖이면 그 자리가 보이게 옮긴다
+      if (m.ms < view.from || m.ms > view.to) {
+        const span = view.to - view.from;
+        view = { from: m.ms - span / 2, to: m.ms + span / 2 };
+        clampView();
+      }
+      seekVideoTo(m.ms);
+      redraw();
+    };
+  });
+}
+
 function renderFileList(files: FileInfo[]) {
-  const box = $("files");
+  syncBoardBar();
+  const box = $("boardFiles");
   if (!files.length) {
     box.innerHTML = "<div class='dim pad'>보드에서 목록을 받아오세요.</div>";
     return;
@@ -1037,105 +1071,146 @@ async function fetchFile(name: string, size?: number) {
   }
 }
 
-// ── 칸 켜고 끄기 ────────────────────────────────────────────────────────
+// ── 뼈대 ────────────────────────────────────────────────────────────────
 //
-// 네 칸이 다 켜져 있으면 각자 좁다. 영상만 크게 보거나 데이터만 크게 보고
-// 싶을 때가 많다. 그래서 각각 끈다. 끈 칸의 자리는 남은 칸이 나눠 쓴다.
+// 화면을 사방으로 나눈다.
 //
-// 마지막 하나까지 끄면 볼 게 없어진다. 그건 막는다.
-type PaneKey = "lib" | "video" | "map" | "data" | "info";
-const PANE_EL: Record<PaneKey, string> = {
-  lib: "left", video: "videoPane", map: "mapPane", data: "dataPane", info: "right",
-};
-const LAYOUT_KEY = "layout.v1";
+//   위     시키는 것 — 단추만 한 줄
+//   가운데  보는 것 — 영상·지도(위) / 데이터(아래)
+//   오른쪽  지금 것의 속성 — 서랍 하나를 아이콘으로 갈아 끼운다
+//   아래    지금 상태 — 한 줄
+//
+// **왼쪽에는 서랍을 두지 않는다.** 그 자리는 타임라인의 이름 칸이 쓴다
+// (Speed Over Ground, Heel …). 양옆에 서랍을 두면 가운데가 양쪽에서
+// 깎이는데, 타임라인은 높이보다 너비가 생명이다.
 
-let layout: Record<PaneKey, boolean> = {
-  lib: true, video: true, map: true, data: true, info: true,
-};
+type Tab = "lib" | "board" | "info" | "mark" | "set";
+const DOCK_KEY = "dock.v2";
 
-const PANE_NAME: Record<PaneKey, string> = {
-  lib: "보관함", video: "영상", map: "지도", data: "데이터", info: "정보",
-};
+/** 지금 열린 서랍. null 이면 닫혀 있다. */
+let tab: Tab | null = "lib";
 
-/**
- * 칸마다 제 손잡이를 달아 준다.
- *
- * 위 띠의 단추만 있으면 "이 칸을 크게" 하려고 눈이 위로 갔다가 다시 내려와야
- * 한다. 크게 하고 싶은 칸을 보고 있는데 손잡이는 저 위에 있는 셈이다.
- * 그래서 칸 자체의 오른쪽 위에 붙인다.
- *
- *   ⤢  이 칸만 크게 (다시 누르면 넷 다)
- *   ✕  이 칸 끄기
- */
+function showTab(t: Tab | null) {
+  tab = t;
+  $("dock").classList.toggle("shut", t === null);
+  document.querySelectorAll<HTMLElement>("#dock .drawer").forEach((d) => {
+    d.hidden = d.dataset.tab !== t;
+  });
+  document.querySelectorAll<HTMLElement>("#rail .rbtn").forEach((b) => {
+    b.classList.toggle("on", b.dataset.tab === t);
+  });
+  localStorage.setItem(DOCK_KEY, t ?? "");
+  panes.refresh();
+  requestAnimationFrame(() => { tmap?.resize(); redraw(); });
+  if (t) renderTab(t);
+}
+
+/** 아이콘을 누르면. 켜져 있는 것을 다시 누르면 닫는다. */
+function hitTab(t: Tab) { showTab(tab === t ? null : t); }
+
+function renderTab(t: Tab) {
+  if (t === "lib") renderLibrary();
+  else if (t === "board") { renderBoards(); renderFileList(boardFiles); }
+  else if (t === "info") renderDetails();
+  else if (t === "mark") renderMarkList();
+  else renderTheme();
+}
+
+/** 어느 서랍이 열려 있든, 바뀐 곳만 다시 그린다. */
+function renderSide() { if (tab) renderTab(tab); }
+
+// ── 어둡게 / 밝게 ───────────────────────────────────────────────────────
+//
+// 타임라인은 캔버스라 CSS 가 안 먹는다. 색을 styles.css 한 군데에 모아 두고
+// timeline.ts 가 거기서 읽어 간다. 그래서 여기서는 data-theme 만 바꾸고
+// 다시 그리라고 시키면 된다.
+//
+// "맥 따라" 는 시스템 설정을 보고 dark/light 중 하나를 골라 박는다. 그래야
+// CSS 에 두 벌만 있으면 된다. 사람이 맥 설정을 바꾸면 곧바로 따라간다.
+type Theme = "dark" | "light" | "auto";
+const THEME_KEY = "theme.v1";
+let theme: Theme = (localStorage.getItem(THEME_KEY) as Theme) ?? "auto";
+
+const sysLight = matchMedia("(prefers-color-scheme: light)");
+
+function applyTheme() {
+  const real = theme === "auto" ? (sysLight.matches ? "light" : "dark") : theme;
+  document.documentElement.dataset.theme = real;
+  localStorage.setItem(THEME_KEY, theme);
+  renderTheme();
+  // 캔버스는 스스로 다시 안 그린다. 색을 새로 읽게 시킨다.
+  //
+  // 미루지 않고 바로 그린다. requestAnimationFrame 은 창이 가려져 있으면
+  // 아예 안 돈다 — 그러면 색이 안 바뀐 채로 남는다 (실제로 그랬다).
+  redraw();
+}
+
+function renderTheme() {
+  document.querySelectorAll<HTMLElement>("#themeSeg button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.theme === theme);
+  });
+}
+
+sysLight.addEventListener("change", () => { if (theme === "auto") applyTheme(); });
+
+// ── 넓게 보기 ────────────────────────────────────────────────────────────
+//
+// 서랍을 접고 영상·지도·데이터만 남긴다. 분석에 몰입할 때 쓴다.
+let wideBack: Tab | null = null;
+
+function toggleWide() {
+  if (tab === null) {
+    showTab(wideBack ?? "lib");
+    ($("wideBtn") as HTMLElement).textContent = "넓게";
+  } else {
+    wideBack = tab;
+    showTab(null);
+    ($("wideBtn") as HTMLElement).textContent = "서랍 열기";
+  }
+}
+
+// ── 영상·지도 접기 ──────────────────────────────────────────────────────
+//
+// 영상만 볼 때, 지도만 볼 때가 있다. 칸 오른쪽 위의 ✕ 로 접는다.
+// **아주 없애지는 않는다** — 얇은 띠로 남겨야 어떻게 되돌리는지 보인다.
+type MediaKey = "video" | "map" | "data";
+const MEDIA_EL: Record<MediaKey, string> = {
+  video: "videoPane", map: "mapPane", data: "dataPane",
+};
+const MEDIA_NAME: Record<MediaKey, string> = {
+  video: "영상", map: "지도", data: "데이터",
+};
+const LAYOUT_KEY = "layout.v2";
+let layout: Record<MediaKey, boolean> = { video: true, map: true, data: true };
+
 function mountPaneHandles() {
-  (Object.keys(PANE_EL) as PaneKey[]).forEach((k) => {
-    const el = $(PANE_EL[k]);
+  (Object.keys(MEDIA_EL) as MediaKey[]).forEach((k) => {
+    const el = $(MEDIA_EL[k]);
     if (el.querySelector(".handles")) return;
     el.classList.add("hasHandles");
 
     const box = document.createElement("div");
     box.className = "handles";
 
-    const big = document.createElement("button");
-    big.className = "big";
-    big.textContent = "⤢";
-    big.title = `${PANE_NAME[k]}만 크게 보기`;
-    big.onclick = (e) => { e.stopPropagation(); only(k); };
-
     const shut = document.createElement("button");
     shut.textContent = "✕";
-    shut.title = `${PANE_NAME[k]} 접기`;
-    shut.onclick = (e) => { e.stopPropagation(); toggle(k); };
+    shut.title = `${MEDIA_NAME[k]} 접기`;
+    shut.onclick = (e) => { e.stopPropagation(); toggleMedia(k); };
+    box.append(shut);
 
-    box.append(big, shut);
-
-    // 접혔을 때 남는 띠. 이름을 세로로 적어 두면 뭐가 접혔는지 보인다.
     const rail = document.createElement("button");
     rail.className = "rail";
-    rail.innerHTML = `<span>▸</span><span class="railname">${PANE_NAME[k]}</span>`;
-    rail.title = `${PANE_NAME[k]} 펼치기`;
-    rail.onclick = () => toggle(k);
+    rail.innerHTML = `<span>▸</span><span class="railname">${MEDIA_NAME[k]}</span>`;
+    rail.title = `${MEDIA_NAME[k]} 펼치기`;
+    rail.onclick = () => toggleMedia(k);
 
     el.append(box, rail);
   });
 }
 
-function applyLayout() {
-  const alone = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]).length === 1;
-
-  (Object.keys(PANE_EL) as PaneKey[]).forEach((k) => {
-    const el = $(PANE_EL[k]);
-    // ★ 접은 칸을 아주 없애지 않는다. 얇은 띠로 남긴다.
-    //   완전히 사라지면 어디로 갔는지, 어떻게 되돌리는지 알 수가 없다.
-    el.classList.toggle("mini", !layout[k]);
-
-    const big = el.querySelector<HTMLButtonElement>(".handles .big");
-    if (big) {
-      big.textContent = alone ? "⤡" : "⤢";
-      big.title = alone ? "다 펼치기" : `${PANE_NAME[k]}만 크게 보기`;
-    }
-  });
-
-  // 가운데 두 칸 중 하나가 접히면 나누개를 접고 남은 칸이 다 쓴다
-  const solo = !(layout.video && layout.data);
-  $("center").classList.toggle("solo", solo);
-  if (solo) {
-    $("videoPane").style.flex = "";
-    $("dataPane").style.flex = "";
-  }
-
-  localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
-  // 지도는 자기 크기를 스스로 모른다. 칸이 바뀌면 알려 줘야 한다.
-  // 접혀 있던 칸을 펴는 순간이 지도를 처음 띄우는 자리이기도 하다.
-  if (layout.map) { const m = mapUp(); requestAnimationFrame(() => m?.resize()); }
-  redraw();
-}
-
-function toggle(k: PaneKey) {
-  const on = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]);
+function toggleMedia(k: MediaKey) {
+  const on = (Object.keys(layout) as MediaKey[]).filter((x) => layout[x]);
   if (layout[k] && on.length === 1) {
-    // 마지막 하나까지 접으면 볼 게 없어진다. 그건 막는다 —
-    // 다만 띠가 남아 있으니 사람이 어떻게 되돌리는지는 보인다.
     setStatus("마지막 칸입니다. 다른 칸을 먼저 펼치세요.", "bad");
     return;
   }
@@ -1143,23 +1218,61 @@ function toggle(k: PaneKey) {
   applyLayout();
 }
 
+function applyLayout() {
+  (Object.keys(MEDIA_EL) as MediaKey[]).forEach((k) => {
+    $(MEDIA_EL[k]).classList.toggle("mini", !layout[k]);
+  });
+  // 영상과 지도가 둘 다 접히면 그 줄 자체를 접는다. 빈 줄이 남으면 안 된다.
+  $("mediaRow").classList.toggle("mini", !layout.video && !layout.map);
+
+  // 접거나 폈으니 나누개를 다시 놓는다. 접힌 칸 옆에 나누개가 남아 있으면
+  // 잡아 끌어도 움직일 게 없어서 고장 난 것처럼 보인다.
+  panes.refresh();
+
+  localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+  if (layout.map) { const m = mapUp(); requestAnimationFrame(() => m?.resize()); }
+  redraw();
+}
+
+// ── 가운데를 위아래로 놓을지 좌우로 놓을지 ──────────────────────────────
+//
+// 기본은 위아래다. 영상·지도가 위에 나란히, 데이터가 아래에 가로 전체.
+// 타임라인은 너비가 생명이라 가로로 까는 편이 훨씬 잘 보인다.
+const DIR_KEY = "centerDir.v2";
+let centerDir: panes.Dir =
+  (localStorage.getItem(DIR_KEY) as panes.Dir) === "row" ? "row" : "col";
+
+function applyDir() {
+  $("center").classList.toggle("row", centerDir === "row");
+  panes.setDir($("center"), centerDir);
+  ($("dirBtn") as HTMLElement).textContent =
+    centerDir === "col" ? "⇅ 위아래" : "⇄ 좌우";
+  localStorage.setItem(DIR_KEY, centerDir);
+  requestAnimationFrame(() => { tmap?.resize(); redraw(); });
+}
+
 /**
- * 이 칸만 크게. 나머지를 다 끈다.
+ * 칸마다 나누개를 붙인다.
  *
- * "영상만 크게 보고 싶다" 가 제일 흔한데, 하나씩 끄면 세 번을 눌러야 한다.
- * 한 번에 되게 한다. 이미 혼자면 넷 다 켜서 되돌린다.
+ * 서랍은 정해진 크기를 지킨다 — 창을 넓혔는데 서랍까지 같이 넓어지면
+ * 성가시다. 가운데 칸들은 남는 자리를 몫대로 나눠 갖는다.
  */
-function only(k: PaneKey) {
-  const on = (Object.keys(layout) as PaneKey[]).filter((x) => layout[x]);
-  if (on.length === 1 && on[0] === k) {
-    layout = { lib: true, video: true, map: true, data: true, info: true };
-    setStatus("다 켰습니다.");
-  } else {
-    layout = { lib: false, video: false, map: false, data: false, info: false, [k]: true };
-    // 손잡이(⤢)는 한 번, 위 띠 단추는 두 번이다. 둘 다 맞는 말로 적는다.
-    setStatus(`${PANE_NAME[k]}만 크게 봅니다. 옆의 얇은 띠를 누르면 다시 펼쳐집니다.`);
-  }
-  applyLayout();
+function mountSplitters() {
+  const after = () => { tmap?.resize(); redraw(); };
+  panes.register($("shell"), "row", [
+    { el: $("center"), kind: "flex", min: 320 },
+    { el: $("dock"),   kind: "fixed", base: 280, min: 190 },
+  ], after);
+
+  panes.register($("center"), centerDir, [
+    { el: $("mediaRow"), kind: "flex", min: 140 },
+    { el: $("dataPane"), kind: "flex", min: 160 },
+  ], after);
+
+  panes.register($("mediaRow"), "row", [
+    { el: $("videoPane"), kind: "flex", min: 180 },
+    { el: $("mapPane"),   kind: "flex", min: 180 },
+  ], after);
 }
 
 function loadLayout() {
@@ -1167,19 +1280,26 @@ function loadLayout() {
   try {
     const j = localStorage.getItem(LAYOUT_KEY);
     if (j) {
-      const l = JSON.parse(j);
+      const l = JSON.parse(j) as Partial<Record<MediaKey, boolean>>;
       if (l && typeof l === "object") {
         layout = { ...layout, ...l };
-        // 다 꺼진 상태로 저장돼 있으면 되돌린다
+        // 다 꺼진 채로 저장돼 있으면 되돌린다. 볼 게 없어진다.
         if (!Object.values(layout).some(Boolean)) {
-          layout = { lib: true, video: true, map: true, data: true, info: true };
+          layout = { video: true, map: true, data: true };
         }
-        // 지도를 나중에 넣었다. 옛 저장값에는 map 이 없어서 undefined 가 된다.
-        if (typeof (layout as any).map !== "boolean") layout.map = true;
       }
     }
   } catch { /* 처음이면 없는 게 정상이다 */ }
+
+  const t = localStorage.getItem(DOCK_KEY);
+  tab = t === "" ? null
+      : (t === "board" || t === "info" || t === "mark" || t === "set") ? t : "lib";
+
+  mountSplitters();
+  applyTheme();
+  applyDir();
   applyLayout();
+  showTab(tab);
 }
 
 // ── 영상 ────────────────────────────────────────────────────────────────
@@ -1351,6 +1471,13 @@ function wire() {
   ($("bySog") as HTMLInputElement).onchange = (e) =>
     mapUp()?.setColorBySog((e.target as HTMLInputElement).checked);
   $("mapFit").onclick = () => mapUp()?.fit();
+  $("dirBtn").onclick = () => {
+    centerDir = centerDir === "row" ? "col" : "row";
+    applyDir();
+    setStatus(centerDir === "row"
+      ? "가운데 칸을 좌우로 놓았습니다."
+      : "가운데 칸을 위아래로 놓았습니다.");
+  };
 
   $("addMark").onclick = () => {
     if (!session) { setStatus("먼저 파일을 여세요.", "bad"); return; }
@@ -1451,24 +1578,14 @@ function wire() {
     if (f) await useVideoUrl(URL.createObjectURL(f), f.name, f);
   });
 
-  // 가운데 나누개
-  const sp = $("split");
-  let spDrag = false;
-  sp.addEventListener("pointerdown", (e) => {
-    spDrag = true; sp.setPointerCapture((e as PointerEvent).pointerId);
+  // 오른쪽 아이콘 줄. 켜져 있는 것을 다시 누르면 닫힌다.
+  document.querySelectorAll<HTMLElement>("#rail .rbtn").forEach((b) => {
+    b.onclick = () => hitTab(b.dataset.tab as Tab);
   });
-  sp.addEventListener("pointermove", (e) => {
-    if (!spDrag) return;
-    const box = $("center").getBoundingClientRect();
-    const f = Math.min(0.8, Math.max(0.2, ((e as PointerEvent).clientX - box.left) / box.width));
-    $("videoPane").style.flex = `1 1 ${f * 100}%`;
-    $("dataPane").style.flex = `1 1 ${(1 - f) * 100}%`;
-    redraw();
+  $("wideBtn").onclick = () => toggleWide();
+  document.querySelectorAll<HTMLElement>("#themeSeg button").forEach((b) => {
+    b.onclick = () => { theme = b.dataset.theme as Theme; applyTheme(); };
   });
-  sp.addEventListener("pointerup", () => { spDrag = false; });
-
-  $("tabLib").onclick = () => { pane = "library"; renderSide(); };
-  $("tabBoard").onclick = () => { pane = "board"; renderSide(); };
   ($("q") as HTMLInputElement).oninput = (e) => {
     query = (e.target as HTMLInputElement).value;
     renderLibrary();
