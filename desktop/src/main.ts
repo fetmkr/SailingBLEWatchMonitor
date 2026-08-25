@@ -889,7 +889,15 @@ async function wakeUsb(path: string) {
 
     const st = await link.ask("wifi status");
     if (!st) {
-      setStatus("보드가 대답이 없습니다. 우리 보드가 맞는지 보세요.", "bad");
+      // 왜 안 오는지 실마리를 같이 준다. 아무 줄도 안 왔으면 우리 보드가
+      // 아니거나 포트가 다른 프로그램에 잡혀 있는 것이다.
+      const heard = link.peek();
+      setStatus(
+        heard.length
+          ? `보드가 대답이 없습니다. 들린 것: ${heard[heard.length - 1].slice(0, 60)}`
+          : "보드가 대답이 없습니다. 우리 보드가 맞는지, " +
+            "다른 프로그램(시리얼 모니터)이 잡고 있지 않은지 보세요.",
+        "bad");
       return;
     }
     if (/ rec on/.test(st)) {

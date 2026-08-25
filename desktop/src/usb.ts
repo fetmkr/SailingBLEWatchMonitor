@@ -60,11 +60,18 @@ function score(path: string, info: any): boolean {
  */
 export async function list(all = false): Promise<Port[]> {
   if (!inApp) return [];
-  const raw = await SerialPort.available_ports();
+  // 한 기기가 여러 이름으로 뜨는 것을 부품 쪽에서 한 번 걸러 준다.
+  const raw = await SerialPort.available_ports({ singlePortPerDevice: true });
   const out: Port[] = [];
   for (const [path, info] of Object.entries(raw ?? {})) {
     // 블루투스 가짜 포트는 늘 떠 있는데 우리 것이 아니다.
     if (/bluetooth|debug-console|wlan/i.test(path)) continue;
+    // ★ 맥은 시리얼 장치 하나를 두 이름으로 보여준다.
+    //     /dev/cu.usbmodem101    이쪽을 쓴다
+    //     /dev/tty.usbmodem101   같은 기기다. 목록에 두 줄로 나온다
+    //   tty 쪽은 상대가 신호를 줄 때까지 열리지 않고 기다리는 성질이 있어서
+    //   우리 쓰임에는 cu 가 맞다.
+    if (/^\/dev\/tty\./.test(path)) continue;
     const i = info as any;
     const name = i?.product || i?.manufacturer || "";
     const likely = score(path, i);
@@ -87,46 +94,60 @@ export async function list(all = false): Promise<Port[]> {
  * 못 알아내면 null. 그래도 목록에서 빼지는 않는다 — 기록 중이거나 말이
  * 없는 상태일 수도 있고, 그럴 때도 [연결] 은 눌러 볼 수 있어야 한다.
  */
-export async function sniff(path: string, ms = 1800): Promise<string | null> {
+export async function sniff(path: string, ms = 2500): Promise<string | null> {
   if (!inApp) return null;
   let port: SerialPort | null = null;
-  let handle: { unwatch: () => Promise<void> } | null = null;
   try {
     port = new SerialPort({ path, baudRate: 115200 });
     await port.open();
+    const dec = new TextDecoder();
     let seen = "";
-    let name: string | null = null;
-    handle = await port.watch({
-      onData: (d) => {
-        seen += typeof d === "string" ? d : new TextDecoder().decode(d);
-        const m = /\b(SAIL-[^\s|]+)/.exec(seen);
-        if (m) name = m[1];
-      },
-    });
     const until = Date.now() + ms;
-    while (!name && Date.now() < until) {
-      await new Promise((r) => setTimeout(r, 120));
+    while (Date.now() < until) {
+      let got: Uint8Array | null = null;
+      try {
+        got = await port.readBinary({ timeout: 200, size: 2048 });
+      } catch {
+        got = null;            // 읽을 게 없으면 부품이 오류로 알린다
+      }
+      if (got && got.length) {
+        seen += dec.decode(got, { stream: true });
+        const m = /\b(SAIL-[^\s|]+)/.exec(seen);
+        if (m) return m[1];
+      } else {
+        await new Promise((r) => setTimeout(r, 40));
+      }
     }
-    return name;
+    return null;
   } catch {
     return null;                 // 다른 프로그램이 잡고 있을 수도 있다
   } finally {
-    try { await handle?.unwatch(); } catch { /* 이미 끝났으면 그만 */ }
-    try { await port?.close(); } catch { /* 같음 */ }
+    try { await port?.close(); } catch { /* 이미 닫혔으면 그만 */ }
   }
 }
 
 /**
  * 시리얼로 한 줄씩 주고받는다.
  *
- * 보드는 1초에 한 번 상태 줄을 뱉는다. 그래서 우리가 물은 것과 상관없는
- * 줄이 섞여 들어온다. 답을 기다릴 때 그것들을 걸러야 한다.
+ * ★ **watch() 를 안 쓴다. readBinary() 로 직접 읽는다.**
+ *
+ *   watch() 는 줄 단위로 잘라 주면서 줄 끝의 \n 을 떼어 버린다. 그러면
+ *   여러 줄이 한 덩어리로 붙어서 나눌 수가 없다. 실측으로 이렇게 왔다.
+ *
+ *     scan begin 7[CTL] → scan 0 -35 lock FETM2G[CTL] → scan 1 …
+ *
+ *   날바이트로 달라고 해도(decode: false) 같았다. 같은 포트를 pyserial 로
+ *   읽으면 \n 이 멀쩡하다 — 부품이 없애는 것이다.
+ *
+ *   readBinary() 는 있는 그대로 준다. 대신 우리가 주기적으로 물어봐야 한다.
  */
 export class Link {
   private lines: string[] = [];
   private waiters: ((l: string) => void)[] = [];
-  private handle: { unwatch: () => Promise<void> } | null = null;
   private buf = "";
+  private raw = "";
+  private stop = false;
+  private pump: Promise<void> | null = null;
 
   private constructor(private port: SerialPort, public readonly path: string) {}
 
@@ -136,28 +157,54 @@ export class Link {
     const port = new SerialPort({ path, baudRate: 115200 });
     await port.open();
     const link = new Link(port, path);
-    link.handle = await port.watch({
-      onData: (d) => link.feed(typeof d === "string" ? d : new TextDecoder().decode(d)),
-    });
+    link.pump = link.run();
     return link;
   }
 
-  private feed(text: string) {
-    this.buf += text;
-    for (;;) {
-      const i = this.buf.indexOf("\n");
-      if (i < 0) break;
-      const line = this.buf.slice(0, i).trim();
-      this.buf = this.buf.slice(i + 1);
-      if (!line) continue;
-      const w = this.waiters.shift();
-      if (w) w(line); else this.lines.push(line);
+  /** 계속 읽어서 줄로 나눈다. close() 할 때까지 돈다. */
+  private async run() {
+    const dec = new TextDecoder();
+    while (!this.stop) {
+      let got: Uint8Array | null = null;
+      try {
+        got = await this.port.readBinary({ timeout: 200, size: 4096 });
+      } catch {
+        // 읽을 게 없으면 부품이 오류로 알린다. 그건 정상이다.
+        got = null;
+      }
+      if (got && got.length) this.feed(dec.decode(got, { stream: true }));
+      else await new Promise((r) => setTimeout(r, 40));
     }
   }
 
+  private emit(line: string) {
+    const t = line.trim();
+    if (!t) return;
+    const w = this.waiters.shift();
+    if (w) w(t); else this.lines.push(t);
+  }
+
+  private feed(text: string) {
+    this.raw = (this.raw + text).slice(-600);
+    this.buf += text;
+    for (;;) {
+      const i = this.buf.search(/\r?\n/);
+      if (i < 0) break;
+      const line = this.buf.slice(0, i);
+      this.buf = this.buf.slice(i).replace(/^\r?\n/, "");
+      this.emit(line);
+    }
+    // 줄바꿈 없이 오래 머물면 그것도 한 줄로 친다
+    if (this.buf.length > 400) { this.emit(this.buf); this.buf = ""; }
+  }
+
+  /** 왜 답이 없는지 보여줄 때 쓴다. 마지막에 들린 것. */
+  peek(): string[] { return this.raw ? [this.raw.slice(-120)] : []; }
+
   async close() {
-    try { await this.handle?.unwatch(); } catch { /* 이미 끝났으면 그만 */ }
-    try { await this.port.close(); } catch { /* 같음 */ }
+    this.stop = true;
+    try { await this.pump; } catch { /* 돌다 끝나면 그만 */ }
+    try { await this.port.close(); } catch { /* 이미 닫혔으면 그만 */ }
   }
 
   async say(line: string) { await this.port.write(line + "\n"); }
@@ -184,14 +231,18 @@ export class Link {
    * `[CTL] → ` 가 붙으므로 그걸로 가른다.
    */
   async ask(line: string, ms = 8000): Promise<string | null> {
+    // 한 번 보내고 답이 없으면 절반 지점에서 한 번 더 보낸다.
+    let resent = false;
     await this.say(line);
     const until = Date.now() + ms;
     for (;;) {
-      const l = await this.hear(Math.max(300, until - Date.now()));
-      if (l === null) return null;
+      const left = until - Date.now();
+      if (left <= 0) return null;
+      if (!resent && left < ms / 2) { resent = true; await this.say(line); }
+      const l = await this.hear(Math.max(300, Math.min(left, 800)));
+      if (l === null) continue;              // 상태 줄만 오는 중일 수 있다
       const m = /\[CTL\]\s*→\s*(.*)$/.exec(l);
       if (m) return m[1].trim();
-      if (Date.now() > until) return null;
     }
   }
 }
