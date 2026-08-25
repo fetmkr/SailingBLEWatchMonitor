@@ -897,18 +897,29 @@ async function wakeUsb(path: string) {
       return;
     }
 
-    setProgress("보드가 자기 WiFi 를 여는 중…");
-    const reply = await link.ask("wifi ap", 10000);
-    const up = reply ? ble.parseWifiUp(reply) : null;
-    if (!up) {
-      setProgress(null);
-      setStatus(`알 수 없는 답 — ${reply ?? "없음"}`, "bad");
-      return;
+    // 이미 AP 를 열어 둔 보드면 다시 열 이유가 없다. 다시 열면 붙어 있던
+    // 노트북이 떨어지고 처음부터 다시 붙어야 한다.
+    let up: ble.WifiUp | null = null;
+    const already = /status name (\S+).* mode ap ip (\S+)/.exec(st);
+    if (already) {
+      up = { kind: "ap", hosts: [already[2]], ssid: already[1], pass: "" };
+      setStatus(`${already[1]} 이 이미 WiFi 를 열어 두었습니다.`);
+    } else {
+      setProgress("보드가 자기 WiFi 를 여는 중…");
+      const reply = await link.ask("wifi ap", 10000);
+      up = reply ? ble.parseWifiUp(reply) : null;
+      if (!up) {
+        setProgress(null);
+        setStatus(`알 수 없는 답 — ${reply ?? "없음"}`, "bad");
+        return;
+      }
     }
 
     // 여기서부터는 WiFi 다. 시리얼은 더 쓸 일이 없다.
     ($("host") as HTMLInputElement).value = up.hosts[0];
-    setProgress(`맥 WiFi 를 "${up.ssid}" 로 바꾸세요 · 비밀번호 ${up.pass}`);
+    setProgress(up.pass
+      ? `맥 WiFi 를 "${up.ssid}" 로 바꾸세요 · 비밀번호 ${up.pass}`
+      : `맥 WiFi 를 "${up.ssid}" 로 바꾸세요`);
     setStatus(`${up.ssid} 가 열렸습니다. 맥 WiFi 를 그것으로 바꾸면 이어서 갑니다.`);
     byHand = true;
     renderSide();
