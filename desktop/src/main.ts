@@ -631,28 +631,47 @@ function syncBoardBar() {
     pinger !== null ? "inline-block" : "none";
 }
 
-// ── 보드 찾기 (BLE) ─────────────────────────────────────────────────────
+// ── 보드 찾기 ───────────────────────────────────────────────────────────
 //
-// 보드 WiFi 는 평소에 꺼져 있다. 그래서 IP 로는 못 찾는다. BLE 광고는 늘
-// 나가고 있으니 그걸로 찾고, 그걸로 WiFi 를 켜라고 시킨다 (PROTOCOL.md §9).
-let boards: ble.Board[] = [];
+// 보드 WiFi 는 평소에 꺼져 있다. 그래서 IP 로는 못 찾는다. 찾는 길이 둘이다.
+//
+//   블루투스   광고는 늘 나가고 있다. 배가 물에 떠 있어도 잡힌다.
+//   USB        블루투스가 없는 컴퓨터의 길. 케이블을 꽂아야 한다.
+//
+// **한 단추로 둘 다 찾는다.** 사람이 "지금은 어느 쪽이지" 를 고를 일이
+// 아니다. 찾은 뒤에 어느 길로 찾았는지만 보여주면 된다.
+type Via = "ble" | "usb";
+
+interface Found {
+  via: Via;
+  key: string;        // BLE 는 주소, USB 는 포트 경로
+  name: string;       // 보여줄 이름
+  sub: string;        // 밑에 작게
+  board?: ble.Board;  // BLE 일 때
+}
+
+let found: Found[] = [];
 let scanning = false;
 let byHand = false;          // 사람이 주소를 직접 치겠다고 했나
-let waking: string | null = null;   // 지금 깨우는 중인 보드의 주소
+let waking: string | null = null;   // 지금 깨우는 중인 것의 열쇠
 
 function renderBoards() {
   const box = $("boards");
-  if (!ble.usable) { box.innerHTML = ""; return; }
-  if (!boards.length) {
+  if (!found.length) {
     box.innerHTML = scanning
       ? "<div class='dim pad'>찾는 중…</div>"
-      : "<div class='dim pad'>배 찾기를 누르세요.<br>보드 WiFi 가 꺼져 있어도 찾습니다.</div>";
+      : "<div class='dim pad'>배 찾기를 누르세요.<br>" +
+        "블루투스와 USB 를 같이 봅니다.<br>" +
+        "보드 WiFi 가 꺼져 있어도 찾습니다.</div>";
     return;
   }
-  box.innerHTML = boards.map((b) => {
-    const busy = waking === b.address;
-    return `<div class="file board" data-addr="${b.address}">
-      <div><b>${b.name}</b> <span class="dim">${bars(b.rssi)} ${b.rssi} dBm</span></div>
+  box.innerHTML = found.map((f) => {
+    const busy = waking === f.key;
+    return `<div class="file board" data-key="${f.key}">
+      <div>
+        <b>${f.name}</b> <span class="via ${f.via}">${f.via === "ble" ? "블루투스" : "USB"}</span>
+        <div class="dim">${f.sub}</div>
+      </div>
       <button class="wake" ${busy ? "disabled" : ""}>${busy ? "깨우는 중…" : "연결"}</button>
     </div>`;
   }).join("");
@@ -660,9 +679,11 @@ function renderBoards() {
   box.querySelectorAll<HTMLElement>(".board .wake").forEach((btn) => {
     btn.onclick = (e) => {
       e.stopPropagation();
-      const addr = btn.closest<HTMLElement>(".board")?.dataset.addr;
-      const b = boards.find((x) => x.address === addr);
-      if (b) void wake(b);
+      const key = btn.closest<HTMLElement>(".board")?.dataset.key;
+      const f = found.find((x) => x.key === key);
+      if (!f) return;
+      if (f.via === "ble" && f.board) void wake(f.board);
+      else void wakeUsb(f.key);
     };
   });
 }
@@ -673,26 +694,75 @@ function bars(rssi: number): string {
   return "▮".repeat(n) + "▯".repeat(4 - n);
 }
 
+/** BLE 로 찾은 것들을 목록에 반영한다. USB 쪽은 건드리지 않는다. */
+function mergeBle(list: ble.Board[]) {
+  const usbOnly = found.filter((f) => f.via === "usb");
+  found = [
+    ...list.map((b): Found => ({
+      via: "ble", key: b.address, name: b.name,
+      sub: `${bars(b.rssi)} ${b.rssi} dBm`, board: b,
+    })),
+    ...usbOnly,
+  ];
+  renderBoards();
+}
+
+/**
+ * 블루투스와 USB 를 같이 본다.
+ *
+ * USB 는 곧바로 답이 나오고, 블루투스는 몇 초 훑어야 한다. 그래서 USB 를
+ * 먼저 보여주고 블루투스가 잡히는 대로 위에 얹는다.
+ */
 async function scanBoards() {
-  const st = await ble.ready();
-  if (!st.ok) {
-    setStatus(`블루투스를 못 씁니다 — ${st.why}`, "bad");
-    byHand = true; renderSide();
-    return;
-  }
-  boards = [];
+  found = [];
   scanning = true;
   renderBoards();
   setStatus("주변 배를 찾는 중…");
+
+  // ── USB 먼저 ──
+  let nUsb = 0;
+  if (usb.usable) {
+    try {
+      const ports = await usb.list();
+      nUsb = ports.length;
+      found = ports.map((p): Found => ({
+        via: "usb", key: p.path,
+        name: p.likely ? `◈ ${p.path}` : p.path,
+        sub: p.label.replace(p.path, "").replace(/^ — /, "") || "USB 로 꽂힘",
+      }));
+      renderBoards();
+    } catch (e) {
+      setStatus(`USB 를 못 봅니다 — ${e}`, "bad");
+    }
+  }
+
+  // ── 블루투스 ──
+  const st = await ble.ready();
+  if (!st.ok) {
+    scanning = false;
+    renderBoards();
+    if (nUsb) {
+      setStatus(`블루투스를 못 써서 USB 만 봤습니다 (${nUsb}개). — ${st.why}`);
+    } else {
+      setStatus(`블루투스도 USB 도 못 찾았습니다. — ${st.why}`, "bad");
+      byHand = true;
+      renderSide();
+    }
+    return;
+  }
+
   try {
-    await ble.scan(6000, (list) => { boards = list; renderBoards(); });
-    // 훑기는 정해진 시간이 지나면 저절로 끝난다
+    await ble.scan(6000, (list) => mergeBle(list));
     setTimeout(() => {
       scanning = false;
       renderBoards();
-      setStatus(boards.length
-        ? `배 ${boards.length}대 찾았습니다.`
-        : "못 찾았습니다. 보드가 켜져 있는지 보세요.", boards.length ? "good" : "bad");
+      const nBle = found.filter((f) => f.via === "ble").length;
+      const parts = [];
+      if (nBle) parts.push(`블루투스 ${nBle}대`);
+      if (nUsb) parts.push(`USB ${nUsb}개`);
+      setStatus(parts.length ? `찾았습니다 — ${parts.join(", ")}`
+                             : "못 찾았습니다. 보드가 켜져 있는지 보세요.",
+                parts.length ? "good" : "bad");
     }, 6200);
   } catch (e) {
     scanning = false; renderBoards();
@@ -775,49 +845,7 @@ async function wake(b: ble.Board) {
 // ★ 보내는 명령은 `wifi ap` 다. `wifi on`(붙기)은 보드가 WiFi 이름과
 //   비밀번호를 알아야 하는데, 그걸 넣는 게 제일 어려운 일이다. AP 는 그게
 //   아예 필요 없고 주소도 늘 192.168.4.1 이다.
-let usbPorts: usb.Port[] = [];
 let usbBusy: string | null = null;
-
-function renderUsb() {
-  const box = $("usbList");
-  if (!usb.usable || !usbPorts.length) { box.innerHTML = ""; return; }
-  box.innerHTML =
-    `<div class="day">USB 로 꽂힌 것</div>` +
-    usbPorts.map((p) => {
-      const busy = usbBusy === p.path;
-      const extra = p.label.replace(p.path, "").replace(/^ — /, "");
-      return `<div class="file board" data-path="${p.path}">
-        <div><b>${p.likely ? "◈ " : ""}${p.path}</b>
-          <div class="dim">${extra || "&nbsp;"}</div></div>
-        <button class="wake" ${busy ? "disabled" : ""}>${busy ? "깨우는 중…" : "연결"}</button>
-      </div>`;
-    }).join("");
-
-  box.querySelectorAll<HTMLElement>(".board .wake").forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      const path = btn.closest<HTMLElement>(".board")?.dataset.path;
-      if (path) void wakeUsb(path);
-    };
-  });
-}
-
-async function scanUsb() {
-  if (!usb.usable) {
-    setStatus("USB 는 앱에서만 됩니다 (브라우저로 열려 있습니다).", "bad");
-    return;
-  }
-  setStatus("USB 를 살펴보는 중…");
-  try {
-    usbPorts = await usb.list();
-    renderUsb();
-    setStatus(usbPorts.length
-      ? `USB 로 ${usbPorts.length}개 보입니다. 보드를 고르세요.`
-      : "USB 로 꽂힌 것이 없습니다.", usbPorts.length ? "good" : "bad");
-  } catch (e) {
-    setStatus(`USB 를 못 봅니다 — ${e}`, "bad");
-  }
-}
 
 /**
  * USB 로 깨운다.
@@ -829,7 +857,8 @@ async function scanUsb() {
 async function wakeUsb(path: string) {
   if (usbBusy) { setStatus("이미 하나 깨우는 중입니다.", "bad"); return; }
   usbBusy = path;
-  renderUsb();
+  waking = path;
+  renderBoards();
 
   let link: usb.Link | null = null;
   try {
@@ -879,7 +908,8 @@ async function wakeUsb(path: string) {
   } finally {
     try { await link?.close(); } catch { /* 이미 닫혔으면 그만 */ }
     usbBusy = null;
-    renderUsb();
+    waking = null;
+    renderBoards();
   }
 }
 
@@ -1258,7 +1288,7 @@ function hitTab(t: Tab) { showTab(tab === t ? null : t); }
 
 function renderTab(t: Tab) {
   if (t === "lib") renderLibrary();
-  else if (t === "board") { renderBoards(); renderUsb(); renderFileList(boardFiles); }
+  else if (t === "board") { renderBoards(); renderFileList(boardFiles); }
   else if (t === "info") renderDetails();
   else if (t === "mark") renderMarkList();
   else renderTheme();
@@ -1649,7 +1679,6 @@ function wire() {
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
   // ── 보드 찾기 단추들 ──
   $("btScan").onclick = () => void scanBoards();
-  $("usbScan").onclick = () => void scanUsb();
   $("btDrop").onclick = () => void sleepBoard();
   $("byHand").onclick = () => {
     byHand = !byHand;

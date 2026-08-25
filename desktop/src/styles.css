@@ -449,3 +449,10 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
   flex-direction: row; justify-content: center; gap: 6px; padding: 0;
 }
 #center:not(.row) > #dataPane.mini .railname { writing-mode: horizontal-tb; }
+
+/* 어느 길로 찾았는지 — 블루투스인가 USB 인가 */
+.via {
+  font-size: 10px; padding: 1px 5px; border-radius: 4px;
+  border: 1px solid var(--line); color: var(--dim); vertical-align: middle;
+}
+.via.ble { border-color: var(--accent); color: var(--on-ink); }
