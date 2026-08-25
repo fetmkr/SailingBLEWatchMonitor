@@ -101,8 +101,16 @@ export function setDir(box: HTMLElement, dir: Dir) {
   relayout(c);
 }
 
+/**
+ * 이 칸이 지금 자리를 차지하고 있나.
+ *
+ * ★ 접힌 표시를 **한 이름으로** 본다.
+ *   예전에는 .mini 만 봤다. 그런데 영상·지도를 담은 줄은 접힐 때 .rowmini 가
+ *   붙어서, 여기서는 안 접힌 것으로 셌다. 그 바람에 몫을 나눌 때 그 줄까지
+ *   끼워 넣었고, 데이터의 몫이 0.91 로 남아 아래가 60px 비었다 (실측).
+ */
 function visible(p: PaneSpec): boolean {
-  return p.el.style.display !== "none" && !p.el.classList.contains("mini");
+  return p.el.style.display !== "none" && !p.el.classList.contains("shut");
 }
 
 function relayout(ctx: Ctx) {

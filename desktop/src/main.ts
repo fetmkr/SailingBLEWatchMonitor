@@ -1274,13 +1274,19 @@ function toggleMedia(k: MediaKey) {
 
 function applyLayout() {
   (Object.keys(MEDIA_EL) as MediaKey[]).forEach((k) => {
-    $(MEDIA_EL[k]).classList.toggle("mini", !layout[k]);
+    const el = $(MEDIA_EL[k]);
+    el.classList.toggle("mini", !layout[k]);
+    // .shut 은 panes.ts 가 보는 이름이다. 생김새(.mini/.rowmini)와 갈라 둔다 —
+    // 생김새를 바꾸다가 크기 셈이 같이 틀어지면 안 된다.
+    el.classList.toggle("shut", !layout[k]);
   });
   // 영상과 지도가 둘 다 접히면 그 줄 자체가 28px 띠가 된다.
   //
   // ★ .mini 가 아니라 .rowmini 다. .mini 를 붙이면 그 안의 영상·지도가
   //   통째로 사라지고 되살릴 띠까지 없어진다 (styles.css 의 주석 참조).
-  $("mediaRow").classList.toggle("rowmini", !layout.video && !layout.map);
+  const bothShut = !layout.video && !layout.map;
+  $("mediaRow").classList.toggle("rowmini", bothShut);
+  $("mediaRow").classList.toggle("shut", bothShut);
 
   // 접거나 폈으니 나누개를 다시 놓는다. 접힌 칸 옆에 나누개가 남아 있으면
   // 잡아 끌어도 움직일 게 없어서 고장 난 것처럼 보인다.

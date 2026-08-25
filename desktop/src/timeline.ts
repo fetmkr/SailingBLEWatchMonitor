@@ -159,7 +159,10 @@ let AXIS_NUM_W = 62;
 const axisW = () => LABEL_W + AXIS_NUM_W;
 
 /** 접힌 줄의 높이. 이름만 보이면 되니 이 정도면 된다. */
-const MINI_ROW = 22;
+const MINI_ROW = 26;
+
+/** 접기 표시가 차지하는 폭. 이 안을 누르면 접힌다. */
+const CHEV_W = 26;
 
 /** 줄마다의 자리. draw 가 채우고 hit test 가 읽는다 — 늘 같은 값이어야 한다. */
 let rowBoxes: { top: number; h: number }[] = [];
@@ -404,15 +407,16 @@ export function draw(o: DrawOpts): void {
 
     // 접힌 줄 — 이름과 접기 표시만. 그림도 눈금도 안 그린다.
     if (s.collapsed) {
+      const my = top + rh / 2;
+      chevron(g, 13, my, false, dim);
+      g.fillStyle = s.color;
+      g.fillRect(CHEV_W + 2, my - 4, 8, 8);
       g.fillStyle = dim;
       g.textAlign = "left";
-      g.font = "11px -apple-system, system-ui, sans-serif";
-      g.fillText("▸", 6, top + rh / 2 - 7);
-      g.fillStyle = s.color;
-      g.fillRect(20, top + rh / 2 - 4, 7, 7);
-      g.fillStyle = dim;
+      g.textBaseline = "middle";
       g.font = "12px -apple-system, system-ui, sans-serif";
-      g.fillText(fitText(g, s.name, LABEL_W - 40), 32, top + rh / 2 - 7);
+      g.fillText(fitText(g, s.name, LABEL_W - CHEV_W - 20), CHEV_W + 15, my);
+      g.textBaseline = "top";
 
       g.strokeStyle = grid;
       g.lineWidth = 1;
@@ -514,18 +518,18 @@ export function draw(o: DrawOpts): void {
     // 색은 이름 앞의 작은 네모로 준다. 그림의 선 색과 이어진다.
     const midY = top + rh / 2;
     // 접기 표시. 누르면 이 줄이 접힌다.
-    g.fillStyle = dim;
-    g.font = "11px -apple-system, system-ui, sans-serif";
-    g.textAlign = "left";
-    g.fillText("▾", 6, midY - 8);
+    chevron(g, 13, midY, true, dim);
 
     g.fillStyle = s.color;
-    g.fillRect(20, midY - 9, 8, 8);
+    g.fillRect(CHEV_W + 2, midY - 5, 9, 9);
 
     g.fillStyle = ink;
     g.font = "13px -apple-system, system-ui, sans-serif";
+    g.textAlign = "left";
+    g.textBaseline = "middle";
     // 칸을 넘치면 잘라 준다. 그냥 넘치면 옆 칸 숫자와 겹쳐서 둘 다 못 읽는다.
-    g.fillText(fitText(g, s.name, LABEL_W - 44), 34, midY - 9);
+    g.fillText(fitText(g, s.name, LABEL_W - CHEV_W - 22), CHEV_W + 17, midY);
+    g.textBaseline = "top";
 
     // 줄 나눔선
     g.strokeStyle = grid;
@@ -667,6 +671,31 @@ export const plotLeft = () => axisW();
  * ★ 그릴 때 재어 둔 자리를 그대로 읽는다. 여기서 다시 셈하면 접힌 줄이
  *   생겼을 때 그림과 어긋난다.
  */
+/**
+ * 접기 표시를 직접 그린다.
+ *
+ * 글꼴의 ▾ 문자를 쓰다가 너무 작았다. 글꼴마다 크기가 제각각이라 키우기도
+ * 어렵다. 삼각형은 그냥 그리는 편이 낫다.
+ */
+function chevron(
+  g: CanvasRenderingContext2D, cx: number, cy: number, open: boolean, color: string,
+) {
+  const s = 5;                       // 반지름쯤
+  g.fillStyle = color;
+  g.beginPath();
+  if (open) {                        // ▾ 아래를 가리킨다 = 펼쳐져 있다
+    g.moveTo(cx - s, cy - s * 0.6);
+    g.lineTo(cx + s, cy - s * 0.6);
+    g.lineTo(cx, cy + s * 0.8);
+  } else {                           // ▸ 오른쪽 = 접혀 있다
+    g.moveTo(cx - s * 0.6, cy - s);
+    g.lineTo(cx + s * 0.8, cy);
+    g.lineTo(cx - s * 0.6, cy + s);
+  }
+  g.closePath();
+  g.fill();
+}
+
 export function rowAtY(
   canvas: HTMLCanvasElement, _count: number, clientX: number, clientY: number,
 ): number {
@@ -687,7 +716,7 @@ export function chevronAt(
 ): number {
   const r = canvas.getBoundingClientRect();
   const x = clientX - r.left;
-  if (x < 0 || x > 18) return -1;
+  if (x < 0 || x > CHEV_W) return -1;
   return rowAtY(canvas, 0, clientX, clientY);
 }
 
