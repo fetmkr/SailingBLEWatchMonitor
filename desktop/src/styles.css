@@ -215,58 +215,55 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 /* ── 접힌 칸은 얇은 띠로 남는다 ──────────────────────────────────── */
 /*
    완전히 사라지면 어디로 갔는지, 어떻게 되돌리는지 알 수가 없다.
-   이름을 세로로 적은 28px 짜리 띠를 남긴다. 누르면 다시 펼쳐진다.
+   이름을 적은 28px 짜리 띠를 남긴다. 누르면 다시 펼쳐진다.
+
+   ★ 자식 고르개(>)를 쓴다.
+     예전에는 `.mini > *:not(.rail)` 이었는데, 영상과 지도를 둘 다 접으면
+     그 둘을 담은 줄에도 같은 class 가 붙어서 **영상·지도가 통째로 사라졌다.**
+     띠까지 같이 사라져서 되살릴 방법이 없었다 (실제로 그랬다).
+     이제 줄은 다른 이름(.rowmini)을 쓴다.
 */
+/* ★ 최소 크기를 풀어야 한다. panes.ts 가 칸마다 최소 크기를 넣어 두는데
+     (영상은 180px 처럼), 접었을 때도 그게 살아 있으면 28px 로 안 줄어든다. */
 .mini {
-  flex: 0 0 28px !important; width: 28px !important; min-width: 28px !important;
+  flex: 0 0 28px !important;
+  min-width: 28px !important; min-height: 28px !important;
   padding: 0 !important; overflow: hidden;
 }
-/* 세로로 놓으면 접힌 칸은 납작한 띠가 된다 */
-#center.col > .mini {
-  width: auto !important; min-width: 0 !important;
-  height: 28px !important; min-height: 28px !important;
-}
-#center.col > .mini .rail {
-  flex-direction: row; width: 100%; height: 28px; padding: 0 8px;
-}
-#center.col > .mini .railname { writing-mode: horizontal-tb; }
 .mini > *:not(.rail) { display: none !important; }
 
 .rail { display: none; }
-.mini .rail {
+.mini > .rail {
   display: flex; flex-direction: column; align-items: center; gap: 8px;
-  width: 28px; height: 100%; padding: 8px 0;
+  width: 100%; height: 100%; padding: 8px 0;
   background: var(--panel); border: none; border-radius: 0;
   color: var(--dim); font-size: 11px; cursor: pointer;
 }
-.mini .rail:hover { background: var(--hover); color: var(--ink); }
+.mini > .rail:hover { background: var(--hover); color: var(--ink); }
 .railname { writing-mode: vertical-rl; letter-spacing: 1px; }
 
-/* ── 오른쪽 서랍과 아이콘 줄 ─────────────────────────────────────── */
-#dock {
-  background: var(--panel); border-left: 1px solid var(--line);
-  overflow: auto; padding: 10px; min-width: 0;
+/*
+   영상과 지도를 둘 다 접으면 그 줄 자체가 28px 띠가 된다.
+   접힌 칸 둘이 그 안에 나란히 앉아 각각 절반을 쓴다.
+*/
+#mediaRow.rowmini {
+  flex: 0 0 28px !important;
+  min-width: 28px !important; min-height: 28px !important;
 }
-#dock.shut { display: none; }
-.drawer[hidden] { display: none; }
-.dhead {
-  font-size: 12px; color: var(--dim); letter-spacing: 1px;
-  margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+#mediaRow.rowmini > .mini {
+  flex: 1 1 0 !important; min-width: 0 !important;
 }
+#mediaRow.rowmini > .mini > .rail {
+  flex-direction: row; justify-content: center; gap: 6px; padding: 0;
+}
+#mediaRow.rowmini .railname { writing-mode: horizontal-tb; }
 
-#rail {
-  flex: 0 0 46px; display: flex; flex-direction: column; gap: 2px;
-  padding: 6px 4px; background: var(--panel);
-  border-left: 1px solid var(--line);
+/* 좌우로 놓았을 때는 세로 띠가 된다 */
+#center.row #mediaRow.rowmini { flex-direction: column; }
+#center.row #mediaRow.rowmini > .mini > .rail {
+  flex-direction: column; padding: 8px 0;
 }
-.rbtn {
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
-  width: 100%; padding: 7px 0; border: none; border-radius: 6px;
-  background: transparent; color: var(--dim); font-size: 9px; cursor: pointer;
-}
-.rbtn span { font-size: 15px; line-height: 1; }
-.rbtn:hover { background: var(--hover); color: var(--ink); }
-.rbtn.on { background: var(--on-bg); color: var(--on-ink); }
+#center.row #mediaRow.rowmini .railname { writing-mode: vertical-rl; }
 
 /* ── 영상 스크러빙 슬라이더 ─────────────────────────────────────── */
 #vseek { padding: 6px 10px 0; background: var(--panel); }
@@ -379,9 +376,6 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .mrow { cursor: pointer; }
 .mrow i { opacity: .55; }
 
-/* 영상과 지도가 둘 다 접히면 그 줄 자체를 납작하게 */
-#mediaRow.mini { flex: 0 0 auto !important; height: auto !important; }
-#mediaRow.mini > .mini { flex: 0 0 28px !important; }
 
 
 /* ── 설정 서랍 ────────────────────────────────────────────────────── */
@@ -415,3 +409,13 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .segv button.on { background: var(--on-bg); color: var(--on-ink); border-color: var(--accent); }
 .segv button.on span { color: inherit; opacity: .8; }
 .chk { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); }
+
+/* 데이터 칸이 접히면 — 위아래로 놓았을 때는 가로 띠 */
+#center:not(.row) > #dataPane.mini {
+  flex: 0 0 28px !important;
+  min-height: 28px !important; min-width: 0 !important;
+}
+#center:not(.row) > #dataPane.mini > .rail {
+  flex-direction: row; justify-content: center; gap: 6px; padding: 0;
+}
+#center:not(.row) > #dataPane.mini .railname { writing-mode: horizontal-tb; }

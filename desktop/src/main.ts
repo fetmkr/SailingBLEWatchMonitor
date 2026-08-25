@@ -1245,8 +1245,11 @@ function applyLayout() {
   (Object.keys(MEDIA_EL) as MediaKey[]).forEach((k) => {
     $(MEDIA_EL[k]).classList.toggle("mini", !layout[k]);
   });
-  // 영상과 지도가 둘 다 접히면 그 줄 자체를 접는다. 빈 줄이 남으면 안 된다.
-  $("mediaRow").classList.toggle("mini", !layout.video && !layout.map);
+  // 영상과 지도가 둘 다 접히면 그 줄 자체가 28px 띠가 된다.
+  //
+  // ★ .mini 가 아니라 .rowmini 다. .mini 를 붙이면 그 안의 영상·지도가
+  //   통째로 사라지고 되살릴 띠까지 없어진다 (styles.css 의 주석 참조).
+  $("mediaRow").classList.toggle("rowmini", !layout.video && !layout.map);
 
   // 접거나 폈으니 나누개를 다시 놓는다. 접힌 칸 옆에 나누개가 남아 있으면
   // 잡아 끌어도 움직일 게 없어서 고장 난 것처럼 보인다.
@@ -1280,6 +1283,20 @@ function applyDir() {
  * 서랍은 정해진 크기를 지킨다 — 창을 넓혔는데 서랍까지 같이 넓어지면
  * 성가시다. 가운데 칸들은 남는 자리를 몫대로 나눠 갖는다.
  */
+/**
+ * 칸 크기가 바뀌면 그림을 다시 그린다.
+ *
+ * 캔버스는 자기 크기가 바뀌어도 스스로 다시 안 그린다. 전에는 크기를 바꾸는
+ * 자리마다 손으로 redraw() 를 불렀는데, 한 군데라도 빠지면 그림이 옛 크기로
+ * 남아서 아래가 검게 비었다 (실제로 그랬다).
+ *
+ * 크기를 지켜보는 쪽이 확실하다. 어디서 무슨 이유로 바뀌든 한 자리에서 잡는다.
+ */
+function watchSizes() {
+  new ResizeObserver(() => redraw()).observe($("dataPane"));
+  new ResizeObserver(() => tmap?.resize()).observe($("mapPane"));
+}
+
 function mountSplitters() {
   const after = () => { tmap?.resize(); redraw(); };
   panes.register($("shell"), "row", [
@@ -1319,6 +1336,7 @@ function loadLayout() {
       : (t === "board" || t === "info" || t === "mark" || t === "set") ? t : "lib";
 
   mountSplitters();
+  watchSizes();
   applyTheme();
   applyDir();
   applyLayout();
