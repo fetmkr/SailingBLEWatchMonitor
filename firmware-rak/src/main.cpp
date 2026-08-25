@@ -2614,6 +2614,7 @@ static void printHelp() {
     Serial.println("  gpscfg static <m/s> 정지로 볼 속도 문턱값");
     Serial.println("  nmea <본문>   NMEA 명령을 보내고 응답을 봅니다 (체크섬 자동)");
     Serial.println("  batt          배터리 전압 실측");
+    Serial.println("  usbbench [KB] USB 시리얼 속도 실측 (기본 512 KB)");
     Serial.println("  level         ★ 지금 자세를 힐·피치 0° 로 삼기 (배가 평형일 때)");
     Serial.println("  heel [x|y|z]  힐을 어느 가속도 축에서 볼지 (앞에 - 로 뒤집기)");
     Serial.println("  pitch [x|y|z] 피치를 어느 가속도 축에서 볼지");
@@ -2669,6 +2670,34 @@ static void handleCommand(String line) {
         } else {
             Serial.println("      몇 번 바뀌었습니다. 누른 게 아니라면 다른 핀을 쓰세요.");
         }
+        return;
+    }
+
+    // USB 시리얼이 얼마나 빠른지 재본다.
+    //
+    // 파일을 WiFi 대신 USB 로 보낼 만한지 정하려면 숫자가 있어야 한다.
+    // WiFi AP 직결이 574 KB/초 였다 (netsrv 의 /api/speed 로 잰 값).
+    //
+    // 이 보드의 USB 는 UART 다리가 아니라 칩에 붙은 USB 다
+    // [확인: 맥에서 "USB JTAG/serial debug unit", VID 303a PID 1001].
+    // 그래서 115200 같은 속도 설정은 뜻이 없다. USB 가 낼 수 있는 만큼 나온다.
+    if (line == "usbbench" || line.startsWith("usbbench ")) {
+        uint32_t kb = 512;
+        if (line.length() > 9) kb = (uint32_t)line.substring(9).toInt();
+        if (kb < 1) kb = 1;
+        if (kb > 8192) kb = 8192;
+
+        static uint8_t buf[1024];
+        memset(buf, '.', sizeof(buf));
+        Serial.printf("BENCH START %lu\n", (unsigned long)kb);
+        Serial.flush();
+        const uint32_t t0 = millis();
+        for (uint32_t i = 0; i < kb; i++) Serial.write(buf, sizeof(buf));
+        Serial.flush();
+        const uint32_t dt = millis() - t0;
+        Serial.printf("\nBENCH END %lu KB  %.2f초  %.0f KB/초\n",
+                      (unsigned long)kb, dt / 1000.0f,
+                      dt ? kb * 1000.0f / dt : 0.0f);
         return;
     }
 
