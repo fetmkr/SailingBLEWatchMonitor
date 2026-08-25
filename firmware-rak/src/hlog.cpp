@@ -264,14 +264,35 @@ bool start(const Header& h) {
     // **시작할 때는 보드 시계로 짓는다.** 이 세션의 첫 fix 는 아직 없다 —
     // 해변에서 버튼을 누르면 그 순간 위성이 없고 보통 1~2분 뒤에 잡힌다.
     // 위성을 잡으면 닫을 때 그 시각으로 이름을 고친다 (stop 참조).
+    // 번호는 NVS 에 남는다 (플래시의 따로 떼어 둔 자리, 0x9000). 전원을 빼도,
+    // 앱을 다시 구워도 남는다. 지워지는 건 esptool erase_flash 뿐이다.
     Preferences prefs;
     prefs.begin("sail", false);
-    gSession = prefs.getUInt("sess_n", 0) + 1;
-    for (int guard = 0; guard < 20000; ++guard) {
-        nameFor(gPath, sizeof(gPath), gSession, 0, "HLG");
-        if (!SD.exists(gPath)) break;
-        ++gSession;                                   // 절대 덮어쓰지 않는다
+    uint32_t next = prefs.getUInt("sess_n", 0) + 1;
+
+    // ★ 카드에 있는 제일 큰 번호보다도 커야 한다.
+    //
+    //   NVS 가 날아가거나 (플래시를 통째로 지웠거나) 다른 보드에서 쓰던
+    //   카드를 꽂으면 번호가 1 부터 다시 시작한다. 그러면 이름순이 만든
+    //   순서와 어긋난다.
+    //
+    //   예전에는 "같은 이름이 있으면 하나 올린다" 로 막았는데, 이름에 시각이
+    //   붙으면서 그게 안 통한다 — 번호가 같아도 시각이 다르면 다른 이름이라
+    //   부딪치지 않는다. 그래서 번호만 보고 정한다.
+    {
+        File dir = SD.open("/LOGS");
+        while (File e = dir.openNextFile()) {
+            const String nm = e.name();
+            e.close();
+            if (nm.length() < 6 || nm[0] != 'S') continue;
+            const uint32_t n = (uint32_t)nm.substring(1, 6).toInt();
+            if (n >= next) next = n + 1;
+        }
+        dir.close();
     }
+    gSession = next;
+
+    nameFor(gPath, sizeof(gPath), gSession, 0, "HLG");
     nameFor(gTxtPath, sizeof(gTxtPath), gSession, 0, "TXT");
     prefs.putUInt("sess_n", gSession);
     const uint16_t bootCount = (uint16_t)(prefs.getUInt("boot_n", 0));

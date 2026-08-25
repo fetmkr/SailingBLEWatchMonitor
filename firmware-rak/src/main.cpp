@@ -2662,6 +2662,7 @@ static void printHelp() {
     Serial.println("  nmea <본문>   NMEA 명령을 보내고 응답을 봅니다 (체크섬 자동)");
     Serial.println("  batt          배터리 전압 실측");
     Serial.println("  tz [분]       파일 이름에 쓸 시각 기울기 (기본 540 = 한국)");
+    Serial.println("  sess [번호]   세션 번호 보기·고치기 (NVS 에 남는다)");
     Serial.println("  usbbench [KB] USB 시리얼 속도 실측 (기본 512 KB)");
     Serial.println("  level         ★ 지금 자세를 힐·피치 0° 로 삼기 (배가 평형일 때)");
     Serial.println("  heel [x|y|z]  힐을 어느 가속도 축에서 볼지 (앞에 - 로 뒤집기)");
@@ -2683,6 +2684,29 @@ static void handleCommand(String line) {
     if (line == "info")                { printIdentity(); return; }
     if (line == "scan")                { doScan();     return; }
     if (line == "batt")                { printBattery(); return; }
+
+    // sess — 세션 번호를 보거나 고친다.
+    //
+    // 번호는 NVS 에 남는다 (플래시의 따로 떼어 둔 자리). 전원을 빼도, 앱을
+    // 다시 구워도 남는다. 손댈 일은 거의 없지만, 플래시를 통째로 지웠거나
+    // 번호를 다시 매기고 싶을 때 쓴다.
+    //
+    // 낮춰도 카드에 있는 번호보다 작으면 기록을 시작할 때 저절로 올라간다 —
+    // 파일을 덮어쓰지 않기 위해서다 (hlog.cpp 의 start 참조).
+    if (line == "sess" || line.startsWith("sess ")) {
+        Preferences p;
+        p.begin("sail", false);
+        if (line.length() > 5) {
+            const uint32_t n = (uint32_t)line.substring(5).toInt();
+            p.putUInt("sess_n", n);
+            Serial.printf("[SESS] 다음 세션은 %u 번부터 (카드에 더 큰 번호가 "
+                          "있으면 그 다음으로 올라갑니다)\n", (unsigned)(n + 1));
+        }
+        Serial.printf("[SESS] 마지막으로 쓴 번호 %u\n",
+                      (unsigned)p.getUInt("sess_n", 0));
+        p.end();
+        return;
+    }
 
     // tz — 파일 이름에 쓸 시각의 기울기 (분). 기본 한국 +9시간 = 540
     //
