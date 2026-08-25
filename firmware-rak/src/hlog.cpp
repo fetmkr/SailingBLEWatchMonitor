@@ -4,6 +4,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Preferences.h>
+#include <time.h>
 #include <string.h>
 
 #include <esp_task_wdt.h>
@@ -58,8 +59,9 @@ volatile bool gStopWanted = false;
 
 File     gBin, gTxt;
 uint32_t gSession = 0;
-char     gPath[32]    = {0};
-char     gTxtPath[32] = {0};
+// /LOGS/S00014_19700103-0043_nosat.HLG = 36자. 넉넉히 잡는다.
+char     gPath[64]    = {0};
+char     gTxtPath[64] = {0};
 uint32_t gNavRows = 0, gImuRows = 0;
 uint64_t gBytes = 0;
 uint32_t gStartedMs = 0;
@@ -193,6 +195,50 @@ void begin() {
                   (unsigned)(kBufSize / 1024), kBufSize / 3080.0f);
 }
 
+/**
+ * 이름을 짓는다. **모양은 늘 하나다.**
+ *
+ *     S00012_20260825-1432.HLG          위성을 잡은 세션
+ *     S00014_19700103-0040_nosat.HLG    못 잡은 세션
+ *     └─번호─┘└───시각────┘└표시┘
+ *        ↑ 정렬을 맡는다     ↑ 읽는다   ↑ 못 믿는 시각이라는 표
+ *
+ * 시각은 이 순서로 고른다.
+ *
+ *   1. 이 세션의 첫 fix (utc)          제일 맞다
+ *   2. 보드 시계                        이번에 켠 뒤 위성을 한 번이라도
+ *                                       잡았으면 맞다 (main.cpp 의 clockFromGps)
+ *   3. 그래도 없으면 시계가 말하는 그대로  1970년으로 나온다
+ *
+ * 3번은 지어낸 값이 아니라 **보드가 실제로 아는 시각**이다. 그래도 못 믿는
+ * 값이니 뒤에 `_nosat` 을 붙여 눈에 띄게 한다. 모양은 그대로 유지된다 —
+ * 앞의 번호가 정렬을 맡으니 뒤에 뭐가 붙어도 순서는 안 흔들린다.
+ *
+ * ★ 이름은 **그 고장 시각**으로 적는다. 코치가 카드를 뽑아 "아침 10시 것"
+ *   을 찾는데 UTC 로 적혀 있으면 아홉 시간이 어긋나 보인다. 기울기(분)는
+ *   NVS 의 tz_min 에 있고 기본은 한국(+9시간 = 540분)이다. `tz <분>` 으로 바꾼다.
+ *
+ * 머리글에는 UTC 그대로 들어간다. 이름만 사람 보기 좋게 바꾸는 것이다.
+ */
+static void nameFor(char* out, size_t cap, uint32_t session,
+                    uint32_t utc, const char* ext) {
+    // 위성으로 안 시각인가, 보드 시계가 말하는 것뿐인가
+    const bool sure = utc != 0;
+    if (!utc) utc = (uint32_t)time(nullptr);      // 보드 시계
+
+    Preferences prefs;
+    prefs.begin("sail", true);
+    const int32_t tzMin = (int32_t)prefs.getInt("tz_min", 540);   // 기본 한국
+    prefs.end();
+
+    const time_t local = (time_t)((int64_t)utc + (int64_t)tzMin * 60);
+    struct tm tmv;
+    gmtime_r(&local, &tmv);                 // 이미 더했으니 gmtime 으로 푼다
+    snprintf(out, cap, "/LOGS/S%05u_%04d%02d%02d-%02d%02d%s.%s",
+             (unsigned)session, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+             tmv.tm_hour, tmv.tm_min, sure ? "" : "_nosat", ext);
+}
+
 bool start(const Header& h) {
     if (!gBuf)      { gLastError = "버퍼 없음"; return false; }
     if (gRecording) { gLastError = "이미 기록 중"; return false; }
@@ -205,21 +251,28 @@ bool start(const Header& h) {
     }
     SD.mkdir("/LOGS");
 
-    // 파일 이름은 세션 번호로만 짓는다.
+    // ── 파일 이름 ───────────────────────────────────────────────────────
     //
-    // 규격 원문은 /LOGS/YYYYMMDD/SNNN.HLG 인데, 전원을 켠 직후에는 GPS 가
-    // 아직 날짜를 모른다. 선수가 해변에서 저장 버튼을 누르면 그 순간 날짜가
-    // 없다. 그래서 이름은 세션 번호로 하고 시각은 헤더에 넣는다.
-    // 정렬은 헤더의 utc_start 를 보고 하면 된다.
+    //     S00012_20260825-1432.HLG
+    //     └─번호─┘└───시각────┘
+    //        ↑ 정렬       ↑ 사람이 읽는 것
+    //
+    // **번호가 순서를 맡는다.** NVS 에 저장되고 늘 올라간다 — 전원을 빼도,
+    // 파일을 지워도 되돌아가지 않는다. 그래서 이름순으로 늘어놓으면 늘
+    // 만든 순서다. 시각이 틀려도, 아예 없어도 순서는 안 뒤집힌다.
+    //
+    // **시작할 때는 보드 시계로 짓는다.** 이 세션의 첫 fix 는 아직 없다 —
+    // 해변에서 버튼을 누르면 그 순간 위성이 없고 보통 1~2분 뒤에 잡힌다.
+    // 위성을 잡으면 닫을 때 그 시각으로 이름을 고친다 (stop 참조).
     Preferences prefs;
     prefs.begin("sail", false);
     gSession = prefs.getUInt("sess_n", 0) + 1;
     for (int guard = 0; guard < 20000; ++guard) {
-        snprintf(gPath, sizeof(gPath), "/LOGS/S%05u.HLG", (unsigned)gSession);
+        nameFor(gPath, sizeof(gPath), gSession, 0, "HLG");
         if (!SD.exists(gPath)) break;
         ++gSession;                                   // 절대 덮어쓰지 않는다
     }
-    snprintf(gTxtPath, sizeof(gTxtPath), "/LOGS/S%05u.TXT", (unsigned)gSession);
+    nameFor(gTxtPath, sizeof(gTxtPath), gSession, 0, "TXT");
     prefs.putUInt("sess_n", gSession);
     const uint16_t bootCount = (uint16_t)(prefs.getUInt("boot_n", 0));
     prefs.end();
@@ -353,6 +406,23 @@ void stop() {
             h.close();
         }
         SD.end();
+    }
+
+    // ── 이름을 시각으로 바꾼다 ──
+    //
+    // 시작할 때는 보드 시계로 지었다. 이 세션에서 위성을 잡았으면 그
+    // 시각이 더 맞으니 그것으로 고친다. 못 잡았으면 그대로 둔다.
+    if (gUtcStart) {
+        char binNew[48], txtNew[48];
+        nameFor(binNew, sizeof(binNew), gSession, gUtcStart, "HLG");
+        nameFor(txtNew, sizeof(txtNew), gSession, gUtcStart, "TXT");
+        if (SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+            if (strcmp(gPath, binNew) != 0 && SD.rename(gPath, binNew)) {
+                snprintf(gPath, sizeof(gPath), "%s", binNew);
+            }
+            if (strcmp(gTxtPath, txtNew) != 0) SD.rename(gTxtPath, txtNew);
+            SD.end();
+        }
     }
 
     Serial.printf("[LOG] 기록 끝 — %s  NAV %u줄 / IMU %u줄\n",
@@ -515,14 +585,34 @@ void verify(uint32_t session) {
         return;
     }
 
-    char path[32];
+    char path[64];
     if (session == 0) {
         Preferences prefs;
         prefs.begin("sail", true);
         session = prefs.getUInt("sess_n", 0);
         prefs.end();
     }
-    snprintf(path, sizeof(path), "/LOGS/S%05u.HLG", (unsigned)session);
+    // 이름 뒤에 붙은 시각은 닫을 때 바뀔 수 있다. 번호로 시작하는 것을 찾는다.
+    char want[16];
+    snprintf(want, sizeof(want), "S%05u_", (unsigned)session);
+    path[0] = '\0';
+    {
+        File dir = SD.open("/LOGS");
+        while (File e = dir.openNextFile()) {
+            const String nm = e.name();
+            e.close();
+            if (nm.startsWith(want) && nm.endsWith(".HLG")) {
+                snprintf(path, sizeof(path), "/LOGS/%s", nm.c_str());
+                break;
+            }
+        }
+        dir.close();
+    }
+    if (!path[0]) {
+        Serial.printf("[검사] 세션 %u 파일을 못 찾았습니다.\n", (unsigned)session);
+        SD.end();
+        return;
+    }
 
     File f = SD.open(path, FILE_READ);
     if (!f) { Serial.printf("[검사] %s 를 못 열었습니다.\n", path); SD.end(); return; }

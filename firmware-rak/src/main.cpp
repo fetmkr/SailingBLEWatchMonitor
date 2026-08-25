@@ -827,7 +827,54 @@ static void dampingUpdate(float rawSog, float rawCog, uint32_t nowMs) {
 // ★ age() 검사가 꼭 필요하다. 한 번 위성을 잡았다가 놓쳐도 라이브러리는
 //   마지막 값을 그대로 들고 있다. 낡은 값을 안 걸러내면 신호가 끊긴 뒤에도
 //   옛날 속도를 진짜인 양 계속 내보내게 된다. 배 위에서 이건 위험하다.
+/**
+ * GPS 로 보드 시계를 맞춘다. 한 번만.
+ *
+ * 이 보드에는 시계 부품(RTC)이 없다. 전원을 켜면 1970년부터 센다. 그러면
+ * SD 에 만든 파일의 날짜도 1970년으로 찍혀서, 카드를 뽑아 파인더에서 봐도
+ * 언제 것인지 모른다.
+ *
+ * 위성을 잡으면 그때 맞춘다. **기록 중이 아니어도 맞춘다** — 파일은 기록을
+ * 시작할 때 만들어지니, 그 전에 맞아 있어야 날짜가 제대로 박힌다.
+ * 전원을 빼면 다시 잊는다. 켤 때마다 다시 맞춘다.
+ */
+static bool gClockSet = false;
+
+static void clockFromGps() {
+    if (gClockSet) return;
+    if (!gGps.date.isValid() || !gGps.time.isValid()) return;
+    if (gGps.date.year() < 2020) return;          // 아직 안 채워진 값
+
+    struct tm tmv = {};
+    tmv.tm_year = gGps.date.year() - 1900;
+    tmv.tm_mon  = gGps.date.month() - 1;
+    tmv.tm_mday = gGps.date.day();
+    tmv.tm_hour = gGps.time.hour();
+    tmv.tm_min  = gGps.time.minute();
+    tmv.tm_sec  = gGps.time.second();
+    // timegm 이 없는 판이 있어서 직접 셈한다. NMEA 시각은 UTC 다.
+    //   1970-01-01 부터 그 해 1월 1일까지의 날 수 + 그 해의 날 수
+    static const int mdays[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
+    const int y = gGps.date.year();
+    long days = (y - 1970) * 365L + (y - 1969) / 4;          // 윤년 보정
+    days += mdays[tmv.tm_mon];
+    const bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    if (leap && tmv.tm_mon > 1) days += 1;
+    days += tmv.tm_mday - 1;
+    const time_t utc = (time_t)(days * 86400L +
+                                tmv.tm_hour * 3600L + tmv.tm_min * 60L + tmv.tm_sec);
+    if (utc <= 0) return;
+
+    struct timeval tv = { .tv_sec = utc, .tv_usec = 0 };
+    settimeofday(&tv, nullptr);
+    gClockSet = true;
+    Serial.printf("[시계] GPS 로 맞췄습니다 — %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                  gGps.date.year(), gGps.date.month(), gGps.date.day(),
+                  gGps.time.hour(), gGps.time.minute(), gGps.time.second());
+}
+
 static void gpsUpdateFix() {
+    clockFromGps();
     bool ok = gGps.location.isValid() && gGps.location.age() < kGpsStaleMs &&
               gGps.speed.isValid() && gGps.speed.age() < kGpsStaleMs;
     if (ok) {
@@ -2614,6 +2661,7 @@ static void printHelp() {
     Serial.println("  gpscfg static <m/s> 정지로 볼 속도 문턱값");
     Serial.println("  nmea <본문>   NMEA 명령을 보내고 응답을 봅니다 (체크섬 자동)");
     Serial.println("  batt          배터리 전압 실측");
+    Serial.println("  tz [분]       파일 이름에 쓸 시각 기울기 (기본 540 = 한국)");
     Serial.println("  usbbench [KB] USB 시리얼 속도 실측 (기본 512 KB)");
     Serial.println("  level         ★ 지금 자세를 힐·피치 0° 로 삼기 (배가 평형일 때)");
     Serial.println("  heel [x|y|z]  힐을 어느 가속도 축에서 볼지 (앞에 - 로 뒤집기)");
@@ -2635,6 +2683,40 @@ static void handleCommand(String line) {
     if (line == "info")                { printIdentity(); return; }
     if (line == "scan")                { doScan();     return; }
     if (line == "batt")                { printBattery(); return; }
+
+    // tz — 파일 이름에 쓸 시각의 기울기 (분). 기본 한국 +9시간 = 540
+    //
+    // 머리글에는 UTC 가 그대로 들어간다. 이름만 사람 보기 좋게 그 고장
+    // 시각으로 적는 것이다.
+    if (line == "tz" || line.startsWith("tz ")) {
+        Preferences p;
+        p.begin("sail", false);
+        if (line.length() > 3) {
+            const int32_t m = (int32_t)line.substring(3).toInt();
+            if (m < -720 || m > 840) {
+                Serial.println("[TZ] -720 ~ 840 분 사이여야 합니다.");
+            } else {
+                p.putInt("tz_min", m);
+                Serial.printf("[TZ] %+d분 (%+.1f시간) 으로 두었습니다.\n",
+                              (int)m, m / 60.0f);
+            }
+        }
+        const int32_t cur = p.getInt("tz_min", 540);
+        p.end();
+        Serial.printf("[TZ] 지금 %+d분 (%+.1f시간). 파일 이름에만 쓰입니다.\n",
+                      (int)cur, cur / 60.0f);
+        const time_t now = time(nullptr);
+        if (now > 1600000000) {
+            struct tm t; gmtime_r(&now, &t);
+            Serial.printf("[TZ] 보드 시계 %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                          t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                          t.tm_hour, t.tm_min, t.tm_sec);
+        } else {
+            Serial.println("[TZ] 보드 시계가 아직 안 맞았습니다 "
+                           "— 위성을 잡으면 맞습니다.");
+        }
+        return;
+    }
     if (line == "imu")                 { doImu();      return; }
     if (line == "sd")                  { doSd();       return; }
     // 어떤 핀에 버튼을 달 수 있나. 그 핀을 누가 이미 쓰고 있는지 재 본다.

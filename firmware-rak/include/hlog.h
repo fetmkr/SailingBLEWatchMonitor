@@ -191,7 +191,7 @@ struct Status {
     bool     recording   = false;
     bool     cardPresent = false;
     uint32_t session     = 0;
-    char     path[32]    = {0};
+    char     path[64]    = {0};   // /LOGS/S00014_19700103-0043_nosat.HLG 가 36자
     uint32_t navRows     = 0;
     uint32_t imuRows     = 0;
     uint64_t bytes       = 0;
