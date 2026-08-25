@@ -112,6 +112,29 @@ function relayout(ctx: Ctx) {
   // 보이는 칸만 골라 그 사이에 넣는다. 접힌 칸 옆에 나누개가 있으면
   // 잡아 끌어도 움직일 게 없어서 고장 난 것처럼 보인다.
   const on = ctx.panes.filter(visible);
+
+  // ★ 몫을 다시 고르게 편다.
+  //
+  // CSS 규칙이 이렇다 — 남는 자리를 나눠 가질 칸들의 몫을 **다 더해서 1보다
+  // 작으면, 그 비율만큼만 가져가고 나머지는 빈 채로 남는다.**
+  //
+  // 실제로 그 일이 났다. 위아래로 놓고 나누개를 끌어 영상·지도 쪽을 넓히면
+  // 데이터의 몫이 0.35 쯤으로 떨어진다. 그 상태에서 영상·지도를 접으면
+  // 데이터 혼자 남는데, 몫이 0.35 라서 남은 자리의 35% 만 쓰고 아래가
+  // 검게 비었다.
+  //
+  // 그래서 접거나 펼 때마다 보이는 칸들의 몫을 다시 편다. 서로의 비율은
+  // 그대로 두고 합만 칸 수에 맞춘다 (평균 1). 합이 1 밑으로 안 내려간다.
+  const flexOn = on.filter((p) => p.kind === "flex");
+  if (flexOn.length) {
+    const gs = flexOn.map((p) => parseFloat(getComputedStyle(p.el).flexGrow) || 1);
+    const sum = gs.reduce((a, b) => a + b, 0) || flexOn.length;
+    flexOn.forEach((p, i) => {
+      const gv = (gs[i] / sum) * flexOn.length;
+      p.el.style.flex = `${gv} 1 0`;
+      saved[p.el.id] = gv;
+    });
+  }
   for (let i = 0; i + 1 < on.length; i++) {
     const g = document.createElement("div");
     g.className = `gutter ${ctx.dir}`;

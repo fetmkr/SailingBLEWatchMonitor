@@ -21,6 +21,8 @@ export interface Series {
   ys: Float32Array;
   /** 세로축을 0 을 가운데 두고 그릴지 (힐·자이로처럼 부호가 있는 값) */
   zeroCentered?: boolean;
+  /** 접어 두었나. 접힌 줄은 이름만 남기고 자리를 안 쓴다 */
+  collapsed?: boolean;
 }
 
 export interface View {
@@ -153,11 +155,21 @@ export interface DrawOpts {
  */
 let LABEL_W = 148;
 /** 세로축 숫자가 들어갈 폭 */
-const AXIS_NUM_W = 62;
+let AXIS_NUM_W = 62;
 const axisW = () => LABEL_W + AXIS_NUM_W;
+
+/** 접힌 줄의 높이. 이름만 보이면 되니 이 정도면 된다. */
+const MINI_ROW = 22;
+
+/** 줄마다의 자리. draw 가 채우고 hit test 가 읽는다 — 늘 같은 값이어야 한다. */
+let rowBoxes: { top: number; h: number }[] = [];
 
 /** 이름 칸 너비. 경계를 끌어서 바꾼다 (이름이 길면 넘치기 때문이다) */
 export function labelWidth(): number { return LABEL_W; }
+export function numWidth(): number { return AXIS_NUM_W; }
+export function setNumWidth(px: number) {
+  AXIS_NUM_W = Math.min(200, Math.max(40, Math.round(px)));
+}
 export function setLabelWidth(px: number): void {
   LABEL_W = Math.min(360, Math.max(70, Math.round(px)));
 }
@@ -196,6 +208,12 @@ export function onTimeAxis(canvas: HTMLCanvasElement, clientY: number): boolean 
 }
 
 /** 마우스가 이름 칸 경계에 있나 (끌어서 넓히는 자리) */
+/** 숫자 칸과 그림 사이 경계에 있나. 잡아 끌면 숫자 칸이 넓어진다. */
+export function onNumEdge(canvas: HTMLCanvasElement, clientX: number): boolean {
+  const x = clientX - canvas.getBoundingClientRect().left;
+  return Math.abs(x - axisW()) <= 4;
+}
+
 export function onLabelEdge(canvas: HTMLCanvasElement, clientX: number): boolean {
   const x = clientX - canvas.getBoundingClientRect().left;
   return Math.abs(x - LABEL_W) <= 4;
@@ -235,7 +253,24 @@ export function draw(o: DrawOpts): void {
   const rows = series.length || 1;
   const bodyTop = TIME_H;                       // 시간 축이 위에 있다
   const bodyH = cssH - TIME_H - OVER_H;
-  const rowH = Math.max(24, (bodyH - GAP * (rows - 1)) / rows);
+
+  // 줄 높이. 접힌 줄은 이름만 남기고, 남는 자리는 펼친 줄들이 나눠 갖는다.
+  // 그래서 하나만 펼쳐 두면 그 하나가 화면을 다 쓴다.
+  const shut = series.filter((x) => x.collapsed).length;
+  const open = Math.max(1, series.length - shut);
+  const freeH = bodyH - GAP * (rows - 1) - shut * MINI_ROW;
+  const rowH = Math.max(24, freeH / open);
+
+  rowBoxes = [];
+  {
+    let y = bodyTop;
+    for (const sx of series) {
+      const h = sx.collapsed ? MINI_ROW : rowH;
+      rowBoxes.push({ top: y, h });
+      y += h + GAP;
+    }
+    if (!series.length) rowBoxes.push({ top: bodyTop, h: bodyH });
+  }
   const cols = Math.max(1, Math.floor(plotW));
   const span = Math.max(1, view.to - view.from);
   const xOf = (ms: number) => axisW() + ((ms - view.from) / span) * plotW;
@@ -363,8 +398,31 @@ export function draw(o: DrawOpts): void {
 
   // ── 값들 ────────────────────────────────────────────────────────────
   series.forEach((s, r) => {
-    const top = bodyTop + r * (rowH + GAP);
-    const bot = top + rowH;
+    const top = rowBoxes[r].top;
+    const rh = rowBoxes[r].h;
+    const bot = top + rh;
+
+    // 접힌 줄 — 이름과 접기 표시만. 그림도 눈금도 안 그린다.
+    if (s.collapsed) {
+      g.fillStyle = dim;
+      g.textAlign = "left";
+      g.font = "11px -apple-system, system-ui, sans-serif";
+      g.fillText("▸", 6, top + rh / 2 - 7);
+      g.fillStyle = s.color;
+      g.fillRect(20, top + rh / 2 - 4, 7, 7);
+      g.fillStyle = dim;
+      g.font = "12px -apple-system, system-ui, sans-serif";
+      g.fillText(fitText(g, s.name, LABEL_W - 40), 32, top + rh / 2 - 7);
+
+      g.strokeStyle = grid;
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(0, Math.round(bot + GAP / 2) + 0.5);
+      g.lineTo(cssW, Math.round(bot + GAP / 2) + 0.5);
+      g.stroke();
+      return;
+    }
+
     const band = bucketize(s, view, cols);
 
     let lo = Infinity, hi = -Infinity;
@@ -374,7 +432,7 @@ export function draw(o: DrawOpts): void {
       if (band.max[c] > hi) hi = band.max[c];
     }
     const [rlo, rhi] = niceRange(lo, hi, s.zeroCentered);
-    const yOf = (v: number) => bot - ((v - rlo) / (rhi - rlo)) * rowH;
+    const yOf = (v: number) => bot - ((v - rlo) / (rhi - rlo)) * rh;
 
     // 0 선
     if (rlo < 0 && rhi > 0) {
@@ -454,15 +512,20 @@ export function draw(o: DrawOpts): void {
     // 이름과 다른 것이지만 우리는 그게 아니다.
     //
     // 색은 이름 앞의 작은 네모로 준다. 그림의 선 색과 이어진다.
-    const midY = top + rowH / 2;
+    const midY = top + rh / 2;
+    // 접기 표시. 누르면 이 줄이 접힌다.
+    g.fillStyle = dim;
+    g.font = "11px -apple-system, system-ui, sans-serif";
+    g.textAlign = "left";
+    g.fillText("▾", 6, midY - 8);
+
     g.fillStyle = s.color;
-    g.fillRect(10, midY - 9, 8, 8);
+    g.fillRect(20, midY - 9, 8, 8);
 
     g.fillStyle = ink;
     g.font = "13px -apple-system, system-ui, sans-serif";
-    g.textAlign = "left";
     // 칸을 넘치면 잘라 준다. 그냥 넘치면 옆 칸 숫자와 겹쳐서 둘 다 못 읽는다.
-    g.fillText(fitText(g, s.name, LABEL_W - 32), 24, midY - 9);
+    g.fillText(fitText(g, s.name, LABEL_W - 44), 34, midY - 9);
 
     // 줄 나눔선
     g.strokeStyle = grid;
@@ -598,17 +661,34 @@ export function msAtX(canvas: HTMLCanvasElement, view: View, clientX: number): n
 export const plotLeft = () => axisW();
 
 /** 이름 칸에서 마우스가 몇 번째 줄에 있나. 밖이면 -1 */
+/**
+ * 그 자리가 몇 번째 줄인가. -1 이면 이름 칸 밖이다.
+ *
+ * ★ 그릴 때 재어 둔 자리를 그대로 읽는다. 여기서 다시 셈하면 접힌 줄이
+ *   생겼을 때 그림과 어긋난다.
+ */
 export function rowAtY(
-  canvas: HTMLCanvasElement, count: number, clientX: number, clientY: number,
+  canvas: HTMLCanvasElement, _count: number, clientX: number, clientY: number,
 ): number {
   const r = canvas.getBoundingClientRect();
   const x = clientX - r.left;
   if (x < 0 || x > LABEL_W) return -1;
-  const y = clientY - r.top - TIME_H;
-  const bodyH = r.height - TIME_H - OVER_H;
-  const rowH = Math.max(24, (bodyH - GAP * (count - 1)) / count);
-  const i = Math.floor(y / (rowH + GAP));
-  return i >= 0 && i < count && y >= 0 ? i : -1;
+  const y = clientY - r.top;
+  for (let i = 0; i < rowBoxes.length; i++) {
+    const b = rowBoxes[i];
+    if (y >= b.top && y <= b.top + b.h) return i;
+  }
+  return -1;
+}
+
+/** 접기 표시(▾ ▸)를 짚었나. 이름 칸 맨 왼쪽 자리다. */
+export function chevronAt(
+  canvas: HTMLCanvasElement, clientX: number, clientY: number,
+): number {
+  const r = canvas.getBoundingClientRect();
+  const x = clientX - r.left;
+  if (x < 0 || x > 18) return -1;
+  return rowAtY(canvas, 0, clientX, clientY);
 }
 
 /** 그 줄의 이름을 고칠 입력칸을 놓을 자리 (캔버스 기준 픽셀) */

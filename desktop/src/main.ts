@@ -246,6 +246,7 @@ function buildSeries(s: hlog.Session) {
     { code: "SAT",   name: n("SAT", "Satellites"), unit: "count",
       color: "#8a8a8a", xs: navX, ys: sv },
   ];
+  applyRowsShut();   // 접어 둔 줄을 새 파일에도 그대로 적용한다
 }
 
 const clamp = (v: number) => (v > 1 ? 1 : v < -1 ? -1 : v);
@@ -318,15 +319,45 @@ function noteMark(i: number, note: string) {
 // 이름은 사람마다 다르게 부른다. 어떤 코치는 "Trim", 어떤 코치는 "Pitch" 다.
 // 고쳐 쓸 수 있게 하고 남긴다.
 const LABELW_KEY = "labelWidth.v1";
+const NUMW_KEY = "numWidth.v1";
+const SHUT_KEY = "rowsShut.v1";
 {
   const w = Number(localStorage.getItem(LABELW_KEY));
   if (w > 0) tl.setLabelWidth(w);
+  const nw = Number(localStorage.getItem(NUMW_KEY));
+  if (nw > 0) tl.setNumWidth(nw);
 }
 
 const NAMES_KEY = "seriesNames.v1";
 let names: Record<string, string> = {};
 try { names = JSON.parse(localStorage.getItem(NAMES_KEY) ?? "{}"); } catch { /* 처음 */ }
 const n = (code: string, def: string) => names[code] ?? def;
+
+// ── 센서 줄 접기 ────────────────────────────────────────────────────────
+//
+// 일곱 줄을 다 펴 두면 하나하나가 납작하다. 지금 보려는 것만 펴 두면 그 줄이
+// 화면을 다 쓴다. 접은 줄은 이름만 남는다 — 사라지면 되돌릴 길이 없다.
+let rowsShut: Record<string, boolean> = {};
+try { rowsShut = JSON.parse(localStorage.getItem(SHUT_KEY) ?? "{}"); } catch { /* 처음 */ }
+
+function applyRowsShut() {
+  for (const s of series) s.collapsed = !!rowsShut[s.code];
+}
+
+function toggleRow(i: number) {
+  const s = series[i];
+  if (!s) return;
+  const shut = !s.collapsed;
+  // 마지막 하나까지 접으면 볼 게 없다. 그건 막는다.
+  if (shut && series.every((x, k) => k === i || x.collapsed)) {
+    setStatus("마지막 줄입니다. 다른 줄을 먼저 펴세요.", "bad");
+    return;
+  }
+  s.collapsed = shut;
+  if (shut) rowsShut[s.code] = true; else delete rowsShut[s.code];
+  localStorage.setItem(SHUT_KEY, JSON.stringify(rowsShut));
+  redraw();
+}
 
 function renameSeries(code: string, value: string) {
   const v = value.trim();
@@ -1785,16 +1816,25 @@ function wire() {
   //   시프트 + 휠 / 트랙패드 좌우 / 아래 스크롤 막대 / 위 시간 축 끌기
   // 그림 위까지 밀기로 쓰면 정작 훑을 데가 없어진다.
   let moved = 0;
-  // 이름 칸 경계를 끌면 넓어진다. 이름이 길면 넘치기 때문이다.
-  let edgeDrag = false;
+  // 왼쪽 두 칸의 경계를 끌면 넓어진다. 이름이 길면 넘치고, 숫자도 길 때가 있다.
+  //   이름 칸 | 숫자 칸 | 그림
+  let edgeDrag: "label" | "num" | null = null;
 
   c.addEventListener("pointerdown", (e) => {
     if (!session) return;
     if (tl.onLabelEdge(c, e.clientX)) {
-      edgeDrag = true;
+      edgeDrag = "label";
       c.setPointerCapture(e.pointerId);
       return;
     }
+    if (tl.onNumEdge(c, e.clientX)) {
+      edgeDrag = "num";
+      c.setPointerCapture(e.pointerId);
+      return;
+    }
+    // 접기 표시(▾ ▸)를 누르면 그 줄이 접힌다
+    const ch = tl.chevronAt(c, e.clientX, e.clientY);
+    if (ch >= 0) { toggleRow(ch); return; }
     // 깃발을 누르면 고치기 창
     const fi = tl.flagAt(c, e.clientX, e.clientY);
     if (fi >= 0) { editFlag(fi); return; }
@@ -1842,8 +1882,14 @@ function wire() {
   c.addEventListener("pointermove", (e) => {
     if (!session) return;
     if (edgeDrag) {
-      tl.setLabelWidth(e.clientX - c.getBoundingClientRect().left);
-      localStorage.setItem(LABELW_KEY, String(tl.labelWidth()));
+      const x = e.clientX - c.getBoundingClientRect().left;
+      if (edgeDrag === "label") {
+        tl.setLabelWidth(x);
+        localStorage.setItem(LABELW_KEY, String(tl.labelWidth()));
+      } else {
+        tl.setNumWidth(x - tl.labelWidth());
+        localStorage.setItem(NUMW_KEY, String(tl.numWidth()));
+      }
       c.style.cursor = "col-resize";
       redraw();
       return;
@@ -1872,7 +1918,8 @@ function wire() {
       cursorMs = tl.msAtX(c, view, e.clientX);
     } else {
       const over = inOverview(e);
-      const edge = tl.onLabelEdge(c, e.clientX);
+      const edge = tl.onLabelEdge(c, e.clientX) || tl.onNumEdge(c, e.clientX);
+      const chev = !edge && tl.chevronAt(c, e.clientX, e.clientY) >= 0;
       const pill = tl.onPinPill(c, e.clientX, e.clientY);
       const flag = tl.flagAt(c, e.clientX, e.clientY) >= 0;
       const axis = !pill && tl.onTimeAxis(c, e.clientY);
@@ -1880,6 +1927,7 @@ function wire() {
       cursorMs = over || onLabel || edge || axis || pill || flag
         ? null : tl.msAtX(c, view, e.clientX);
       c.style.cursor = edge ? "col-resize"
+        : chev ? "pointer"             // 접기 표시
         : pill ? "grab"                // 파란 알약은 잡아서 옮기는 손잡이
         : flag ? "pointer"             // 깃발은 눌러서 고치는 것
         : over || axis ? "grab"
@@ -1894,7 +1942,7 @@ function wire() {
   });
 
   c.addEventListener("pointerup", (e) => {
-    if (edgeDrag) { edgeDrag = false; return; }
+    if (edgeDrag) { edgeDrag = null; return; }
     if (drag?.kind === "scrub") setStatus("이 자리에 고정했습니다. Esc 로 풉니다.");
     drag = null;
     c.style.cursor = inOverview(e) ? "grab"
@@ -1902,7 +1950,7 @@ function wire() {
     redraw();
   });
   c.addEventListener("pointercancel", () => {
-    drag = null; edgeDrag = false; c.style.cursor = "crosshair";
+    drag = null; edgeDrag = null; c.style.cursor = "crosshair";
   });
   c.addEventListener("pointerleave", () => {
     cursorMs = null; drag = null; c.style.cursor = "crosshair"; redraw();
@@ -1945,6 +1993,12 @@ redraw();
 setStatus("파일을 열거나 보드에서 받으세요.");
 
 lib.load().then((l) => { library = l; renderSide(); });
+
+// 만드는 중에만 밖에서 들여다볼 수 있게 내놓는다. 배포판에는 없다.
+if (import.meta.env.DEV) {
+  (window as any).__tl = tl;
+  (window as any).__series = () => series.map((x) => ({ code: x.code, shut: !!x.collapsed }));
+}
 
 // 만드는 중에는 시험용 데이터를 바로 띄운다. 배포판에서는 안 그런다.
 if (import.meta.env.DEV) loadSample();
