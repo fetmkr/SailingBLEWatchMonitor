@@ -1998,6 +1998,17 @@ function wire() {
       redraw();
       return;
     }
+    // 이름 칸 위에서는 줄을 위아래로 굴린다.
+    //
+    // 센서가 열여섯 줄이면 한 칸에 다 안 들어간다. 그림 위에서는 예전처럼
+    // 시간을 당기고 미는 게 맞고, 줄을 굴리는 건 이름 칸이 제자리다 —
+    // 그 칸이 곧 줄 목록이니까.
+    if (tl.onLabelColumn(c, e.clientX) && tl.canScroll()) {
+      tl.scrollBy(e.deltaY);
+      redraw();
+      return;
+    }
+
     if (e.shiftKey) {
       panBy(((view.to - view.from) * e.deltaY) / 400);
     } else {
@@ -2007,7 +2018,7 @@ function wire() {
   }, { passive: false });
 
   // 끌기 — 본 화면이면 밀기, 아래 띠면 그 자리로
-  type Drag = { kind: "pan" | "over" | "scrub" | "pill"; x: number; from: number };
+  type Drag = { kind: "pan" | "over" | "scrub" | "pill" | "vbar"; x: number; from: number };
   let drag: Drag | null = null;
 
   const inOverview = (e: PointerEvent) => {
@@ -2119,6 +2130,14 @@ function wire() {
       c.setPointerCapture(e.pointerId);
       return;
     }
+    // 오른쪽 세로 굴림대
+    if (tl.onVBar(c, e.clientX)) {
+      drag = { kind: "vbar", x: e.clientX, from: 0 };
+      c.setPointerCapture(e.pointerId);
+      tl.scrollToBarY(c, e.clientY);
+      redraw();
+      return;
+    }
     // 접기 표시(▾ ▸)를 누르면 그 줄이 접힌다
     const ch = tl.chevronAt(c, e.clientX, e.clientY);
     if (ch >= 0) { toggleRow(ch); return; }
@@ -2181,7 +2200,11 @@ function wire() {
       redraw();
       return;
     }
-    if (drag?.kind === "over") {
+    if (drag?.kind === "vbar") {
+      tl.scrollToBarY(c, e.clientY);
+      cursorMs = null;
+      c.style.cursor = "grabbing";
+    } else if (drag?.kind === "over") {
       jumpTo(tl.msAtOverviewX(c, fullSpan, e.clientX));
       cursorMs = null;
       c.style.cursor = "grabbing";
@@ -2205,15 +2228,17 @@ function wire() {
       cursorMs = tl.msAtX(c, view, e.clientX);
     } else {
       const over = inOverview(e);
-      const edge = tl.onLabelEdge(c, e.clientX) || tl.onNumEdge(c, e.clientX);
+      const vbar = tl.onVBar(c, e.clientX);
+      const edge = !vbar && (tl.onLabelEdge(c, e.clientX) || tl.onNumEdge(c, e.clientX));
       const chev = !edge && tl.chevronAt(c, e.clientX, e.clientY) >= 0;
       const pill = tl.onPinPill(c, e.clientX, e.clientY);
       const flag = tl.flagAt(c, e.clientX, e.clientY) >= 0;
       const axis = !pill && tl.onTimeAxis(c, e.clientY);
       const onLabel = !edge && tl.rowAtY(c, series.length, e.clientX, e.clientY) >= 0;
-      cursorMs = over || onLabel || edge || axis || pill || flag
+      cursorMs = over || onLabel || edge || axis || pill || flag || vbar
         ? null : tl.msAtX(c, view, e.clientX);
-      c.style.cursor = edge ? "col-resize"
+      c.style.cursor = vbar ? "grab"
+        : edge ? "col-resize"
         : chev ? "pointer"             // 접기 표시
         : pill ? "grab"                // 파란 알약은 잡아서 옮기는 손잡이
         : flag ? "pointer"             // 깃발은 눌러서 고치는 것

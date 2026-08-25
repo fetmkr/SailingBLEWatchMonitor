@@ -161,6 +161,32 @@ const axisW = () => LABEL_W + AXIS_NUM_W;
 /** 접힌 줄의 높이. 이름만 보이면 되니 이 정도면 된다. */
 const MINI_ROW = 26;
 
+/**
+ * 펴 둔 줄의 최소 높이.
+ *
+ * 줄이 열여섯이면 칸에 다 우겨 넣었을 때 하나가 20픽셀도 안 된다. 파형이
+ * 뭉개져서 볼 수가 없다. 그래서 **짜부라뜨리지 않고 넘치면 위아래로
+ * 굴린다.**
+ */
+const MIN_ROW = 64;
+
+/** 오른쪽 세로 굴림대 두께 */
+const VBAR_W = 8;
+
+/** 위아래로 얼마나 굴렸나 (px). 넘칠 때만 0 보다 커진다. */
+let scrollY = 0;
+/** 그릴 것의 전체 높이와 보이는 높이. 굴림대를 그리고 한계를 잡는 데 쓴다. */
+let contentH = 0, viewH = 0;
+
+export function maxScroll(): number { return Math.max(0, contentH - viewH); }
+export function scrollTo(y: number) {
+  scrollY = Math.min(maxScroll(), Math.max(0, y));
+}
+export function scrollBy(dy: number) { scrollTo(scrollY + dy); }
+export function scrollPos(): number { return scrollY; }
+/** 넘쳐서 굴릴 수 있나. 굴림대를 그릴지 정할 때 쓴다. */
+export function canScroll(): boolean { return maxScroll() > 0.5; }
+
 /** 접기 표시가 차지하는 폭. 이 안을 누르면 접힌다. */
 const CHEV_W = 26;
 
@@ -259,14 +285,21 @@ export function draw(o: DrawOpts): void {
 
   // 줄 높이. 접힌 줄은 이름만 남기고, 남는 자리는 펼친 줄들이 나눠 갖는다.
   // 그래서 하나만 펼쳐 두면 그 하나가 화면을 다 쓴다.
+  //
+  // ★ 다 우겨 넣지 않는다. 펴 둔 줄이 MIN_ROW 보다 얇아질 만큼 많으면
+  //   짜부라뜨리는 대신 **위아래로 굴린다**. 파형이 뭉개지면 볼 이유가 없다.
   const shut = series.filter((x) => x.collapsed).length;
   const open = Math.max(1, series.length - shut);
   const freeH = bodyH - GAP * (rows - 1) - shut * MINI_ROW;
-  const rowH = Math.max(24, freeH / open);
+  const rowH = Math.max(MIN_ROW, freeH / open);
+
+  viewH = bodyH;
+  contentH = open * rowH + shut * MINI_ROW + GAP * Math.max(0, rows - 1);
+  scrollTo(scrollY);                       // 줄이 줄어들면 굴린 만큼도 줄인다
 
   rowBoxes = [];
   {
-    let y = bodyTop;
+    let y = bodyTop - scrollY;
     for (const sx of series) {
       const h = sx.collapsed ? MINI_ROW : rowH;
       rowBoxes.push({ top: y, h });
@@ -400,7 +433,17 @@ export function draw(o: DrawOpts): void {
   });
 
   // ── 값들 ────────────────────────────────────────────────────────────
+  //
+  // 굴린 만큼 위로 밀려 있으니, 본문 밖으로 새지 않게 자르고 그린다.
+  // 시간 축과 아래 띠를 침범하면 안 된다.
+  g.save();
+  g.beginPath();
+  g.rect(0, bodyTop, cssW, bodyH);
+  g.clip();
+
   series.forEach((s, r) => {
+    // 화면 밖에 있는 줄은 그릴 것도 없다
+    if (rowBoxes[r].top > bodyTop + bodyH || rowBoxes[r].top + rowBoxes[r].h < bodyTop) return;
     const top = rowBoxes[r].top;
     const rh = rowBoxes[r].h;
     const bot = top + rh;
@@ -549,6 +592,24 @@ export function draw(o: DrawOpts): void {
     g.lineTo(axisW() + 0.5, bot);
     g.stroke();
   });
+
+  g.restore();                              // 자르기 끝
+
+  // ── 오른쪽 세로 굴림대 ──────────────────────────────────────────────
+  //
+  // 넘칠 때만 나온다. 있어야 "밑에 더 있다" 는 것을 안다.
+  if (contentH > bodyH + 0.5) {
+    const trackX = cssW - VBAR_W;
+    g.fillStyle = band;
+    g.fillRect(trackX, bodyTop, VBAR_W, bodyH);
+
+    const th = Math.max(24, (bodyH / contentH) * bodyH);
+    const ty = bodyTop + (scrollY / (contentH - bodyH)) * (bodyH - th);
+    g.fillStyle = thumb;
+    g.beginPath();
+    g.roundRect(trackX + 1.5, ty, VBAR_W - 3, th, (VBAR_W - 3) / 2);
+    g.fill();
+  }
 
   // ── 커서 ────────────────────────────────────────────────────────────
   //
@@ -708,6 +769,29 @@ export function rowAtY(
     if (y >= b.top && y <= b.top + b.h) return i;
   }
   return -1;
+}
+
+/** 오른쪽 세로 굴림대를 짚었나. */
+export function onVBar(canvas: HTMLCanvasElement, clientX: number): boolean {
+  if (!canScroll()) return false;
+  const r = canvas.getBoundingClientRect();
+  return clientX - r.left >= r.width - VBAR_W - 3;
+}
+
+/** 굴림대를 그 자리로 끌었다. 화면 y 를 굴린 양으로 바꾼다. */
+export function scrollToBarY(canvas: HTMLCanvasElement, clientY: number) {
+  const r = canvas.getBoundingClientRect();
+  const bodyH = r.height - TIME_H - OVER_H;
+  if (bodyH <= 0 || !canScroll()) return;
+  const th = Math.max(24, (bodyH / contentH) * bodyH);
+  const y = clientY - r.top - TIME_H - th / 2;
+  const span = bodyH - th;
+  scrollTo(span > 0 ? (y / span) * (contentH - bodyH) : 0);
+}
+
+/** 이름 칸 위인가. 여기서 휠을 굴리면 시간이 아니라 줄이 움직인다. */
+export function onLabelColumn(canvas: HTMLCanvasElement, clientX: number): boolean {
+  return clientX - canvas.getBoundingClientRect().left <= axisW();
 }
 
 /** 접기 표시(▾ ▸)를 짚었나. 이름 칸 맨 왼쪽 자리다. */
