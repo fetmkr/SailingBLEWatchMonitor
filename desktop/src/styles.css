@@ -265,6 +265,36 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 }
 #center.row #mediaRow.rowmini .railname { writing-mode: vertical-rl; }
 
+/* ── 오른쪽 서랍과 아이콘 줄 ─────────────────────────────────────── */
+/*
+   서랍은 한 번에 하나만 열린다. 아이콘 줄은 늘 보인다 — 무엇이 있는지
+   알아야 하고, 다 닫아 놓고 되돌릴 길이 없으면 안 되니까.
+*/
+#dock {
+  background: var(--panel); border-left: 1px solid var(--line);
+  overflow: auto; padding: 10px; min-width: 0;
+}
+#dock.shut { display: none; }
+.drawer[hidden] { display: none; }
+.dhead {
+  font-size: 12px; color: var(--dim); letter-spacing: 1px;
+  margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+}
+
+#rail {
+  flex: 0 0 46px; display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 4px; background: var(--panel);
+  border-left: 1px solid var(--line);
+}
+.rbtn {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  width: 100%; padding: 7px 0; border: none; border-radius: 6px;
+  background: transparent; color: var(--dim); font-size: 9px; cursor: pointer;
+}
+.rbtn > span { font-size: 15px; line-height: 1; }
+.rbtn:hover { background: var(--hover); color: var(--ink); }
+.rbtn.on { background: var(--on-bg); color: var(--on-ink); }
+
 /* ── 영상 스크러빙 슬라이더 ─────────────────────────────────────── */
 #vseek { padding: 6px 10px 0; background: var(--panel); }
 #vslider {

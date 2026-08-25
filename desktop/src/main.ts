@@ -1627,6 +1627,14 @@ function wire() {
   document.querySelectorAll<HTMLElement>("#themeSeg button").forEach((b) => {
     b.onclick = () => { theme = b.dataset.theme as Theme; applyTheme(); };
   });
+  $("resetLayout").onclick = () => {
+    // 칸이 다 접혔거나 크기가 이상해졌을 때 빠져나오는 길.
+    // 색과 보관함 내용은 안 건드린다 — 배치만 되돌린다.
+    for (const k of ["layout.v2", "panes.v1", "centerDir.v2", "dock.v2"]) {
+      localStorage.removeItem(k);
+    }
+    location.reload();
+  };
   ($("mapRaw") as HTMLInputElement).onchange = (e) => {
     mapRaw = (e.target as HTMLInputElement).checked;
     applyTheme();
