@@ -456,3 +456,11 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
   border: 1px solid var(--line); color: var(--dim); vertical-align: middle;
 }
 .via.ble { border-color: var(--accent); color: var(--on-ink); }
+
+/* 연 세션의 정보 — 목록 안, 그 줄 바로 밑 */
+.detail {
+  padding: 8px 8px 12px; margin: -2px 0 8px;
+  border: 1px solid var(--line); border-top: none;
+  border-radius: 0 0 6px 6px; background: var(--bg);
+}
+.detail #meta { font-size: 11px; margin-bottom: 8px; }

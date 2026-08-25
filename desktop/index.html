@@ -82,10 +82,15 @@
       <!-- 서랍. 한 번에 하나만 열린다. -->
       <aside id="dock">
         <div class="drawer" data-tab="lib">
-          <div class="dhead">보관함</div>
+          <div class="dhead">세션</div>
           <div class="subbar">
             <input id="q" placeholder="선수 · 장소 · 메모 찾기" spellcheck="false" />
           </div>
+          <!--
+            목록과 그 세션의 정보를 한 서랍에 둔다. 정보는 "지금 연 세션의
+            속성" 이라 목록과 떼어 놓을 이유가 없었다. 연 세션의 줄이
+            그 자리에서 펼쳐진다.
+          -->
           <div id="files"></div>
         </div>
 
@@ -104,12 +109,6 @@
           </div>
           <div id="boards"></div>
           <div id="boardFiles"></div>
-        </div>
-
-        <div class="drawer" data-tab="info" hidden>
-          <div class="dhead">훈련 정보</div>
-          <div id="meta"></div>
-          <div id="details"></div>
         </div>
 
         <div class="drawer" data-tab="mark" hidden>
@@ -142,9 +141,8 @@
 
       <!-- 아이콘 줄. 늘 보인다 — 무엇이 있는지 알아야 하니까. -->
       <nav id="rail">
-        <button class="rbtn on" data-tab="lib"   title="보관함"><span>▤</span>보관함</button>
+        <button class="rbtn on" data-tab="lib"   title="세션"><span>▤</span>세션</button>
         <button class="rbtn"    data-tab="board" title="보드"><span>◈</span>보드</button>
-        <button class="rbtn"    data-tab="info"  title="훈련 정보"><span>ⓘ</span>정보</button>
         <button class="rbtn"    data-tab="mark"  title="마킹"><span>⚑</span>마킹</button>
         <span style="flex: 1"></span>
         <button class="rbtn"    data-tab="set"   title="설정"><span>⚙</span>설정</button>

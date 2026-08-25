@@ -30,6 +30,8 @@ let marks: tl.Mark[] = [];
 let fileMarks: number[] = [];
 /** 지도에 그릴 항적. 위성을 잡은 줄만 들어 있다 */
 let track: TrackPoint[] = [];
+/** 파일 요약(줄 수, Hz, IMU 종류…). 정보를 그릴 때마다 다시 넣는다 */
+let metaHtml = "";
 let view: tl.View = { from: 0, to: 1 };
 let fullSpan: tl.View = { from: 0, to: 1 };
 /** 마우스가 있는 시각. 마우스를 떼면 사라진다 */
@@ -379,10 +381,13 @@ function renderHeader(s: hlog.Session, name: string, parseMs: number, bytes: num
     ? new Date(h.utcStart * 1000).toLocaleString()
     : "위성을 못 잡은 세션";
 
-  // 위 띠에는 이름만. 나머지는 오른쪽 서랍(정보)에 있다.
+  // 위 띠에는 이름만. 나머지는 오른쪽 서랍(세션)에 있다.
   $("fileTag").textContent = `${name} · 세션 ${h.session}`;
 
-  $("meta").innerHTML = `
+  // ★ 담아 두고 정보를 그릴 때마다 다시 넣는다.
+  //   정보는 이제 목록 안에 있어서, 목록을 다시 그리면 이 자리도 새로
+  //   만들어진다. 여기서 한 번만 넣으면 다음 번에 사라진다.
+  metaHtml = `
     <div class="row"><b>${name}</b> <span class="dim">${(bytes / 1048576).toFixed(2)} MB · ${parseMs.toFixed(0)} ms 만에 읽음</span></div>
     <div class="row">세션 ${h.session} · 모듈 ${h.module} · ${when}</div>
     <div class="row dim">
@@ -1054,10 +1059,11 @@ function renderLibrary() {
       const who = e.sailor || e.title || `세션 ${e.session}`;
       const sub = [e.boatClass, e.venue, e.windKn && `${e.windKn}kn`]
         .filter(Boolean).join(" · ");
-      return `<div class="file ${e.id === openId ? "on" : ""}" data-id="${e.id}">
+      const open = e.id === openId;
+      return `<div class="file ${open ? "on" : ""}" data-id="${e.id}">
         <div>${e.starred ? "★ " : ""}<b>${esc(who)}</b> ${bad}</div>
         <div class="dim">${when} · ${dur} · ${esc(sub) || e.module.slice(-5)}</div>
-      </div>`;
+      </div>` + (open ? `<div class="detail" id="details"></div>` : "");
     }).join("");
     return head + rows;
   }).join("");
@@ -1065,6 +1071,9 @@ function renderLibrary() {
   box.querySelectorAll<HTMLElement>(".file").forEach((el) => {
     el.onclick = () => openEntry(el.dataset.id!);
   });
+  // 연 세션의 줄 밑에 그 세션의 정보를 편다. 정보는 "지금 연 세션의 속성"
+  // 이라 목록과 떼어 놓을 이유가 없다.
+  renderDetails();
 }
 
 const esc = (v: string) =>
@@ -1102,8 +1111,16 @@ const FIELDS: [keyof lib.Entry, string, string][] = [
   ["notes", "메모", ""],
 ];
 
+/**
+ * 연 세션의 정보. **목록 안, 그 줄 바로 밑에 편다.**
+ *
+ * 예전에는 따로 서랍이 있었는데, 정보는 "지금 연 세션의 속성" 이라 목록과
+ * 떼어 놓을 이유가 없었다. 서랍을 갈아 끼우며 "이게 어느 세션 거였지" 를
+ * 되짚을 일도 없어진다.
+ */
 function renderDetails() {
-  const box = $("details");
+  const box = document.getElementById("details");
+  if (!box) return;                       // 목록에 연 세션이 없으면 자리도 없다
   const e = library.entries.find((x) => x.id === openId);
   if (!e) { box.innerHTML = ""; return; }
 
@@ -1113,6 +1130,7 @@ function renderDetails() {
       <span class="dim">${e.module} · 세션 ${e.session} · ${(e.bytes / 1048576).toFixed(2)} MB</span>
       ${e.verified ? "<span class='good'>검사 통과</span>" : "<span class='bad'>검사 실패</span>"}
     </div>
+    <div id="meta">${e.id === openId ? metaHtml : ""}</div>
     ${FIELDS.map(([k, label, ph]) => `
       <label class="drow"><span>${label}</span>
         <input data-k="${k}" value="${esc(String(e[k] ?? ""))}" placeholder="${ph}" />
@@ -1127,7 +1145,6 @@ function renderDetails() {
   });
   ($("star") as HTMLButtonElement).onclick = () => {
     library = lib.update(library, e.id, { starred: !e.starred });
-    renderDetails();
     renderSide();
   };
 }
@@ -1303,7 +1320,7 @@ async function fetchFile(name: string, size?: number) {
 // (Speed Over Ground, Heel …). 양옆에 서랍을 두면 가운데가 양쪽에서
 // 깎이는데, 타임라인은 높이보다 너비가 생명이다.
 
-type Tab = "lib" | "board" | "info" | "mark" | "set";
+type Tab = "lib" | "board" | "mark" | "set";
 const DOCK_KEY = "dock.v2";
 
 /** 지금 열린 서랍. null 이면 닫혀 있다. */
@@ -1330,7 +1347,6 @@ function hitTab(t: Tab) { showTab(tab === t ? null : t); }
 function renderTab(t: Tab) {
   if (t === "lib") renderLibrary();
   else if (t === "board") { renderBoards(); renderFileList(boardFiles); }
-  else if (t === "info") renderDetails();
   else if (t === "mark") renderMarkList();
   else renderTheme();
 }
@@ -1558,7 +1574,7 @@ function loadLayout() {
 
   const t = localStorage.getItem(DOCK_KEY);
   tab = t === "" ? null
-      : (t === "board" || t === "info" || t === "mark" || t === "set") ? t : "lib";
+      : (t === "board" || t === "mark" || t === "set") ? t : "lib";
 
   mountSplitters();
   watchSizes();
