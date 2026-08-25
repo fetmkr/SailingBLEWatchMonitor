@@ -188,6 +188,11 @@ function buildSeries(s: hlog.Session) {
   const sog = new Float32Array(s.nav.length);
   const cog = new Float32Array(s.nav.length);
   const sv = new Float32Array(s.nav.length);
+  const hdg = new Float32Array(s.nav.length);
+  const hacc = new Float32Array(s.nav.length);
+  const magX = new Float32Array(s.nav.length);
+  const magY = new Float32Array(s.nav.length);
+  const magZ = new Float32Array(s.nav.length);
   fileMarks = [];
   track = [];
   for (let i = 0; i < s.nav.length; i++) {
@@ -197,6 +202,26 @@ function buildSeries(s: hlog.Session) {
     sog[i] = r.sogKn ?? NaN;
     cog[i] = r.cogDeg ?? NaN;
     sv[i] = r.numSv;
+    hacc[i] = r.hAccM ?? NaN;
+    magX[i] = r.mag[0]; magY[i] = r.mag[1]; magZ[i] = r.mag[2];
+
+    // 방위(HDG). **보드와 같은 식을 쓴다** — atan2(자력Y, 자력X).
+    // [확인: firmware-rak/src/main.cpp 의 headingDeg()]
+    //
+    // ★ 아직 거친 값이다. 두 가지가 빠져 있다.
+    //     1) 기울기 보정 — 배가 기울면 방위가 틀어진다
+    //     2) 자기 편각   — 자북과 진북의 차이 (한국은 약 8도 서편)
+    //   보드도 같은 상태다. 보정을 넣을 때 양쪽을 같이 고쳐야 한다.
+    //
+    // 자력계가 죽어 세 축이 다 0 이면 방위가 아니라 "모름" 이다.
+    if (r.mag[0] === 0 && r.mag[1] === 0 && r.mag[2] === 0) {
+      hdg[i] = NaN;
+    } else {
+      let h = Math.atan2(r.mag[1], r.mag[0]) * 180 / Math.PI;
+      if (h < 0) h += 360;
+      hdg[i] = h;
+    }
+
     if (r.event & 0x01) fileMarks.push(r.ms - t0);
     // 지도에 그릴 항적. 위성을 못 잡은 줄은 건너뛴다 — 없는 자리를 0,0 으로
     // 채우면 배가 아프리카 앞바다(위도 0, 경도 0)를 지나간 것처럼 보인다.
@@ -214,7 +239,11 @@ function buildSeries(s: hlog.Session) {
   const imuX = new Float64Array(s.imu.length);
   const heel = new Float32Array(s.imu.length);
   const pitch = new Float32Array(s.imu.length);
+  const gx = new Float32Array(s.imu.length);
+  const gy = new Float32Array(s.imu.length);
   const gz = new Float32Array(s.imu.length);
+  const ax_ = new Float32Array(s.imu.length);
+  const ay_ = new Float32Array(s.imu.length);
   const az = new Float32Array(s.imu.length);
   for (let i = 0; i < s.imu.length; i++) {
     const r = s.imu[i];
@@ -227,8 +256,8 @@ function buildSeries(s: hlog.Session) {
     const mag = Math.hypot(ax, ay, az_) || 1;
     heel[i] = (Math.asin(clamp((hSign * a[hAxis]) / mag)) * 180) / Math.PI - hOff;
     pitch[i] = (Math.asin(clamp((pSign * a[pAxis]) / mag)) * 180) / Math.PI - pOff;
-    gz[i] = r.gyr[2];
-    az[i] = az_;
+    gx[i] = r.gyr[0]; gy[i] = r.gyr[1]; gz[i] = r.gyr[2];
+    ax_[i] = ax; ay_[i] = ay; az[i] = az_;
   }
 
   // 이름은 영어가 기본이다. 클래스도 대회도 영어로 돌아가고, 코치가 다른
@@ -244,10 +273,36 @@ function buildSeries(s: hlog.Session) {
       color: "#9d7bff", xs: imuX, ys: gz, zeroCentered: true },
     { code: "HEAVE", name: n("HEAVE", "Vertical Accel"), unit: "g",
       color: "#5ad19a", xs: imuX, ys: az },
+    // 방위(HDG)와 침로(COG)는 나란히 둔다. **둘의 차이가 요트에서 핵심이다** —
+    // 뱃머리가 향한 쪽과 배가 실제로 간 쪽이 다르면 그게 조류나 옆미끄러짐이다.
+    { code: "HDG",   name: n("HDG", "Heading"), unit: "deg",
+      color: "#ffd166", xs: navX, ys: hdg },
     { code: "COG",   name: n("COG", "Course Over Ground"), unit: "deg",
       color: "#77d4e8", xs: navX, ys: cog },
     { code: "SAT",   name: n("SAT", "Satellites"), unit: "count",
       color: "#8a8a8a", xs: navX, ys: sv },
+
+    // ── 아래는 기본으로 접혀 있다 ──
+    //
+    // 폰·워치가 보여주는 것을 여기서도 다 볼 수 있어야 한다. 다만 늘 펴
+    // 두면 열여섯 줄이라 하나하나가 납작해진다. 필요할 때 ▸ 를 눌러 편다.
+    // 접힘은 기억되니 한 번 펴 두면 다음에도 펴져 있다.
+    { code: "HACC",  name: n("HACC", "Position Accuracy"), unit: "m",
+      color: "#b0a0d0", xs: navX, ys: hacc },
+    { code: "ACCX",  name: n("ACCX", "Accel X"), unit: "g",
+      color: "#ff9f7a", xs: imuX, ys: ax_, zeroCentered: true },
+    { code: "ACCY",  name: n("ACCY", "Accel Y"), unit: "g",
+      color: "#ffb3a0", xs: imuX, ys: ay_, zeroCentered: true },
+    { code: "GYRX",  name: n("GYRX", "Roll Rate"), unit: "deg/s",
+      color: "#b39dff", xs: imuX, ys: gx, zeroCentered: true },
+    { code: "GYRY",  name: n("GYRY", "Pitch Rate"), unit: "deg/s",
+      color: "#c9b8ff", xs: imuX, ys: gy, zeroCentered: true },
+    { code: "MAGX",  name: n("MAGX", "Mag X"), unit: "uT",
+      color: "#7ad4b0", xs: navX, ys: magX, zeroCentered: true },
+    { code: "MAGY",  name: n("MAGY", "Mag Y"), unit: "uT",
+      color: "#8fdcc0", xs: navX, ys: magY, zeroCentered: true },
+    { code: "MAGZ",  name: n("MAGZ", "Mag Z"), unit: "uT",
+      color: "#a4e4d0", xs: navX, ys: magZ, zeroCentered: true },
   ];
   applyRowsShut();   // 접어 둔 줄을 새 파일에도 그대로 적용한다
 }
@@ -340,11 +395,33 @@ const n = (code: string, def: string) => names[code] ?? def;
 //
 // 일곱 줄을 다 펴 두면 하나하나가 납작하다. 지금 보려는 것만 펴 두면 그 줄이
 // 화면을 다 쓴다. 접은 줄은 이름만 남는다 — 사라지면 되돌릴 길이 없다.
+//
+// 폰·워치가 보여주는 것을 여기서도 다 볼 수 있게 열여섯 줄을 뒀다. 다만
+// 늘 펴 두면 하나하나가 납작하다. 원본 축들은 기본으로 접어 둔다 —
+// 필요할 때 펴면 되고, 한 번 펴면 다음에도 펴져 있다.
+const SHUT_BY_DEFAULT = [
+  "HACC", "ACCX", "ACCY", "GYRX", "GYRY", "MAGX", "MAGY", "MAGZ",
+];
+
 let rowsShut: Record<string, boolean> = {};
-try { rowsShut = JSON.parse(localStorage.getItem(SHUT_KEY) ?? "{}"); } catch { /* 처음 */ }
+try {
+  const saved = localStorage.getItem(SHUT_KEY);
+  rowsShut = saved ? JSON.parse(saved)
+                   : Object.fromEntries(SHUT_BY_DEFAULT.map((c) => [c, true]));
+} catch { /* 처음 */ }
 
 function applyRowsShut() {
-  for (const s of series) s.collapsed = !!rowsShut[s.code];
+  // 나중에 더한 줄은 저장값에 없다. 그런 줄은 기본대로 접어 둔다 —
+  // 예전에 쓰던 사람이 갑자기 열여섯 줄을 마주하지 않게.
+  let changed = false;
+  for (const s of series) {
+    if (!(s.code in rowsShut) && SHUT_BY_DEFAULT.includes(s.code)) {
+      rowsShut[s.code] = true;
+      changed = true;
+    }
+    s.collapsed = !!rowsShut[s.code];
+  }
+  if (changed) localStorage.setItem(SHUT_KEY, JSON.stringify(rowsShut));
 }
 
 function toggleRow(i: number) {

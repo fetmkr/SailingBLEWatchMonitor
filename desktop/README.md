@@ -267,6 +267,34 @@ Saleae Logic 2 를 참고했다.
 `timeline.ts` 가 `--tl-band` 같은 이름으로 가져간다. 그래서 판을 바꾸면
 그림도 같이 따라온다.
 
+## 무엇을 그리나 — 폰·워치와 같게
+
+폰과 워치가 BLE 로 받아 보는 것을 여기서도 다 볼 수 있다 (배터리만 뺐다 —
+훈련을 되돌아볼 때 쓸 일이 없다).
+
+늘 펴 두는 여덟 줄
+
+```
+SOG   Heel   Trim   Yaw Rate   Vertical Accel   HDG   COG   Satellites
+```
+
+접어 둔 여덟 줄 — 원본 축과 진단용. ▸ 를 누르면 펴진다
+
+```
+Position Accuracy   Accel X/Y   Roll Rate   Pitch Rate   Mag X/Y/Z
+```
+
+### HDG 와 COG 를 나란히 두는 이유
+
+**뱃머리가 향한 쪽(HDG)과 배가 실제로 간 쪽(COG)이 다르면, 그 차이가
+조류나 옆미끄러짐이다.** 요트에서 핵심 값이라 붙여 뒀다.
+
+방위는 보드와 **같은 식**으로 셈한다 — `atan2(자력Y, 자력X)`.
+[확인: firmware-rak/src/main.cpp 의 headingDeg()]
+
+★ 아직 거친 값이다. 기울기 보정과 자기 편각(한국 약 8도 서편)이 빠져 있다.
+보드도 같은 상태다. 보정을 넣을 때 양쪽을 같이 고쳐야 한다.
+
 ## 커서 — 훑기와 고정
 
 ```
