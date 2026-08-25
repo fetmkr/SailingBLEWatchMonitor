@@ -119,16 +119,19 @@
 
         <div class="drawer" data-tab="set" hidden>
           <div class="dhead">설정</div>
-          <div class="srow">
-            <span>화면</span>
-            <div class="seg" id="themeSeg">
-              <button data-theme="dark">어둡게</button>
-              <button data-theme="light">밝게</button>
-              <button data-theme="auto">맥 따라</button>
-            </div>
+          <div class="srow"><span>화면</span></div>
+          <div class="segv" id="themeSeg">
+            <button data-theme="ink"><b>잉크</b><span>중립 검정 · 로고 파랑을 점으로</span></button>
+            <button data-theme="sea"><b>심해</b><span>남색 어둠 · 요트 계기 쪽</span></button>
+            <button data-theme="paper"><b>종이</b><span>밝은 쪽 · 햇빛 아래서</span></button>
+            <button data-theme="electric"><b>전기</b><span>파랑을 면으로</span></button>
+            <button data-theme="auto"><b>맥 따라</b><span>밝으면 종이, 어두우면 방금 고른 어두운 판</span></button>
           </div>
-          <div class="dim" style="font-size:12px; margin-top:6px">
-            맥 따라 를 고르면 시스템 설정을 그대로 씁니다.
+
+          <div class="srow" style="margin-top:14px">
+            <span>지도</span>
+            <label class="chk"><input id="mapRaw" type="checkbox" />
+              색을 그대로 (어두운 판에서 안 누름)</label>
           </div>
         </div>
       </aside>

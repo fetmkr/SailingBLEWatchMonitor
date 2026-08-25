@@ -1119,24 +1119,45 @@ function renderTab(t: Tab) {
 /** 어느 서랍이 열려 있든, 바뀐 곳만 다시 그린다. */
 function renderSide() { if (tab) renderTab(tab); }
 
-// ── 어둡게 / 밝게 ───────────────────────────────────────────────────────
+// ── 색 판 고르기 ────────────────────────────────────────────────────────
+//
+// 넷을 둔다. 잉크·심해·전기는 어둡고 종이는 밝다.
+//
+// 로고가 순수 파랑에 흰색이다 (brand/FETMMarine.png). 파랑기 도는 회색
+// 배경을 쓰면 그 파랑이 죽는다. 그래서 넷 다 그 파랑을 살리는 쪽으로 짰다.
 //
 // 타임라인은 캔버스라 CSS 가 안 먹는다. 색을 styles.css 한 군데에 모아 두고
 // timeline.ts 가 거기서 읽어 간다. 그래서 여기서는 data-theme 만 바꾸고
 // 다시 그리라고 시키면 된다.
-//
-// "맥 따라" 는 시스템 설정을 보고 dark/light 중 하나를 골라 박는다. 그래야
-// CSS 에 두 벌만 있으면 된다. 사람이 맥 설정을 바꾸면 곧바로 따라간다.
-type Theme = "dark" | "light" | "auto";
-const THEME_KEY = "theme.v1";
-let theme: Theme = (localStorage.getItem(THEME_KEY) as Theme) ?? "auto";
+type Theme = "ink" | "sea" | "paper" | "electric" | "auto";
+const THEMES: Theme[] = ["ink", "sea", "paper", "electric", "auto"];
+const THEME_KEY = "theme.v2";
+const DARK_KEY = "themeDark.v1";
+const MAPRAW_KEY = "mapRaw.v1";
+
+function readTheme(): Theme {
+  const v = localStorage.getItem(THEME_KEY);
+  return THEMES.includes(v as Theme) ? (v as Theme) : "auto";
+}
+let theme: Theme = readTheme();
+/** 맥이 어두울 때 쓸 판. 사람이 마지막으로 고른 어두운 판을 기억한다. */
+let darkPick: Theme =
+  (localStorage.getItem(DARK_KEY) as Theme) ?? "sea";
+let mapRaw = localStorage.getItem(MAPRAW_KEY) === "1";
 
 const sysLight = matchMedia("(prefers-color-scheme: light)");
 
 function applyTheme() {
-  const real = theme === "auto" ? (sysLight.matches ? "light" : "dark") : theme;
+  const real = theme !== "auto" ? theme
+             : sysLight.matches ? "paper" : darkPick;
   document.documentElement.dataset.theme = real;
+  document.documentElement.dataset.map = mapRaw ? "raw" : "";
+  if (theme !== "auto" && theme !== "paper") {
+    darkPick = theme;
+    localStorage.setItem(DARK_KEY, theme);
+  }
   localStorage.setItem(THEME_KEY, theme);
+  localStorage.setItem(MAPRAW_KEY, mapRaw ? "1" : "0");
   renderTheme();
   // 캔버스는 스스로 다시 안 그린다. 색을 새로 읽게 시킨다.
   //
@@ -1149,6 +1170,8 @@ function renderTheme() {
   document.querySelectorAll<HTMLElement>("#themeSeg button").forEach((b) => {
     b.classList.toggle("on", b.dataset.theme === theme);
   });
+  const chk = document.getElementById("mapRaw") as HTMLInputElement | null;
+  if (chk) chk.checked = mapRaw;
 }
 
 sysLight.addEventListener("change", () => { if (theme === "auto") applyTheme(); });
@@ -1586,6 +1609,10 @@ function wire() {
   document.querySelectorAll<HTMLElement>("#themeSeg button").forEach((b) => {
     b.onclick = () => { theme = b.dataset.theme as Theme; applyTheme(); };
   });
+  ($("mapRaw") as HTMLInputElement).onchange = (e) => {
+    mapRaw = (e.target as HTMLInputElement).checked;
+    applyTheme();
+  };
   ($("q") as HTMLInputElement).oninput = (e) => {
     query = (e.target as HTMLInputElement).value;
     renderLibrary();

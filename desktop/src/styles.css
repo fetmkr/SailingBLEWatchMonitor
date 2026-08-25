@@ -1,56 +1,74 @@
 /*
-  색표.
+  색표 — 네 벌.
 
   타임라인은 캔버스라 CSS 가 안 먹는다. 그래서 timeline.ts 가 여기 값을
-  손으로 읽어 간다 (--tl-* 가 그것이다). 색을 여기 한 군데 모아 두면
-  어둡게·밝게를 바꿀 때 그림도 같이 따라온다.
+  손으로 읽어 간다 (--tl-* 가 그것이다). 색을 한 군데 모아 두면 판을 바꿀 때
+  그림도 같이 따라온다.
 
-  "맥 따라" 는 JS 가 시스템 설정을 보고 dark/light 중 하나를 골라
-  data-theme 에 박는다. 그래서 CSS 에는 두 벌만 있으면 된다.
+  판은 설정 서랍에서 고르고, main.ts 가 data-theme 에 박는다.
+  "맥 따라" 도 결국 여기 넷 중 하나를 고른 것이다.
+
+  로고가 순수 파랑(#0000FF)에 흰색이다 (brand/FETMMarine.png). 파랑기 도는
+  회색 배경을 쓰면 그 파랑이 죽는다. 그래서 잉크·전기는 파랑기를 뺀 검정,
+  심해는 아예 남색으로 밀고, 종이는 로고 파랑을 그대로 쓴다.
 */
-:root, :root[data-theme="dark"] {
-  --bg: #14161a;
-  --panel: #1b1e24;
-  --ink: #e6e8ec;
-  --dim: #8b919a;
-  --grid: var(--grid);
-  --line: var(--grid);
-  --hover: var(--hover);
-  --btn: var(--hover);
-  --btn-hover: var(--btn-hover);
-  --input: #101317;
-  --tl-band: #181b21;
-  --tl-plot: #0b0e12;
-  --tl-thumb: #4a5160;
-  --mark: #f0a020;
-  --pin: #4ea1ff;
-  --accent: var(--accent);
-  --on-bg: var(--on-bg);
-  --on-ink: var(--on-ink);
+
+/* ── 잉크 — 중립 검정. 로고 파랑을 점 하나로 ─────────────────────── */
+:root, :root[data-theme="ink"] {
+  --bg: #0c0d10;      --panel: #141519;
+  --ink: #e8e9ec;     --dim: #8a8f98;
+  --grid: #24262c;    --line: #24262c;
+  --hover: #1c1e24;   --btn: #1c1e24;   --btn-hover: #24272e;
+  --input: #0a0b0e;
+  --tl-band: #101115; --tl-plot: #08090c; --tl-thumb: #454a55;
+  --mark: #f0a020;    --pin: #4d5bff;
+  --accent: #2b3bff;  --on-bg: #1c2260;  --on-ink: #9aa6ff;
+  --map-filter: brightness(.82) saturate(.9);
   color-scheme: dark;
 }
 
-:root[data-theme="light"] {
-  --bg: #f4f5f7;
-  --panel: #ffffff;
-  --ink: #1c2128;
-  --dim: #6b7280;
-  --grid: #dfe3e8;
-  --line: #d7dbe0;
-  --hover: #eceff3;
-  --btn: #f0f2f5;
-  --btn-hover: #e3e7ec;
+/* ── 심해 — 남색 어둠. 요트 계기가 쓰는 쪽 ───────────────────────── */
+:root[data-theme="sea"] {
+  --bg: #07101c;      --panel: #0d1928;
+  --ink: #dce6f2;     --dim: #7d93ab;
+  --grid: #1b2c40;    --line: #1b2c40;
+  --hover: #142234;   --btn: #142234;   --btn-hover: #1b2c40;
+  --input: #050c15;
+  --tl-band: #0a1522; --tl-plot: #050d16; --tl-thumb: #35506e;
+  --mark: #ffb020;    --pin: #00d3ff;
+  --accent: #00b4dc;  --on-bg: #113349;  --on-ink: #6fe6ff;
+  --map-filter: brightness(.78) saturate(.85) hue-rotate(-6deg);
+  color-scheme: dark;
+}
+
+/* ── 종이 — 밝은 쪽. 햇빛 아래서 읽는다. 로고 파랑을 그대로 ──────── */
+:root[data-theme="paper"] {
+  --bg: #f7f5f1;      --panel: #ffffff;
+  --ink: #16181d;     --dim: #6b7280;
+  --grid: #e3e0da;    --line: #dcd8d0;
+  --hover: #efece6;   --btn: #f0ede7;   --btn-hover: #e5e1d9;
   --input: #ffffff;
-  --tl-band: #f0f2f5;
-  --tl-plot: #ffffff;
-  --tl-thumb: #b7bec9;
-  --mark: #c2700a;
-  --pin: #1668d6;
-  --accent: #1668d6;
-  --on-bg: #dbe8fb;
-  --on-ink: #1451a8;
+  --tl-band: #f1eee8; --tl-plot: #ffffff; --tl-thumb: #b9b3a8;
+  --mark: #b5620a;    --pin: #0000ff;
+  --accent: #0000ff;  --on-bg: #dfe1ff;  --on-ink: #0000cc;
+  --map-filter: none;
   color-scheme: light;
 }
+
+/* ── 전기 — 파랑을 선이 아니라 면으로 ───────────────────────────── */
+:root[data-theme="electric"] {
+  --bg: #0a0a0c;      --panel: #131317;
+  --ink: #f2f3f5;     --dim: #8b8b95;
+  --grid: #232329;    --line: #232329;
+  --hover: #1b1b21;   --btn: #1b1b21;   --btn-hover: #232329;
+  --input: #08080a;
+  --tl-band: #0e0e12; --tl-plot: #060608; --tl-thumb: #4a4a55;
+  --mark: #ffcc00;    --pin: #4d5bff;
+  --accent: #0000ff;  --on-bg: #0000ff;  --on-ink: #ffffff;
+  --map-filter: brightness(.8) saturate(.95);
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; }
 html, body {
   margin: 0; height: 100%;
@@ -379,5 +397,21 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .seg button.on { background: var(--on-bg); color: var(--on-ink); border-color: var(--accent); }
 
 /* 밝게 놓았을 때 손봐야 하는 몇 군데 */
-:root[data-theme="light"] #videoPane .handles button { background: #ffffffcc; }
-:root[data-theme="light"] .vwrap { background: #111; }
+:root[data-theme="paper"] #videoPane .handles button { background: #ffffffdd; }
+
+/* 어두운 판에서는 지도가 혼자 하얗게 튄다. 조금 눌러 준다.
+   설정에서 끌 수 있다 — 색을 그대로 보고 싶을 때가 있다. */
+#map { filter: var(--map-filter, none); }
+:root[data-map="raw"] #map { filter: none; }
+
+/* 설정 — 세로로 늘어놓는 고르개. 이름 밑에 한 줄 설명이 붙는다. */
+.segv { display: flex; flex-direction: column; gap: 4px; }
+.segv button {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  text-align: left; padding: 7px 10px;
+}
+.segv button b { font-weight: 600; }
+.segv button span { font-size: 11px; color: var(--dim); }
+.segv button.on { background: var(--on-bg); color: var(--on-ink); border-color: var(--accent); }
+.segv button.on span { color: inherit; opacity: .8; }
+.chk { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); }
