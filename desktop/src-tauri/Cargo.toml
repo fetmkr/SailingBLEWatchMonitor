@@ -26,4 +26,5 @@ tauri-plugin-http = "2.5.9"
 tauri-plugin-fs = "2.5.1"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-blec = "0.12.0"
+tauri-plugin-serialplugin = "3.0.2"
 

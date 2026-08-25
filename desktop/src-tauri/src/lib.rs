@@ -11,6 +11,9 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        // USB 시리얼. 블루투스가 없는 컴퓨터에서 보드를 깨우는 데 쓴다.
+        // 보드는 BLE 와 시리얼이 같은 명령을 쓴다 (PROTOCOL.md §9).
+        .plugin(tauri_plugin_serialplugin::init())
         .invoke_handler(tauri::generate_handler![greet]);
 
     // BLE. 보드를 찾고 "WiFi 켜" 를 시키는 데 쓴다 (PROTOCOL.md §9).

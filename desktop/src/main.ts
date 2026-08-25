@@ -13,6 +13,7 @@ import * as hlog from "./hlog";
 import * as lib from "./library";
 import * as vid from "./video";
 import * as ble from "./ble";
+import * as usb from "./usb";
 import * as panes from "./panes";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import * as tl from "./timeline";
@@ -766,6 +767,122 @@ async function wake(b: ble.Board) {
   }
 }
 
+// ── USB 로 깨우기 ────────────────────────────────────────────────────────
+//
+// 블루투스가 없는 컴퓨터의 길이다. 보드는 BLE 와 시리얼이 같은 명령을 쓰니
+// 통로만 갈아 끼우면 된다 (PROTOCOL.md §9).
+//
+// ★ 보내는 명령은 `wifi ap` 다. `wifi on`(붙기)은 보드가 WiFi 이름과
+//   비밀번호를 알아야 하는데, 그걸 넣는 게 제일 어려운 일이다. AP 는 그게
+//   아예 필요 없고 주소도 늘 192.168.4.1 이다.
+let usbPorts: usb.Port[] = [];
+let usbBusy: string | null = null;
+
+function renderUsb() {
+  const box = $("usbList");
+  if (!usb.usable || !usbPorts.length) { box.innerHTML = ""; return; }
+  box.innerHTML =
+    `<div class="day">USB 로 꽂힌 것</div>` +
+    usbPorts.map((p) => {
+      const busy = usbBusy === p.path;
+      const extra = p.label.replace(p.path, "").replace(/^ — /, "");
+      return `<div class="file board" data-path="${p.path}">
+        <div><b>${p.likely ? "◈ " : ""}${p.path}</b>
+          <div class="dim">${extra || "&nbsp;"}</div></div>
+        <button class="wake" ${busy ? "disabled" : ""}>${busy ? "깨우는 중…" : "연결"}</button>
+      </div>`;
+    }).join("");
+
+  box.querySelectorAll<HTMLElement>(".board .wake").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const path = btn.closest<HTMLElement>(".board")?.dataset.path;
+      if (path) void wakeUsb(path);
+    };
+  });
+}
+
+async function scanUsb() {
+  if (!usb.usable) {
+    setStatus("USB 는 앱에서만 됩니다 (브라우저로 열려 있습니다).", "bad");
+    return;
+  }
+  setStatus("USB 를 살펴보는 중…");
+  try {
+    usbPorts = await usb.list();
+    renderUsb();
+    setStatus(usbPorts.length
+      ? `USB 로 ${usbPorts.length}개 보입니다. 보드를 고르세요.`
+      : "USB 로 꽂힌 것이 없습니다.", usbPorts.length ? "good" : "bad");
+  } catch (e) {
+    setStatus(`USB 를 못 봅니다 — ${e}`, "bad");
+  }
+}
+
+/**
+ * USB 로 깨운다.
+ *
+ * 보드가 AP 를 열면 사람이 맥 WiFi 를 그 이름으로 바꿔야 한다. 그건 앱이
+ * 대신 못 한다. 대신 **바뀌었는지 스스로 지켜보다 이어서 진행한다** —
+ * 사람은 WiFi 만 고르면 되고 주소를 칠 일이 없다.
+ */
+async function wakeUsb(path: string) {
+  if (usbBusy) { setStatus("이미 하나 깨우는 중입니다.", "bad"); return; }
+  usbBusy = path;
+  renderUsb();
+
+  let link: usb.Link | null = null;
+  try {
+    setStatus(`${path} 를 여는 중…`);
+    link = await usb.Link.open(path);
+
+    const st = await link.ask("wifi status");
+    if (!st) {
+      setStatus("보드가 대답이 없습니다. 우리 보드가 맞는지 보세요.", "bad");
+      return;
+    }
+    if (/ rec on/.test(st)) {
+      setStatus("기록 중입니다. 기록을 멈춘 뒤에 받으세요.", "bad");
+      return;
+    }
+
+    setProgress("보드가 자기 WiFi 를 여는 중…");
+    const reply = await link.ask("wifi ap", 10000);
+    const up = reply ? ble.parseWifiUp(reply) : null;
+    if (!up) {
+      setProgress(null);
+      setStatus(`알 수 없는 답 — ${reply ?? "없음"}`, "bad");
+      return;
+    }
+
+    // 여기서부터는 WiFi 다. 시리얼은 더 쓸 일이 없다.
+    ($("host") as HTMLInputElement).value = up.hosts[0];
+    setProgress(`맥 WiFi 를 "${up.ssid}" 로 바꾸세요 · 비밀번호 ${up.pass}`);
+    setStatus(`${up.ssid} 가 열렸습니다. 맥 WiFi 를 그것으로 바꾸면 이어서 갑니다.`);
+    byHand = true;
+    renderSide();
+
+    // 사람이 WiFi 를 바꿀 때까지 기다린다. 넉넉히 준다 — 비밀번호도 쳐야 한다.
+    const found = await waitForBoard(up.hosts, 90000);
+    setProgress(null);
+    if (!found) {
+      setStatus(`${up.hosts[0]} 이 아직 답이 없습니다. ` +
+                `WiFi 를 "${up.ssid}" 로 바꾼 뒤 목록을 눌러 보세요.`, "bad");
+      return;
+    }
+    setStatus(`준비됐습니다 — ${found}`, "good");
+    keepAliveStart();
+    await listBoard();
+  } catch (e) {
+    setProgress(null);
+    setStatus(`USB — ${e}`, "bad");
+  } finally {
+    try { await link?.close(); } catch { /* 이미 닫혔으면 그만 */ }
+    usbBusy = null;
+    renderUsb();
+  }
+}
+
 /**
  * 보드가 답할 때까지 두드려 본다. 먼저 답하는 주소를 쓴다.
  *
@@ -1141,7 +1258,7 @@ function hitTab(t: Tab) { showTab(tab === t ? null : t); }
 
 function renderTab(t: Tab) {
   if (t === "lib") renderLibrary();
-  else if (t === "board") { renderBoards(); renderFileList(boardFiles); }
+  else if (t === "board") { renderBoards(); renderUsb(); renderFileList(boardFiles); }
   else if (t === "info") renderDetails();
   else if (t === "mark") renderMarkList();
   else renderTheme();
@@ -1532,6 +1649,7 @@ function wire() {
   $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
   // ── 보드 찾기 단추들 ──
   $("btScan").onclick = () => void scanBoards();
+  $("usbScan").onclick = () => void scanUsb();
   $("btDrop").onclick = () => void sleepBoard();
   $("byHand").onclick = () => {
     byHand = !byHand;

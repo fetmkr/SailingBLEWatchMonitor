@@ -2706,15 +2706,6 @@ static void handleCommand(String line) {
         String arg = line.substring(4);
         arg.trim(); arg.toLowerCase();
 
-        if (arg == "ap") {
-            if (hlog::recording()) {
-                Serial.println("[NET] 기록 중입니다. rec off 먼저 하세요.");
-                Serial.println("      파일을 보내는 동안 100 Hz 기록이 끊깁니다.");
-                return;
-            }
-            netsrv::startAP();
-            return;
-        }
         if (arg == "join") {
             if (hlog::recording()) {
                 Serial.println("[NET] 기록 중입니다. rec off 먼저 하세요.");
@@ -2731,7 +2722,7 @@ static void handleCommand(String line) {
         // 아래는 BLE 설정 통로와 **같은 말**을 쓴다. 앱 없이 여기서 시험한다.
         //   wifi ssid <이름> / wifi pass <비번> / wifi scan / wifi status
         if (arg.startsWith("ssid ") || arg.startsWith("pass ") ||
-            arg == "scan" || arg == "status" || arg == "on" ||
+            arg == "scan" || arg == "status" || arg == "on" || arg == "ap" ||
             arg.startsWith("idle ")) {
             // 대소문자를 이미 내렸다. 이름·비밀번호는 원문이 필요하다.
             String orig = line.substring(5);
