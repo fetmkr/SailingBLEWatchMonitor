@@ -23,7 +23,6 @@
   --tl-band: #101115; --tl-plot: #08090c; --tl-thumb: #454a55;
   --mark: #f0a020;    --pin: #4d5bff;
   --accent: #2b3bff;  --on-bg: #1c2260;  --on-ink: #9aa6ff;
-  --map-filter: brightness(.82) saturate(.9);
   color-scheme: dark;
 }
 
@@ -31,12 +30,18 @@
    timeline 이 캔버스라 CSS 가 안 먹는다. main.ts 가 여기서 읽어 간다.
    판마다 다르게 하고 싶으면 그 판에서 덮어쓰면 된다 (vivid 참조). */
 :root {
-  --s-sog: #4ea1ff;  --s-hdg: #ffd166;  --s-cog: #77d4e8;
-  --s-heel: #ff7a59; --s-trim: #ffc857;
-  --s-accx: #ff9f7a; --s-accy: #ffb3a0; --s-accz: #5ad19a;
-  --s-gyrx: #b39dff; --s-gyry: #c9b8ff; --s-gyrz: #9d7bff;
-  --s-magx: #7ad4b0; --s-magy: #8fdcc0; --s-magz: #a4e4d0;
-  --s-sat: #8a8a8a;  --s-hacc: #b0a0d0; --s-batt: #d0c060;
+  /* 선 색은 진하게 간다. 연한 색(파스텔)은 흰 종이에서 날아가고
+     검은 바탕에서도 힘이 없다. 어두운 판과 밝은 판 양쪽에서 다 읽히는
+     진한 색으로 골랐다.
+
+     세 축은 "계기판" 판과 같은 규칙이다 — X 빨강, Y 초록, Z 파랑.
+     3차원 축을 그릴 때 세상이 쓰는 규칙이라 따로 외울 게 없다. */
+  --s-sog: #00c853;  --s-hdg: #ffab00;  --s-cog: #00b8d4;
+  --s-heel: #ff1744; --s-trim: #d500f9;
+  --s-accx: #ff1744; --s-accy: #00c853; --s-accz: #2979ff;
+  --s-gyrx: #ff1744; --s-gyry: #00c853; --s-gyrz: #2979ff;
+  --s-magx: #ff1744; --s-magy: #00c853; --s-magz: #2979ff;
+  --s-sat: #78909c;  --s-hacc: #d500f9; --s-batt: #ffab00;
 }
 
 /* ── 계기판 — 새까만 바탕에 쨍한 색 ────────────────────────────────
@@ -50,17 +55,29 @@
   --hover: #16161a;   --btn: #16161a;   --btn-hover: #22222a;
   --input: #000000;
   --tl-band: #0a0a0c; --tl-plot: #000000; --tl-thumb: #4a4a55;
-  --mark: #ffb300;    --pin: #00e5ff;
-  --accent: #00e5ff;  --on-bg: #003a44;  --on-ink: #6ff2ff;
-  --map-filter: brightness(.7) saturate(1.1) contrast(1.05);
+  --mark: #ffff00;    --pin: #ffffff;
+  /* 고른 자리는 로고 파랑으로 꽉 채운다 — "전기" 판과 같다.
+     선 색이 쨍한 판이라 장식이 어중간한 색이면 데이터와 싸운다.
+     아예 다른 색(순수 파랑)으로 못 박으면 안 헷갈린다. */
+  --accent: #0000ff;  --on-bg: #0000ff;  --on-ink: #ffffff;
   color-scheme: dark;
 
-  --s-sog: #00ff5f;  --s-hdg: #ffd400;  --s-cog: #00e5ff;
-  --s-heel: #ff2d2d; --s-trim: #ff9500;
-  --s-accx: #ff2d95; --s-accy: #ff7ac0; --s-accz: #00ff9d;
-  --s-gyrx: #b46bff; --s-gyry: #d7a6ff; --s-gyrz: #8a2bff;
-  --s-magx: #00d0a0; --s-magy: #35e0bb; --s-magz: #6af0d4;
-  --s-sat: #c8c8c8;  --s-hacc: #ff7ac0; --s-batt: #ffe066;
+  /* ── 순색만 쓴다 ──
+     빨강·초록·파랑(RGB)과 청록·자홍·노랑(CMY), 그리고 흰색. 섞은 색을
+     안 쓰니 화면에서 서로 절대 안 헷갈린다.
+
+     ★ 순수 파랑(#0000FF)은 검은 바탕에서 거의 안 보인다. 밝기가 너무
+       낮아서다. 그래서 선에는 안 쓰고 **고른 자리를 채우는 데만** 쓴다.
+       세 축의 Z 는 파랑 대신 청록으로 간다.
+
+     세 축은 늘 같은 규칙이다 — X 빨강, Y 초록, Z 청록. 가속·자이로·자력계가
+     같은 색을 쓰지만 줄이 따로라 헷갈리지 않고, 규칙이 하나라 외우기 쉽다. */
+  --s-sog: #00ff00;  --s-hdg: #ffff00;  --s-cog: #00ffff;
+  --s-heel: #ff0000; --s-trim: #ff00ff;
+  --s-accx: #ff0000; --s-accy: #00ff00; --s-accz: #00ffff;
+  --s-gyrx: #ff0000; --s-gyry: #00ff00; --s-gyrz: #00ffff;
+  --s-magx: #ff0000; --s-magy: #00ff00; --s-magz: #00ffff;
+  --s-sat: #ffffff;  --s-hacc: #ff00ff; --s-batt: #ffff00;
 }
 
 /* ── 심해 — 남색 어둠. 요트 계기가 쓰는 쪽 ───────────────────────── */
@@ -73,7 +90,6 @@
   --tl-band: #0a1522; --tl-plot: #050d16; --tl-thumb: #35506e;
   --mark: #ffb020;    --pin: #00d3ff;
   --accent: #00b4dc;  --on-bg: #113349;  --on-ink: #6fe6ff;
-  --map-filter: brightness(.78) saturate(.85) hue-rotate(-6deg);
   color-scheme: dark;
 }
 
@@ -87,7 +103,6 @@
   --tl-band: #f1eee8; --tl-plot: #ffffff; --tl-thumb: #b9b3a8;
   --mark: #b5620a;    --pin: #0000ff;
   --accent: #0000ff;  --on-bg: #dfe1ff;  --on-ink: #0000cc;
-  --map-filter: none;
   color-scheme: light;
 }
 
@@ -101,7 +116,6 @@
   --tl-band: #0e0e12; --tl-plot: #060608; --tl-thumb: #4a4a55;
   --mark: #ffcc00;    --pin: #4d5bff;
   --accent: #0000ff;  --on-bg: #0000ff;  --on-ink: #ffffff;
-  --map-filter: brightness(.8) saturate(.95);
   color-scheme: dark;
 }
 
@@ -483,10 +497,9 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 /* 밝게 놓았을 때 손봐야 하는 몇 군데 */
 :root[data-theme="paper"] #videoPane .handles button { background: #ffffffdd; }
 
-/* 어두운 판에서는 지도가 혼자 하얗게 튄다. 조금 눌러 준다.
-   설정에서 끌 수 있다 — 색을 그대로 보고 싶을 때가 있다. */
-#map { filter: var(--map-filter, none); }
-:root[data-map="raw"] #map { filter: none; }
+/* 지도는 늘 제 색으로 둔다.
+   어두운 판에서 하얗게 튄다고 눌러 봤는데, 바다와 뭍의 색이 흐려져서
+   오히려 못 읽었다. 지도는 지도대로 두는 편이 낫다. */
 
 /* 설정 — 세로로 늘어놓는 고르개. 이름 밑에 한 줄 설명이 붙는다. */
 .segv { display: flex; flex-direction: column; gap: 4px; }

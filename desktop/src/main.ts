@@ -1486,7 +1486,6 @@ type Theme = "ink" | "sea" | "paper" | "electric" | "vivid" | "auto";
 const THEMES: Theme[] = ["ink", "sea", "paper", "electric", "vivid", "auto"];
 const THEME_KEY = "theme.v2";
 const DARK_KEY = "themeDark.v1";
-const MAPRAW_KEY = "mapRaw.v1";
 
 function readTheme(): Theme {
   const v = localStorage.getItem(THEME_KEY);
@@ -1496,7 +1495,6 @@ let theme: Theme = readTheme();
 /** 맥이 어두울 때 쓸 판. 사람이 마지막으로 고른 어두운 판을 기억한다. */
 let darkPick: Theme =
   (localStorage.getItem(DARK_KEY) as Theme) ?? "sea";
-let mapRaw = localStorage.getItem(MAPRAW_KEY) === "1";
 
 const sysLight = matchMedia("(prefers-color-scheme: light)");
 
@@ -1504,13 +1502,11 @@ function applyTheme() {
   const real = theme !== "auto" ? theme
              : sysLight.matches ? "paper" : darkPick;
   document.documentElement.dataset.theme = real;
-  document.documentElement.dataset.map = mapRaw ? "raw" : "";
   if (theme !== "auto" && theme !== "paper") {
     darkPick = theme;
     localStorage.setItem(DARK_KEY, theme);
   }
   localStorage.setItem(THEME_KEY, theme);
-  localStorage.setItem(MAPRAW_KEY, mapRaw ? "1" : "0");
   renderTheme();
   // 선 색도 판마다 다르다. 다시 읽어서 새로 만든다.
   if (session) buildSeries(session);
@@ -1525,8 +1521,6 @@ function renderTheme() {
   document.querySelectorAll<HTMLElement>("#themeSeg button").forEach((b) => {
     b.classList.toggle("on", b.dataset.theme === theme);
   });
-  const chk = document.getElementById("mapRaw") as HTMLInputElement | null;
-  if (chk) chk.checked = mapRaw;
   renderDbgBtn();
 }
 
@@ -2007,10 +2001,6 @@ function wire() {
     localStorage.setItem(DEBUG_KEY, debugOn ? "1" : "0");
     if (session) { buildSeries(session); fitRows(); redraw(); }
     setStatus(debugOn ? "디버그 값을 켰습니다." : "디버그 값을 껐습니다.");
-  };
-  ($("mapRaw") as HTMLInputElement).onchange = (e) => {
-    mapRaw = (e.target as HTMLInputElement).checked;
-    applyTheme();
   };
   ($("q") as HTMLInputElement).oninput = (e) => {
     query = (e.target as HTMLInputElement).value;
