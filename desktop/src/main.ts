@@ -2353,6 +2353,21 @@ function wire() {
   addEventListener("beforeunload", () => { if (pinger) void sleepBoard(true); });
   addEventListener("dragover", (e) => e.preventDefault());
 
+  // 서랍에 더 볼 게 있으면 그쪽 가장자리를 흐리게 해서 알린다.
+  //
+  // 내용이 길면 서랍은 원래 위아래로 밀어서 본다. 그런데 아이패드는 손을
+  // 대야만 스크롤 막대가 잠깐 보인다. 설정 서랍이 "가운데" 줄에서 끊겨
+  // 있는데도 더 있는 줄 모르고 지나치게 된다. 흐린 가장자리는 가만히
+  // 있어도 보인다.
+  const dock = $("dock");
+  const markEdges = () => {
+    const more = dock.scrollHeight - dock.clientHeight;
+    dock.classList.toggle("moreDown", more > 2 && dock.scrollTop < more - 2);
+    dock.classList.toggle("moreUp", more > 2 && dock.scrollTop > 2);
+  };
+  dock.addEventListener("scroll", markEdges, { passive: true });
+  new ResizeObserver(markEdges).observe(dock);
+  markEdges();
 }
 
 wire();
@@ -2374,4 +2389,6 @@ if (import.meta.env.DEV) {
 
 // 만드는 중에는 시험용 데이터를 바로 띄운다. 배포판에서는 안 그런다.
 if (import.meta.env.DEV) loadSample();
+
+
 
