@@ -339,7 +339,14 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 .ghost { background: transparent; border-color: transparent; color: var(--dim); }
 .ghost:hover { background: var(--hover); }
 
-canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
+canvas {
+  flex: 1; width: 100%; min-height: 0; cursor: crosshair;
+  /* ★ 손가락으로 끌 수 있게 하려면 이게 있어야 한다.
+       이게 없으면 브라우저가 "화면을 미는 동작" 으로 먼저 가로채서 우리
+       코드까지 오지 않는다. 마우스로는 되는데 손가락으로만 안 되는
+       상태가 된다. 아이패드에서 커서 바가 안 끌린 이유가 이것이다. */
+  touch-action: none;
+}
 /* 값 읽기는 아래 상태 줄로 옮겼다. 데이터 칸 밑에 두면 그만큼 그림이 좁다. */
 #readout { font: var(--fs-sm) ui-monospace, SFMono-Regular, Menlo, monospace; }
 
