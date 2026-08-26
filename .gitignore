@@ -41,7 +41,22 @@ firmware-rak/src/idf_component.yml
 desktop/node_modules/
 desktop/dist/
 desktop/src-tauri/target/
-desktop/src-tauri/gen/
+
+# 아이패드·안드로이드용 프로젝트는 깃에 넣는다.
+#
+# 기준은 하나다. 손으로 만진 것이냐, 명령으로 다시 받을 수 있는 것이냐.
+# Xcode 에서 CoreBluetooth 프레임워크를 붙이거나 Info.plist 를 고치면
+# 그 결과가 gen/apple 안에 남는다. 이걸 빼 놓으면 다른 컴퓨터에서 그
+# 설정이 없어서 손으로 또 해야 한다.
+#
+# 받아오는 것만 뺀다. Pods 는 pod install 한 줄이면 다시 받는다.
+desktop/src-tauri/gen/schemas/
+desktop/src-tauri/gen/apple/Pods/
+desktop/src-tauri/gen/apple/Externals/
+desktop/src-tauri/gen/apple/build/
+desktop/src-tauri/gen/android/.gradle/
+desktop/src-tauri/gen/android/build/
+desktop/src-tauri/gen/android/app/build/
 desktop/fixtures/
 desktop/public/sample.HLG
 desktop/public/sample.mp4

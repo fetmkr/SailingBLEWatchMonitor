@@ -137,6 +137,14 @@ body { display: flex; flex-direction: column; }
 #topbar {
   display: flex; align-items: center; gap: 8px; flex: none;
   padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+
+  /* 아이패드에서는 위쪽에 시계와 배터리가 겹친다.
+     env(safe-area-inset-*) 는 기기가 알려 주는 "여기는 피하라" 는 값이다.
+     맥과 윈도에서는 0 이라 아무 일도 안 일어난다.
+     [확인: 아이패드 시뮬레이터에서 단추가 시계에 가려지는 것을 보고 넣었다] */
+  padding-top: calc(6px + env(safe-area-inset-top));
+  padding-left: calc(12px + env(safe-area-inset-left));
+  padding-right: calc(12px + env(safe-area-inset-right));
 }
 .sep { width: 1px; height: 18px; background: var(--line); }
 .sep { width: 1px; height: 18px; background: var(--line); }
@@ -169,6 +177,11 @@ input[type="checkbox"], input[type="radio"] {
   padding: 4px 12px; min-height: 26px;
   border-top: 1px solid var(--line); background: var(--panel);
   font-size: 12px; overflow: hidden; white-space: nowrap;
+
+  /* 아래쪽 홈 막대를 피한다. 위와 같은 이유다. */
+  padding-bottom: calc(4px + env(safe-area-inset-bottom));
+  padding-left: calc(12px + env(safe-area-inset-left));
+  padding-right: calc(12px + env(safe-area-inset-right));
 }
 #statusbar #readout { overflow: hidden; text-overflow: ellipsis; }
 
@@ -190,6 +203,26 @@ input[type="checkbox"], input[type="radio"] {
              min-width: 0; min-height: 0; }
 /* 칸 사이 나누개. panes.ts 가 붙어 있는 칸 사이마다 만들어 넣는다. */
 .gutter { background: var(--line); flex: none; position: relative; touch-action: none; }
+
+/* 손가락으로 만졌을 때 화면이 확대되지 않게.
+ *
+ * meta 태그만으로는 부족하다. WKWebView 가 그걸 무시하는 경우가 있어서
+ * 여기서도 막는다. pan-x pan-y 는 "밀어서 넘기는 건 되고 벌려서 키우는
+ * 건 안 된다" 는 뜻이다.
+ *
+ * -webkit-text-size-adjust 는 가로로 돌렸을 때 iOS 가 글자 크기를
+ * 제멋대로 키우는 것을 막는다. */
+html, body {
+  touch-action: pan-x pan-y;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+
+/* 글자를 길게 눌렀을 때 뜨는 선택 표시와 파란 깜빡임을 없앤다.
+ * 계기판이라 글자를 복사할 일이 없다. 입력칸만 예외로 둔다. */
+body { -webkit-user-select: none; user-select: none;
+       -webkit-tap-highlight-color: transparent; }
+input, textarea { -webkit-user-select: text; user-select: text; }
 .gutter.row { cursor: col-resize; }
 .gutter.col { cursor: row-resize; }
 .gutter:hover, .gutter.on { background: var(--accent); }
@@ -359,6 +392,10 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
   flex: 0 0 46px; display: flex; flex-direction: column; gap: 2px;
   padding: 6px 4px; background: var(--panel);
   border-left: 1px solid var(--line);
+
+  /* 오른쪽 끝에 붙어 있어서 가로로 눕힌 아이패드에서는
+     화면 둥근 모서리에 잘릴 수 있다. */
+  padding-right: calc(4px + env(safe-area-inset-right));
 }
 .rbtn {
   display: flex; flex-direction: column; align-items: center; gap: 2px;

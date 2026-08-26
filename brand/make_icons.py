@@ -161,6 +161,33 @@ def watch_icons():
     print(f"  {os.path.relpath(d, ROOT):58} {len(images)}장")
 
 
+def ios_project_icons():
+    """아이패드용 Tauri 프로젝트의 아이콘.
+
+    tauri ios init 이 만들어 놓은 Contents.json 을 그대로 두고 그림만
+    갈아 끼운다. 목록을 우리가 새로 쓰면 Tauri 가 다음에 다시 만들 때
+    어긋난다. 필요한 크기는 저 파일이 이미 다 적어 놨다.
+    """
+    import json
+    d = os.path.join(ROOT, "desktop/src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset")
+    cj = os.path.join(d, "Contents.json")
+    if not os.path.exists(cj):
+        print("  (아이패드 프로젝트가 아직 없습니다 — tauri ios init 먼저)")
+        return
+
+    n = 0
+    for e in json.load(open(cj))["images"]:
+        fn = e.get("filename")
+        if not fn:
+            continue
+        pt = float(e["size"].split("x")[0])
+        px = int(round(pt * float(e["scale"].rstrip("x"))))
+        # 앱스토어 아이콘은 투명한 곳이 있으면 안 된다.
+        render(px, alpha=False).save(os.path.join(d, fn))
+        n += 1
+    print(f"  {os.path.relpath(d, ROOT):58} {n}장")
+
+
 def main():
     # ── 아이폰 ────────────────────────────────────────────────────────
     # 앱스토어 아이콘은 투명한 곳이 있으면 안 된다. RGB 로 저장한다.
@@ -211,6 +238,10 @@ def main():
                    check=True)
     shutil.rmtree(iset)
     print(f"  {os.path.relpath(os.path.join(ic, 'icon.icns'), ROOT):58} 16 부터 1024 까지")
+
+    # ── 아이패드 (Tauri 프로젝트) ─────────────────────────────────────
+    print("아이패드 (Tauri)")
+    ios_project_icons()
 
     # ── 보기용 큰 그림 ────────────────────────────────────────────────
     write(os.path.join(ROOT, "brand/sailsight-1024.png"), render(1024))

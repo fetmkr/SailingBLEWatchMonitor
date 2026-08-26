@@ -2343,6 +2343,15 @@ function wire() {
   // 스스로 끈다. 창이 닫히는 중이라 답을 기다릴 수도 없다.
   addEventListener("beforeunload", () => { if (pinger) void sleepBoard(true); });
   addEventListener("dragover", (e) => e.preventDefault());
+
+  // 손가락 두 개로 벌려 화면을 키우는 것을 막는다.
+  //
+  // meta 태그와 touch-action 으로 막아 두었지만 사파리 계열은 이 셋을
+  // 따로 보내기도 한다. 계기판에서 화면이 통째로 커지면 돌아올 방법이
+  // 마땅치 않아서 여기서 한 번 더 막는다.
+  for (const ev of ["gesturestart", "gesturechange", "gestureend"]) {
+    addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+  }
 }
 
 wire();

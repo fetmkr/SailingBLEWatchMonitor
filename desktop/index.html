@@ -2,7 +2,20 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      화면 전체가 확대되지 않게 막는다.
+
+      손가락 두 개로 벌리거나 두 번 톡톡 치면 웹 화면은 원래 확대된다.
+      계기판에서는 이러면 안 된다. 그래프를 끌려다 화면이 커져 버리고,
+      돌아오는 방법도 마땅치 않다. 그래프를 넓게 보는 일은 앱 안의
+      시간축이 따로 맡는다.
+
+      viewport-fit=cover 는 화면 가장자리가 둥근 아이패드에서
+      바탕색이 끝까지 차게 한다.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0,
+                                   maximum-scale=1.0, user-scalable=no,
+                                   viewport-fit=cover" />
     <title>Sail Analyzer</title>
   </head>
   <body>
