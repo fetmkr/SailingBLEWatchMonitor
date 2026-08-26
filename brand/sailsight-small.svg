@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 242 242" width="242" height="242">
+  <!-- 작은 자리용. 56 픽셀보다 작으면 꺾쇠가 돛에 닿아 안 보인다.
+       그럴 때는 꺾쇠를 빼고 돛만 크게 쓴다. 끊는 것도 안 한다. -->
+  <rect width="242" height="242" fill="#000000"/>
+  <g stroke="#ffffff" stroke-width="20.2" fill="none" stroke-linecap="butt"
+     transform="translate(121 121) scale(1.55) translate(-115 -121)">
+    <path d="M140 68 V174"/>
+    <path d="M140 68 L90 174"/>
+  </g>
+</svg>

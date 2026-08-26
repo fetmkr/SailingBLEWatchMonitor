@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 242 242" width="242" height="242">
+  <!-- SailSight 마크.
+       꺾쇠 넷은 AI 가 무언가를 찾아냈을 때 치는 네모다.
+       그 안의 세로줄은 마스트, 끊긴 대각선은 돛 앞머리다.
+       끊긴 자리는 데이터 점으로도 읽힌다. -->
+  <rect width="242" height="242" fill="#000000"/>
+  <g stroke="#ffffff" stroke-width="6" fill="none">
+    <path d="M40 84 V40 H84"     stroke-linecap="square"/>
+    <path d="M158 40 H202 V84"   stroke-linecap="square"/>
+    <path d="M202 158 V202 H158" stroke-linecap="square"/>
+    <path d="M84 202 H40 V158"   stroke-linecap="square"/>
+    <path d="M140 68 V174"       stroke-linecap="butt"/>
+    <path d="M140 68 L90 174"    stroke-linecap="butt" stroke-dasharray="33.1 9"/>
+  </g>
+</svg>
