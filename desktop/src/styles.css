@@ -235,10 +235,14 @@ input[type="checkbox"], input[type="radio"] {
 /* ── 아래: 상태 한 줄 ────────────────────────────────────────────── */
 /* 시간 막대. 어느 칸을 접어도 늘 보인다. */
 #transport {
-  display: flex; align-items: center; gap: var(--sp3); flex: none;
-  padding: var(--sp2) var(--sp4);
+  display: flex; align-items: center; gap: var(--sp2); flex: none;
+  padding: var(--sp2) var(--sp4); flex-wrap: wrap;
   border-top: 1px solid var(--line); background: var(--panel);
 }
+#transport .grp { display: flex; gap: var(--sp1); flex: none; }
+#transport button:disabled { opacity: .35; cursor: default; }
+/* 안내 글은 제 줄에서 시작한다. 단추 사이에 끼면 지저분하다. */
+#transport #voff:not(:empty) { flex: 1 0 100%; }
 #transport #tslider { flex: 1; width: auto; min-width: 80px; }
 #transport #ttime { flex: none; }
 

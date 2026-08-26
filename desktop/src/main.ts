@@ -1853,9 +1853,16 @@ function renderVbar() {
   $("vtime").textContent =
     `${tl.formatDuration(v.currentTime * 1000)} / ${tl.formatDuration(dur * 1000)}`;
 
-  const sb = $("syncBtn");
+  // 싱크와 어긋남 맞추기는 아래 시간 막대에 있다. 영상이 없으면 할 일이
+  // 없으므로 흐리게 해서 못 누르게 한다. 자리는 비우지 않는다 — 있다가
+  // 없어지면 화면이 들썩이고, 그런 기능이 있다는 것도 안 보인다.
+  const sb = $("syncBtn") as HTMLButtonElement;
   sb.textContent = linked ? "싱크 ●" : "싱크";
   sb.className = linked ? "on" : "";
+  sb.disabled = !videoOn;
+  for (const id of ["n10", "n1", "p1", "p10"]) {
+    ($(id) as HTMLButtonElement).disabled = !videoOn;
+  }
 
   const sl = $("vslider") as HTMLInputElement;
   sl.disabled = !videoOn || dur <= 0;
@@ -2498,6 +2505,8 @@ function wire() {
 wire();
 loadLayout();
 redraw();
+// 영상이 아직 없으므로 싱크와 어긋남 맞추기를 흐리게 해 둔다.
+renderVbar();
 setStatus("파일을 열거나 보드에서 받으세요.");
 
 // 이 기기에서 뭐가 되는지 먼저 물어본다 (platform.ts 참고).

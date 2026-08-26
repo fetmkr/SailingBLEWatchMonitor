@@ -72,18 +72,9 @@
             <div id="vseek">
               <input id="vslider" type="range" min="0" max="1000" value="0" step="1" />
             </div>
+            <!-- 영상 자기 시간만 남긴다. 맞추는 단추들은 아래 시간 막대에 있다. -->
             <div id="vbar">
               <span id="vtime" class="mono dim">0:00 / 0:00</span>
-              <button id="syncBtn" title="지금 영상 화면과 타임라인 자리를 맞춰 물린다. 다시 누르면 푼다">싱크</button>
-              <!-- 넷은 한 덩어리다. 줄이 좁아지면 넷이 같이 아래로 내려간다.
-                   따로 흩어지면 "+10초" 만 혼자 떨어져서 깨져 보인다. -->
-              <span class="grp">
-                <button id="n10">−10초</button>
-                <button id="n1">−1초</button>
-                <button id="p1">+1초</button>
-                <button id="p10">+10초</button>
-              </span>
-              <span id="voff" class="mono dim"></span>
             </div>
           </div>
           <div id="mapPane">
@@ -205,6 +196,23 @@
       <span id="ttime" class="mono dim">0:00 / 0:00</span>
       <input id="tslider" type="range" min="0" max="1000" value="0" step="1"
              title="시간 옮기기" />
+
+      <span class="sep"></span>
+
+      <!-- 영상을 이 시간에 맞추는 것들.
+           영상이 없으면 흐려져서 안 눌린다. 자리를 비우지 않는 이유는,
+           있다가 없어지면 화면이 들썩이고 그런 기능이 있다는 것도 안 보여서다. -->
+      <button id="syncBtn"
+              title="지금 영상 화면과 타임라인 자리를 맞춰 물린다. 다시 누르면 푼다">싱크</button>
+      <!-- 넷은 한 덩어리다. 줄이 좁아지면 넷이 같이 아래로 내려간다.
+           따로 흩어지면 "+10초" 만 혼자 떨어져서 깨져 보인다. -->
+      <span class="grp">
+        <button id="n10">−10초</button>
+        <button id="n1">−1초</button>
+        <button id="p1">+1초</button>
+        <button id="p10">+10초</button>
+      </span>
+      <span id="voff" class="mono dim"></span>
     </div>
 
     <footer id="statusbar">
