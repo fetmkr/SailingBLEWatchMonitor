@@ -136,6 +136,26 @@
   --fs-xs:  15px;   /* 작은 것 */
   --fs-xxs: 13px;   /* 라벨. 애플 최소는 11 인데 여유를 두고 여기서 멈춘다 */
   --fs-lg:  20px;   /* 제목 자리 */
+
+  /* ── 사이 간격 ──
+     애플은 8 의 배수로 잡는다. 글자만 키우고 간격을 그대로 두면 답답해
+     보인다. 글자와 간격은 같이 움직여야 한다. */
+  --sp1: 4px;
+  --sp2: 8px;
+  --sp3: 12px;
+  --sp4: 16px;    /* 칸 안쪽 기본 여백 */
+  --sp5: 20px;
+
+  /* ── 누를 수 있는 것의 최소 크기 ──
+     애플은 손가락 기준 44 를 권한다. 손끝 평균 크기다. 이보다 작으면
+     옆 것을 잘못 누른다. 맥에서는 22~28 이면 되지만, 같은 화면을 두
+     기기에서 쓰므로 큰 쪽으로 맞춘다.
+     [확인: Apple Human Interface Guidelines] */
+  --tap: 44px;
+
+  /* 모서리 둥근 정도 */
+  --r:    8px;
+  --r-sm: 6px;
 }
 
 * { box-sizing: border-box; }
@@ -145,7 +165,20 @@ html, body {
   font: var(--fs)/1.55 -apple-system, "Pretendard", "Apple SD Gothic Neo",
         "Malgun Gothic", system-ui, sans-serif;
 }
-body { display: flex; flex-direction: column; }
+body {
+  display: flex; flex-direction: column;
+
+  /* 한글은 낱글자로 끊지 않는다.
+     기본값이면 "검사 통과" 가 "검사 통" / "과" 로 갈라진다. 영어는 원래
+     낱말 단위로 끊는데 한글은 글자 단위로 끊어도 된다고 보기 때문이다.
+     읽을 때는 낱말이 붙어 있어야 한다. keep-all 이 그 뜻이다.
+     [확인: 아이패드 화면에서 "검사 통 과" 로 갈라진 것을 보고 넣었다]
+
+     대신 끊을 데가 아예 없는 긴 덩어리(보드 주소 같은 것)는 칸을 넘겨
+     버리므로, 그럴 때만 아무 데서나 끊게 열어 둔다. */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
 
 /* ── 위: 단추만 한 줄 ────────────────────────────────────────────── */
 /*
@@ -155,7 +188,7 @@ body { display: flex; flex-direction: column; }
 */
 #topbar {
   display: flex; align-items: center; gap: 8px; flex: none;
-  padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  padding: var(--sp2) var(--sp4); border-bottom: 1px solid var(--line); background: var(--panel);
 
   /* 아이패드에서는 위쪽에 시계와 배터리가 겹친다.
      env(safe-area-inset-*) 는 기기가 알려 주는 "여기는 피하라" 는 값이다.
@@ -169,19 +202,28 @@ body { display: flex; flex-direction: column; }
 .sep { width: 1px; height: 18px; background: var(--line); }
 button {
   background: var(--btn); color: var(--ink); border: 1px solid var(--line);
-  border-radius: 6px; padding: 5px 11px; font: inherit; cursor: pointer;
+  border-radius: var(--r-sm); padding: 0 var(--sp3); font: inherit; cursor: pointer;
+  min-height: var(--tap);
 }
 button:hover { background: var(--btn-hover); }
 input, select {
   background: var(--input); color: var(--ink); border: 1px solid var(--line);
-  border-radius: 6px; padding: 5px 9px; font: inherit; width: 160px;
+  border-radius: var(--r-sm); padding: 0 var(--sp2); font: inherit; width: 160px;
+  min-height: var(--tap);
+  /* 글이 칸보다 길면 글자가 반쯤 잘린 채 끝난다. 말줄임표로 끝냈다는 것을
+     알린다. 눌러서 고칠 때는 원래대로 다 보인다. */
+  text-overflow: ellipsis;
 }
 /* ★ 체크박스는 글 입력칸이 아니다.
      위 규칙의 width:160px 이 체크박스에도 걸려서, 설정 서랍에서 체크박스가
      135px 를 차지하고 "디버그 값 보기" 가 한 글자씩 세로로 쌓였다. */
 input[type="checkbox"], input[type="radio"] {
-  width: auto; flex: none; padding: 0; margin: 0;
+  width: auto; flex: none; padding: 0; margin: 0; min-height: auto;
 }
+/* 네모 자체는 작아도 된다. 대신 글자까지 포함한 줄 전체가 눌리는 자리라
+   그 줄을 44 로 잡는다. 애플이 말하는 44 는 눈에 보이는 크기가 아니라
+   손가락이 닿는 넓이다. */
+.chk { min-height: var(--tap); }
 .dim { color: var(--dim); }
 .bad { color: #ff6b6b; }
 .good { color: #5ad19a; }
@@ -193,7 +235,7 @@ input[type="checkbox"], input[type="radio"] {
 /* ── 아래: 상태 한 줄 ────────────────────────────────────────────── */
 #statusbar {
   display: flex; align-items: center; gap: 12px; flex: none;
-  padding: 4px 12px; min-height: 26px;
+  padding: var(--sp2) var(--sp4); min-height: 30px;
   border-top: 1px solid var(--line); background: var(--panel);
   font-size: var(--fs-sm); overflow: hidden; white-space: nowrap;
 
@@ -272,10 +314,14 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 #vdrop.over { border-color: #4ea1ff; color: var(--ink); }
 
 #vbar {
-  display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  display: flex; align-items: center; gap: var(--sp2); padding: var(--sp2) var(--sp3);
   border-top: 1px solid var(--line); background: var(--panel); flex-wrap: wrap;
 }
-#vbar button { padding: 4px 8px; }
+#vbar button { padding: 0 var(--sp2); }
+/* 앞뒤로 건너뛰는 단추 넷. 흩어지지 않게 한 덩어리로 묶는다. */
+#vbar .grp { display: flex; gap: var(--sp1); flex: none; }
+/* 안내 글은 언제나 제 줄에서 시작한다. 단추 사이에 끼어들면 지저분하다. */
+#vbar #voff { flex: 1 0 100%; }
 .mono { font: var(--fs-sm) ui-monospace, SFMono-Regular, Menlo, monospace; }
 .ghost { background: transparent; border-color: transparent; color: var(--dim); }
 .ghost:hover { background: var(--hover); }
@@ -300,7 +346,7 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 .pad { padding: 12px 6px; }
 
 /* ── 훈련 정보 (오른쪽 서랍 안) ──────────────────────────────────── */
-.drow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.drow { display: flex; align-items: center; gap: var(--sp2); margin-bottom: var(--sp2); }
 /* 왼쪽 이름 칸. 66px 로 박아 뒀더니 글자를 키우자마자 "훈련 묶음" 같은
    말이 두 줄로 접혔다. em 은 글자 크기의 배수라 같이 늘어난다. */
 .drow > span { width: 4.4em; color: var(--dim); font-size: var(--fs-sm); flex: none; }
@@ -409,7 +455,7 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 */
 #dock {
   background: var(--panel); border-left: 1px solid var(--line);
-  padding: 10px; min-width: 0;
+  padding: var(--sp4); min-width: 0;
 
   /* 밀리는 것은 안쪽(.drawer)이고 이 칸은 가만히 있는다.
      그래야 여기에 얹은 막대가 같이 밀려 내려가지 않는다. */
@@ -455,8 +501,8 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 }
 
 #rail {
-  flex: 0 0 46px; display: flex; flex-direction: column; gap: 2px;
-  padding: 6px 4px; background: var(--panel);
+  flex: 0 0 56px; display: flex; flex-direction: column; gap: var(--sp1);
+  padding: var(--sp2) var(--sp1); background: var(--panel);
   border-left: 1px solid var(--line);
 
   /* 오른쪽 끝에 붙어 있어서 가로로 눕힌 아이패드에서는
@@ -465,7 +511,7 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 }
 .rbtn {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
-  width: 100%; padding: 7px 0; border: none; border-radius: 6px;
+  width: 100%; padding: var(--sp2) 0; border: none; border-radius: var(--r-sm);
   background: transparent; color: var(--dim); font-size: var(--fs-xxs); cursor: pointer;
 }
 .rbtn > span { font-size: var(--fs-lg); line-height: 1; }
