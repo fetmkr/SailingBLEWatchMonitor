@@ -153,7 +153,14 @@ export interface DrawOpts {
  * 이름을 그림 안에 얹으면 값과 겹쳐서 둘 다 읽기 어렵다. 밖으로 빼면
  * 이름은 이름대로, 값은 값대로 읽힌다. 여기를 누르면 이름을 고친다.
  */
+// 줄 이름이 들어가는 칸. 148 은 글자가 12px 이던 시절 값이다.
+// 글자를 키우면 이름이 더 잘리므로 같이 넓힌다. 사람이 끌어서 바꾸면
+// 그 값이 우선한다 (setLabelWidth).
 let LABEL_W = 148;
+
+/** 글자 크기에 맞춰 처음 폭을 잡았는가.
+ *  사람이 손으로 끌어 놓았거나 저장된 값을 불러왔으면 건드리지 않는다. */
+let widthsTuned = false;
 /** 세로축 숫자가 들어갈 폭 */
 let AXIS_NUM_W = 62;
 const axisW = () => LABEL_W + AXIS_NUM_W;
@@ -197,9 +204,11 @@ let rowBoxes: { top: number; h: number }[] = [];
 export function labelWidth(): number { return LABEL_W; }
 export function numWidth(): number { return AXIS_NUM_W; }
 export function setNumWidth(px: number) {
+  widthsTuned = true;   // 사람이 정한 값이 우선한다
   AXIS_NUM_W = Math.min(200, Math.max(40, Math.round(px)));
 }
 export function setLabelWidth(px: number): void {
+  widthsTuned = true;   // 사람이 정한 값이 우선한다
   LABEL_W = Math.min(360, Math.max(70, Math.round(px)));
 }
 // 마지막으로 그린 자리들. 마우스가 그 위에 있는지 보려고 기억해 둔다.
@@ -265,6 +274,14 @@ const GAP = 8;
 /** 맨 아래 스크롤 막대. 전체 어디쯤인지만 알려 주면 된다 */
 const OVER_H = 10;
 
+function tuneWidths(base: number) {
+  if (widthsTuned) return;
+  widthsTuned = true;
+  const k = base / 12;                 // 148 과 62 는 12px 글자 기준이었다
+  LABEL_W = Math.round(148 * k);
+  AXIS_NUM_W = Math.round(62 * k);
+}
+
 export function draw(o: DrawOpts): void {
   const { canvas, series, view } = o;
   const dpr = window.devicePixelRatio || 1;
@@ -324,6 +341,20 @@ export function draw(o: DrawOpts): void {
   const panel = v("--panel", "#1b1e24");
   const thumb = v("--tl-thumb", "#4a5160");   // 아래 띠에서 지금 보는 자리
   const MARK = v("--mark", "#f0a020");
+
+  // 글자 크기도 CSS 에서 읽는다. 색과 같은 이유다. 캔버스에는 CSS 가 안
+  // 먹으니 손으로 가져와야 하는데, 그래도 기준은 styles.css 한 곳에 둔다.
+  const fpx = (name: string, fallback: number) => {
+    const n = parseFloat(css.getPropertyValue(name));
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const FS = fpx("--fs", 17);         // 줄 이름
+  const FSM = fpx("--fs-sm", 16);
+  const FXS = fpx("--fs-xs", 15);     // 눈금 숫자
+  const FXXS = fpx("--fs-xxs", 13);   // 깃발 번호·메모
+  const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+  const SANS = "-apple-system, system-ui, sans-serif";
+  tuneWidths(FSM);
   const PIN = v("--pin", "#4ea1ff");
 
   // ── 시간 축 (위) ────────────────────────────────────────────────────
@@ -334,7 +365,7 @@ export function draw(o: DrawOpts): void {
   //   3:04    +10 초   +20 초   +30 초
   //
   // 단위가 없으면 크게 당겼을 때 "0:02" 가 2초인지 2분인지 헷갈린다.
-  g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+  g.font = `${FXS}px ${MONO}`;
   g.textBaseline = "top";
 
   // 왼쪽 이름 칸 바탕
@@ -381,9 +412,9 @@ export function draw(o: DrawOpts): void {
   // 기준 시각. 맨 왼쪽에 굵게.
   g.fillStyle = ink;
   g.textAlign = "left";
-  g.font = "bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+  g.font = `bold ${FXS}px ${MONO}`;
   g.fillText(formatDuration(base - origin), LABEL_W + 4, 6);
-  g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+  g.font = `${FXS}px ${MONO}`;
 
   // ── 마킹 ────────────────────────────────────────────────────────────
   //
@@ -404,7 +435,7 @@ export function draw(o: DrawOpts): void {
     g.setLineDash([]);
 
     // 깃발 + 메모. 눌러서 고치거나 지울 수 있게 자리를 기억해 둔다.
-    g.font = "10px -apple-system, system-ui, sans-serif";
+    g.font = `${FXXS}px ${SANS}`;
     const note = mk.note.trim();
     const nw = note ? g.measureText(note).width + 6 : 0;
     const fw = 16 + nw;
@@ -422,14 +453,14 @@ export function draw(o: DrawOpts): void {
     g.fillStyle = plotBg;
     g.textAlign = "left";
     g.textBaseline = "top";
-    g.font = "bold 8px ui-monospace, SFMono-Regular, Menlo, monospace";
+    g.font = `bold ${FXXS}px ${MONO}`;
     g.fillText(String(i + 1), x + 3, bodyTop + 2);
     if (note) {
-      g.font = "10px -apple-system, system-ui, sans-serif";
+      g.font = `${FXXS}px ${SANS}`;
       g.fillText(note, x + 13, bodyTop + 1);
     }
     flagBoxes.push({ i, x, y: bodyTop, w: fw + 5, h: 12 });
-    g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    g.font = `${FXS}px ${MONO}`;
   });
 
   // ── 값들 ────────────────────────────────────────────────────────────
@@ -457,7 +488,7 @@ export function draw(o: DrawOpts): void {
       g.fillStyle = dim;
       g.textAlign = "left";
       g.textBaseline = "middle";
-      g.font = "12px -apple-system, system-ui, sans-serif";
+      g.font = `${FSM}px ${SANS}`;
       g.fillText(fitText(g, s.name, LABEL_W - CHEV_W - 20), CHEV_W + 15, my);
       g.textBaseline = "top";
 
@@ -548,7 +579,7 @@ export function draw(o: DrawOpts): void {
     // Saleae 가 "5 V" 라고 축에 적는 것과 같다.
     g.fillStyle = dim;
     g.textAlign = "right";
-    g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    g.font = `${FXS}px ${MONO}`;
     g.fillText(`${rhi.toFixed(rhi >= 100 ? 0 : 1)} ${s.unit}`, axisW() - 6, top);
     g.fillText(`${rlo.toFixed(rlo <= -100 ? 0 : 1)} ${s.unit}`, axisW() - 6, bot - 12);
 
@@ -567,7 +598,7 @@ export function draw(o: DrawOpts): void {
     g.fillRect(CHEV_W + 2, midY - 5, 9, 9);
 
     g.fillStyle = ink;
-    g.font = "13px -apple-system, system-ui, sans-serif";
+    g.font = `${FS}px ${SANS}`;
     g.textAlign = "left";
     g.textBaseline = "middle";
     // 칸을 넘치면 잘라 준다. 그냥 넘치면 옆 칸 숫자와 겹쳐서 둘 다 못 읽는다.
@@ -649,9 +680,12 @@ export function draw(o: DrawOpts): void {
 
     // 시간 축에 붙는 알약
     const label = formatDuration(o.pinMs - origin);
-    g.font = "bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    g.font = `bold ${FXS}px ${MONO}`;
     const tw = g.measureText(label).width;
-    const pw = tw + 12, ph = 17;
+    // 알약은 글자를 담는 그릇이라 글자 크기를 따라간다. 17 로 박아 뒀더니
+    // 글자를 키우자마자 넘쳤다.
+    const ph = Math.round(FXS * 1.55);
+    const pw = tw + 12;
     let px = x - pw / 2;
     px = Math.max(axisW(), Math.min(px, cssW - pw - 2));
     pillBox = { x: px, y: 4, w: pw, h: ph };
@@ -661,8 +695,8 @@ export function draw(o: DrawOpts): void {
     g.fill();
     g.fillStyle = plotBg;
     g.textAlign = "center";
-    g.textBaseline = "top";
-    g.fillText(label, px + pw / 2, 8);
+    g.textBaseline = "middle";
+    g.fillText(label, px + pw / 2, 4 + ph / 2);
 
     // 아래쪽 손잡이
     g.fillStyle = PIN;
@@ -673,7 +707,7 @@ export function draw(o: DrawOpts): void {
     g.closePath();
     g.fill();
 
-    g.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    g.font = `${FXS}px ${MONO}`;
   }
 
   // ── 맨 아래 스크롤 막대 ─────────────────────────────────────────────

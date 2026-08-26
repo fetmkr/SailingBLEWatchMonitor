@@ -423,8 +423,12 @@ function noteMark(i: number, note: string) {
 //
 // 이름은 사람마다 다르게 부른다. 어떤 코치는 "Trim", 어떤 코치는 "Pitch" 다.
 // 고쳐 쓸 수 있게 하고 남긴다.
-const LABELW_KEY = "labelWidth.v1";
-const NUMW_KEY = "numWidth.v1";
+// ★ v1 이 아니라 v2 다. 글자를 키우면서 이 값의 뜻이 바뀌었다.
+//   148 과 62 는 글자가 12px 이던 시절에 고른 폭이다. 그대로 두면 이름이
+//   더 잘린다. 이름을 올려서 옛 값을 안 읽게 하고, 새 글자 크기에 맞춰
+//   다시 잡게 한다 (timeline.ts 의 tuneWidths).
+const LABELW_KEY = "labelWidth.v2";
+const NUMW_KEY = "numWidth.v2";
 const SHUT_KEY = "rowsShut.v1";
 {
   const w = Number(localStorage.getItem(LABELW_KEY));
@@ -1538,7 +1542,10 @@ const MEDIA_EL: Record<MediaKey, string> = {
 const MEDIA_NAME: Record<MediaKey, string> = {
   video: "영상", map: "지도", data: "데이터",
 };
-const LAYOUT_KEY = "layout.v2";
+// ★ v2 가 아니라 v3 다. 글자를 키우면서 창들의 알맞은 폭이 다 바뀌었다.
+//   저장해 둔 옛 배치를 그대로 불러오면 서랍이 좁아 글자가 잘린다.
+//   이름을 올려 한 번만 새로 잡게 한다. 사람이 다시 끌어 놓으면 그게 남는다.
+const LAYOUT_KEY = "layout.v3";
 let layout: Record<MediaKey, boolean> = { video: true, map: true, data: true };
 
 function mountPaneHandles() {
@@ -1662,7 +1669,9 @@ function mountSplitters() {
   const after = () => { tmap?.resize(); redraw(); };
   panes.register($("shell"), "row", [
     { el: $("center"), kind: "flex", min: 320 },
-    { el: $("dock"),   kind: "fixed", base: 280, min: 190 },
+    // 280 과 190 은 글자가 12px 이던 시절 값이다. 17px 로 키우면서 서랍
+    // 안쪽이 244px 인데 내용은 285px 를 원하는 상태가 됐다. 같은 비율로 넓혔다.
+    { el: $("dock"),   kind: "fixed", base: 340, min: 240 },
   ], after);
 
   panes.register($("center"), centerDir, [
