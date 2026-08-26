@@ -1792,9 +1792,17 @@ function playAll() {
   if (pinMs === null) pinMs = fullSpan.from;
   // 끝에 서 있으면 처음부터 다시 튼다. 안 그러면 눌러도 아무 일이 없다.
   // 맞추는 중에는 데이터 커서를 안 건드린다. 그 자리가 기준이다.
-  if (!tuning() && pinMs >= fullSpan.to - 30) { pinMs = fullSpan.from; cursorMs = pinMs; }
+  if (pinMs >= fullSpan.to - 30) { pinMs = fullSpan.from; cursorMs = pinMs; }
   playing = true;
-  if (videoOn) void video().play();
+  // ★ 안 물린 영상은 안 튼다.
+  //
+  //   시간 막대는 세션의 시계다. 세션이 주인공이고 영상은 거기에 갖다
+  //   붙이는 그림이다. 아직 안 붙었으면 따라올 이유가 없다. 오히려
+  //   가만히 있어야 "아직 안 붙었구나" 가 한눈에 보인다.
+  //
+  //   맞출 때는 영상 칸의 제 슬라이더로 영상을 옮긴다. 영상만 다루는
+  //   일이라 영상 칸에 있는 것이 맞다.
+  if (videoOn && linked) void video().play();
   clockPrev = performance.now();
   cancelAnimationFrame(clockRaf);
   clockRaf = requestAnimationFrame(clockTick);
@@ -1803,7 +1811,7 @@ function playAll() {
 
 function pauseAll() {
   playing = false;
-  if (videoOn) video().pause();
+  if (videoOn) video().pause();   // 물렸든 아니든 돌고 있으면 세운다
   cancelAnimationFrame(clockRaf);
   renderTransport();
 }
@@ -1826,14 +1834,9 @@ function clockTick(now: number) {
   if (!playing) return;
   const dt = now - clockPrev;
   clockPrev = now;
-  // ★ 데이터 커서는 영상이 없을 때만 우리가 민다.
-  //
-  //   영상이 있고 물려 있으면  영상이 시계다. 여기서 또 밀면 두 번 민다.
-  //   영상이 있는데 안 물렸으면 둘이 몇 초 차이인지 아직 모른다. 그런데도
-  //     같이 움직이면 마치 맞는 것처럼 보인다. 게다가 맞추려면 데이터
-  //     커서를 한 자리에 세워 두고 영상만 그 자리로 옮겨야 하는데,
-  //     둘 다 움직이면 영영 못 맞춘다.
-  if (!videoOn && pinMs !== null) {
+  // 영상이 물려 있으면 영상이 시계다. 여기서 또 밀면 두 번 민다.
+  // 그 밖에는 (영상이 없거나, 있어도 아직 안 물렸으면) 우리가 민다.
+  if (!(videoOn && linked) && pinMs !== null) {
     pinMs = pinMs + dt;
     if (pinMs >= fullSpan.to) { pinMs = fullSpan.to; cursorMs = pinMs; pauseAll(); return; }
     cursorMs = pinMs;
@@ -1844,25 +1847,11 @@ function clockTick(now: number) {
 }
 
 /** 시간 막대를 지금 상태에 맞춘다. */
-/** 아직 영상을 데이터에 안 맞춘 상태인가.
- *  이때는 시간 막대가 영상을 다룬다. 맞추기 전까지는 그게 할 일이다. */
-function tuning(): boolean { return videoOn && !linked; }
-
-/** 시간 막대를 지금 상태에 맞춘다. */
+/** 시간 막대를 지금 상태에 맞춘다.
+ *  여기가 다루는 것은 언제나 세션 시간이다. 영상 시간이 아니다. */
 function renderTransport() {
   ($("play") as HTMLButtonElement).textContent = playing ? "⏸" : "▶";
   const sl = $("tslider") as HTMLInputElement;
-
-  if (tuning()) {
-    // 맞추는 중 — 막대는 영상을 다룬다. 데이터 커서는 세워 둔 자리에 있다.
-    const v = video();
-    const dur = Number.isFinite(v.duration) ? v.duration : 0;
-    $("ttime").textContent =
-      `영상 ${tl.formatDuration(v.currentTime * 1000)} / ${tl.formatDuration(dur * 1000)}`;
-    if (!sliderHeld && dur > 0) sl.value = String(Math.round((v.currentTime / dur) * 1000));
-    return;
-  }
-
   const at = pinMs ?? cursorMs ?? fullSpan.from;
   const span = Math.max(1, fullSpan.to - fullSpan.from);
   $("ttime").textContent =
@@ -2022,15 +2011,6 @@ function wire() {
   const ts = $("tslider") as HTMLInputElement;
   const tsSeek = () => {
     sliderHeld = true;
-    if (tuning()) {
-      // 맞추는 중에는 영상만 옮긴다. 데이터 커서는 세워 둔 자리를 지킨다.
-      const vv = video();
-      const dur = Number.isFinite(vv.duration) ? vv.duration : 0;
-      if (dur > 0) vv.currentTime = (Number(ts.value) / 1000) * dur;
-      renderVbar();
-      renderTransport();
-      return;
-    }
     const span = Math.max(1, fullSpan.to - fullSpan.from);
     pinMs = fullSpan.from + (Number(ts.value) / 1000) * span;
     cursorMs = pinMs;
@@ -2555,6 +2535,7 @@ if (import.meta.env.DEV) {
 
 // 만드는 중에는 시험용 데이터를 바로 띄운다. 배포판에서는 안 그런다.
 if (import.meta.env.DEV) loadSample();
+
 
 
 
