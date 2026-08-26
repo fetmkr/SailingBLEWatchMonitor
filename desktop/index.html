@@ -19,17 +19,16 @@
       생명이다.
     -->
     <header id="topbar">
-      <button id="open">파일 열기</button>
-      <button id="sample">시험용 데이터</button>
-      <span class="sep"></span>
+      <!--
+        매번 하는 일만 둔다. 가끔 만지는 것은 설정 서랍(⚙)으로 보냈다 —
+        시험용 데이터, 가운데 배치, 디버그 값.
+        "전체 보기" 는 데이터 칸 제 손잡이로, "넓게" 는 아이콘을 한 번 더
+        누르면 되니 없앴다.
+      -->
+      <button id="open">데이터 열기</button>
       <button id="openVideo">영상 열기</button>
       <span class="sep"></span>
-      <button id="fit">전체 보기</button>
       <button id="addMark" title="파란 고정선 자리에 깃발을 답니다">＋ 마킹</button>
-      <button id="dbgBtn" title="가속·자이로·자력계 원본과 위성·배터리를 같이 봅니다">센서 원본</button>
-      <span class="sep"></span>
-      <button id="dirBtn" title="영상·지도와 데이터를 위아래로 놓을지 좌우로 놓을지">⇅ 위아래</button>
-      <button id="wideBtn" title="서랍을 접고 넓게 봅니다">넓게</button>
       <span id="range" class="dim mono"></span>
       <span style="flex: 1"></span>
       <span id="fileTag" class="dim"></span>
@@ -132,6 +131,27 @@
             <span>배치</span>
             <button id="resetLayout" class="ghost">처음 배치로 되돌리기</button>
           </div>
+          <div class="srow" style="margin-top:14px">
+            <span>시험</span>
+            <button id="sample" class="ghost">시험용 데이터 열기</button>
+          </div>
+          <div class="srow" style="margin-top:14px">
+            <span>가운데</span>
+            <div class="seg" id="dirSeg">
+              <button data-dir="col">⇅ 위아래</button>
+              <button data-dir="row">⇄ 좌우</button>
+            </div>
+          </div>
+
+          <div class="srow" style="margin-top:14px">
+            <span>값</span>
+            <label class="chk"><input id="dbgRows" type="checkbox" />
+              디버그 값 보기</label>
+          </div>
+          <div class="dim" style="font-size:12px; margin: -2px 0 0 54px">
+            자력계 · 위성 수 · 위치 정확도 · 배터리
+          </div>
+
           <div class="srow" style="margin-top:14px">
             <span>지도</span>
             <label class="chk"><input id="mapRaw" type="checkbox" />

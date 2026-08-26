@@ -33,11 +33,15 @@ let track: TrackPoint[] = [];
 /** 파일 요약(줄 수, Hz, IMU 종류…). 정보를 그릴 때마다 다시 넣는다 */
 let metaHtml = "";
 /**
- * 센서 원본을 보여줄지.
+ * 디버그 값을 보여줄지.
  *
- * 본 화면은 다섯 줄이면 된다 — SOG · HDG · COG · Heel · Trim. 훈련을
- * 되돌아볼 때 실제로 보는 것이 그것뿐이다. 가속·자이로·자력계 원본은
- * 무언가 이상할 때만 들여다본다. 늘 펴 두면 자리만 먹는다.
+ * 본 화면은 배가 어떻게 갔는지를 본다 — SOG · HDG · COG · Heel · Trim 과
+ * 가속·자이로 세 축. 자력계 원본, 위성 수, 위치 정확도, 배터리는 그것과
+ * 상관없는 값이라 무언가 이상할 때만 켠다.
+ *
+ * ★ 스위치는 **설정 서랍**에 둔다. 위 띠는 매번 하는 일(파일 열기, 마킹)
+ *   자리고, 이건 어쩌다 한 번 켜는 것이다. 설정에는 이미 화면 색·지도
+ *   색·배치 되돌리기 같은 가끔 만지는 스위치가 모여 있다.
  */
 const DEBUG_KEY = "debugRows.v1";
 let debugOn = localStorage.getItem(DEBUG_KEY) === "1";
@@ -292,13 +296,9 @@ function buildSeries(s: hlog.Session) {
       color: "#ff7a59", xs: imuX, ys: heel, zeroCentered: true },
     { code: "TRIM",  name: n("TRIM", "Trim"), unit: "deg",
       color: "#ffc857", xs: imuX, ys: pitch, zeroCentered: true },
-  ];
 
-  // ── 센서 원본 ──
-  //
-  // 무언가 이상할 때 들여다보는 값들이다. 힐이 튀면 가속도 원본을 보고,
-  // 방위가 이상하면 자력계를 본다. 평소에는 자리만 차지한다.
-  const debug: tl.Series[] = [
+    // 가속·자이로 원본도 본 화면에 둔다. 힐과 트림이 여기서 나오고, 파도와
+    // 태킹이 그대로 보인다. 100 Hz 로 기록하는 이유가 이 두 줄이다.
     { code: "ACCX",  name: n("ACCX", "Accel X"), unit: "g",
       color: "#ff9f7a", xs: imuX, ys: ax_, zeroCentered: true },
     { code: "ACCY",  name: n("ACCY", "Accel Y"), unit: "g",
@@ -311,6 +311,14 @@ function buildSeries(s: hlog.Session) {
       color: "#c9b8ff", xs: imuX, ys: gy, zeroCentered: true },
     { code: "GYRZ",  name: n("GYRZ", "Gyro Z"), unit: "deg/s",
       color: "#9d7bff", xs: imuX, ys: gz, zeroCentered: true },
+  ];
+
+  // ── 디버그 값 ──
+  //
+  // 배가 어떻게 갔는지와는 상관없는 것들이다. 자력계 원본은 방위가 이상할
+  // 때, 위성 수와 위치 정확도는 그 구간 값을 믿어도 되나 볼 때, 배터리는
+  // 훈련 중에 떨어졌나 볼 때 쓴다. 평소에는 자리만 차지한다.
+  const debug: tl.Series[] = [
     { code: "MAGX",  name: n("MAGX", "Mag X"), unit: "uT",
       color: "#7ad4b0", xs: navX, ys: magX, zeroCentered: true },
     { code: "MAGY",  name: n("MAGY", "Mag Y"), unit: "uT",
@@ -424,9 +432,8 @@ let rowsShut: Record<string, boolean> = {};
 try { rowsShut = JSON.parse(localStorage.getItem(SHUT_KEY) ?? "{}"); } catch { /* 처음 */ }
 
 function renderDbgBtn() {
-  const b = $("dbgBtn");
-  b.textContent = debugOn ? "센서 원본 끄기" : "센서 원본";
-  b.classList.toggle("on", debugOn);
+  const c = document.getElementById("dbgRows") as HTMLInputElement | null;
+  if (c) c.checked = debugOn;
 }
 
 /** 줄 수가 바뀌었으니 굴린 자리를 다시 잡는다. */
@@ -1496,25 +1503,10 @@ function renderTheme() {
   });
   const chk = document.getElementById("mapRaw") as HTMLInputElement | null;
   if (chk) chk.checked = mapRaw;
+  renderDbgBtn();
 }
 
 sysLight.addEventListener("change", () => { if (theme === "auto") applyTheme(); });
-
-// ── 넓게 보기 ────────────────────────────────────────────────────────────
-//
-// 서랍을 접고 영상·지도·데이터만 남긴다. 분석에 몰입할 때 쓴다.
-let wideBack: Tab | null = null;
-
-function toggleWide() {
-  if (tab === null) {
-    showTab(wideBack ?? "lib");
-    ($("wideBtn") as HTMLElement).textContent = "넓게";
-  } else {
-    wideBack = tab;
-    showTab(null);
-    ($("wideBtn") as HTMLElement).textContent = "서랍 열기";
-  }
-}
 
 // ── 영상·지도 접기 ──────────────────────────────────────────────────────
 //
@@ -1538,6 +1530,20 @@ function mountPaneHandles() {
 
     const box = document.createElement("div");
     box.className = "handles";
+
+    // 데이터 칸에는 "전체 보기" 를 붙인다. 위 띠에 두면 볼 것을 보다가 눈이
+    // 저 위로 갔다 와야 한다. 손잡이는 보고 있는 칸에 있는 게 맞다.
+    if (k === "data") {
+      const fit = document.createElement("button");
+      fit.textContent = "↔";
+      fit.title = "전체 보기";
+      fit.onclick = (e) => {
+        e.stopPropagation();
+        view = { ...fullSpan };
+        redraw();
+      };
+      box.append(fit);
+    }
 
     const shut = document.createElement("button");
     shut.textContent = "✕";
@@ -1601,8 +1607,9 @@ let centerDir: panes.Dir =
 function applyDir() {
   $("center").classList.toggle("row", centerDir === "row");
   panes.setDir($("center"), centerDir);
-  ($("dirBtn") as HTMLElement).textContent =
-    centerDir === "col" ? "⇅ 위아래" : "⇄ 좌우";
+  document.querySelectorAll<HTMLElement>("#dirSeg button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.dir === centerDir);
+  });
   localStorage.setItem(DIR_KEY, centerDir);
   requestAnimationFrame(() => { tmap?.resize(); redraw(); });
 }
@@ -1823,7 +1830,6 @@ function wire() {
   $("open").onclick = openFile;
   $("sample").onclick = loadSample;
   $("list").onclick = listBoard;
-  $("fit").onclick = () => { view = { ...fullSpan }; redraw(); };
   // ── 보드 찾기 단추들 ──
   $("btScan").onclick = () => void scanBoards();
   $("btDrop").onclick = () => void sleepBoard();
@@ -1843,21 +1849,15 @@ function wire() {
   ($("bySog") as HTMLInputElement).onchange = (e) =>
     mapUp()?.setColorBySog((e.target as HTMLInputElement).checked);
   $("mapFit").onclick = () => mapUp()?.fit();
-  $("dirBtn").onclick = () => {
-    centerDir = centerDir === "row" ? "col" : "row";
-    applyDir();
-    setStatus(centerDir === "row"
-      ? "가운데 칸을 좌우로 놓았습니다."
-      : "가운데 칸을 위아래로 놓았습니다.");
-  };
-
-  $("dbgBtn").onclick = () => {
-    debugOn = !debugOn;
-    localStorage.setItem(DEBUG_KEY, debugOn ? "1" : "0");
-    renderDbgBtn();
-    if (session) { buildSeries(session); fitRows(); redraw(); }
-    setStatus(debugOn ? "센서 원본을 켰습니다." : "센서 원본을 껐습니다.");
-  };
+  document.querySelectorAll<HTMLElement>("#dirSeg button").forEach((b) => {
+    b.onclick = () => {
+      centerDir = b.dataset.dir as panes.Dir;
+      applyDir();
+      setStatus(centerDir === "row"
+        ? "가운데 칸을 좌우로 놓았습니다."
+        : "가운데 칸을 위아래로 놓았습니다.");
+    };
+  });
 
   $("addMark").onclick = () => {
     if (!session) { setStatus("먼저 파일을 여세요.", "bad"); return; }
@@ -1962,7 +1962,6 @@ function wire() {
   document.querySelectorAll<HTMLElement>("#rail .rbtn").forEach((b) => {
     b.onclick = () => hitTab(b.dataset.tab as Tab);
   });
-  $("wideBtn").onclick = () => toggleWide();
   document.querySelectorAll<HTMLElement>("#themeSeg button").forEach((b) => {
     b.onclick = () => { theme = b.dataset.theme as Theme; applyTheme(); };
   });
@@ -1973,6 +1972,12 @@ function wire() {
       localStorage.removeItem(k);
     }
     location.reload();
+  };
+  ($("dbgRows") as HTMLInputElement).onchange = (e) => {
+    debugOn = (e.target as HTMLInputElement).checked;
+    localStorage.setItem(DEBUG_KEY, debugOn ? "1" : "0");
+    if (session) { buildSeries(session); fitRows(); redraw(); }
+    setStatus(debugOn ? "디버그 값을 켰습니다." : "디버그 값을 껐습니다.");
   };
   ($("mapRaw") as HTMLInputElement).onchange = (e) => {
     mapRaw = (e.target as HTMLInputElement).checked;
