@@ -574,6 +574,27 @@ canvas {
 }
 #vslider:disabled::-webkit-slider-thumb { background: var(--tl-thumb); }
 
+/* ── 시간 막대의 훑는 칸 ────────────────────────────────────────────
+   기본 손잡이는 옆으로 긴 캡슐이라, 값이 0 이어도 왼쪽 끝에 안 닿은 것처럼
+   보인다 (실제로 값은 0 인데 그렇게 보인다는 말을 들었다). 동그란 손잡이로
+   바꾸면 어디에 서 있는지가 한 점으로 분명해진다.
+
+   지나온 자리를 색으로 칠하지는 않는다. 브라우저마다 칠하는 방법이 달라
+   한쪽에서만 보이는 일이 생긴다. 손잡이 자리만으로도 읽힌다. */
+#tslider {
+  margin: 0; padding: 0; height: var(--tap);
+  background: transparent; border: none;
+  -webkit-appearance: none; appearance: none; cursor: pointer;
+}
+#tslider::-webkit-slider-runnable-track {
+  height: 5px; border-radius: 3px; background: var(--btn-hover);
+}
+#tslider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 15px; height: 15px; border-radius: 50%;
+  background: var(--pin); border: none; margin-top: -5px;
+}
+
 /* ── 줄 이름 고치기 ──────────────────────────────────────────────── */
 #dataPane { position: relative; }
 .labelEdit {

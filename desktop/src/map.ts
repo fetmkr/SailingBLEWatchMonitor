@@ -31,6 +31,19 @@ import {
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
+/** 눈금이 1해리로 나오는 배율.
+ *
+ *  눈금 막대는 100픽셀이 덮는 거리를 1852로 나눈 뒤 10·5·3·2·1 로 내림해서
+ *  보여준다. [확인: maplibre-gl-dev.mjs 의 27896·27908·27922줄]
+ *  그러니 100픽셀이 1852m 이상 3704m 미만을 덮으면 "1 nm" 가 된다.
+ *
+ *  위도 37.45(인천 앞바다) 기준으로 그 구간이 배율 10.7~11.7 이고,
+ *  한가운데인 11.3 을 골랐다. 이때 100픽셀이 2,462m(1.33해리)를 덮는다.
+ *  [확인: worldSize = tileSize x scale, tileSize = 512 — 같은 파일 9174줄]
+ *
+ *  전에는 9 였는데 나라가 다 보이는 배율이라 너무 멀었다. */
+const NM1_ZOOM = 11.3;
+
 /** 항적의 한 점. 타임라인과 같은 시각(ms)을 들고 다닌다. */
 export interface TrackPoint {
   ms: number;
@@ -119,7 +132,8 @@ export class TrackMap {
       container: this.el,
       style: this.style(),
       center: [126.55, 37.45],   // 인천 앞바다. 첫 항적이 오면 곧 옮겨간다
-      zoom: 9,
+
+      zoom: NM1_ZOOM,
       attributionControl: { compact: false },
     });
     m.addControl(new NavigationControl({ showCompass: true }), "top-left");
@@ -355,8 +369,13 @@ export class TrackMap {
     // 한 자리에 서 있었으면 넓이가 0 이다. 조금 벌려 준다.
     if (e - w < 1e-4) { w -= 5e-5; e += 5e-5; }
     if (n - s < 1e-4) { s -= 5e-5; n += 5e-5; }
+    // 항적에 맞춰 당기되 1해리보다 더 당기지는 않는다.
+    //
+    // 배가 좁은 자리에서만 돌았거나 시험용 항적처럼 짧으면, 맞추기만 하면
+    // 0.2해리까지 당겨져 주변이 하나도 안 보인다. 어디서 탄 건지 알아볼 수
+    // 없다. 1해리가 훈련 한 판이 들어오는 넓이다. 더 보고 싶으면 손으로 당긴다.
     this.map.fitBounds([[w, s], [e, n]] as LngLatBoundsLike,
-                       { padding: 40, duration: 400 });
+                       { padding: 40, duration: 400, maxZoom: NM1_ZOOM });
   }
 
   resize() { this.map?.resize(); }
