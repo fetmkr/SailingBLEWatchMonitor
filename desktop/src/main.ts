@@ -2360,14 +2360,39 @@ function wire() {
   // 있는데도 더 있는 줄 모르고 지나치게 된다. 흐린 가장자리는 가만히
   // 있어도 보인다.
   const dock = $("dock");
+  const bar = document.createElement("div");
+  bar.id = "dockBar";
+  dock.appendChild(bar);
+
   const markEdges = () => {
-    const more = dock.scrollHeight - dock.clientHeight;
-    dock.classList.toggle("moreDown", more > 2 && dock.scrollTop < more - 2);
-    dock.classList.toggle("moreUp", more > 2 && dock.scrollTop > 2);
+    const d = dock.querySelector<HTMLElement>(".drawer:not([hidden])");
+    const more = d ? d.scrollHeight - d.clientHeight : 0;
+    dock.classList.toggle("moreDown", !!d && more > 2 && d.scrollTop < more - 2);
+    dock.classList.toggle("moreUp", !!d && more > 2 && d.scrollTop > 2);
+
+    if (!d || more <= 2) { bar.classList.remove("on"); return; }
+    bar.classList.add("on");
+    // 막대 길이는 "보이는 만큼 / 전체", 자리는 얼마나 내려왔는지에 비례한다.
+    const track = d.clientHeight;
+    const h = Math.max(28, Math.round(track * (d.clientHeight / d.scrollHeight)));
+    const top = Math.round((track - h) * (d.scrollTop / more));
+    bar.style.height = `${h}px`;
+    bar.style.top = `${d.offsetTop + top}px`;
   };
-  dock.addEventListener("scroll", markEdges, { passive: true });
-  new ResizeObserver(markEdges).observe(dock);
-  markEdges();
+
+  const watchDrawer = () => {
+    const d = dock.querySelector<HTMLElement>(".drawer:not([hidden])");
+    if (d && !d.dataset.scrollWatched) {
+      d.dataset.scrollWatched = "1";
+      d.addEventListener("scroll", markEdges, { passive: true });
+      new ResizeObserver(markEdges).observe(d);
+    }
+    markEdges();
+  };
+  new MutationObserver(watchDrawer).observe(dock, { attributes: true, subtree: true,
+                                                    attributeFilter: ["hidden"] });
+  new ResizeObserver(watchDrawer).observe(dock);
+  watchDrawer();
 }
 
 wire();
@@ -2389,6 +2414,7 @@ if (import.meta.env.DEV) {
 
 // 만드는 중에는 시험용 데이터를 바로 띄운다. 배포판에서는 안 그런다.
 if (import.meta.env.DEV) loadSample();
+
 
 
 

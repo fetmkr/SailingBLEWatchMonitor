@@ -409,8 +409,28 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 */
 #dock {
   background: var(--panel); border-left: 1px solid var(--line);
-  overflow: auto; padding: 10px; min-width: 0;
+  padding: 10px; min-width: 0;
+
+  /* 밀리는 것은 안쪽(.drawer)이고 이 칸은 가만히 있는다.
+     그래야 여기에 얹은 막대가 같이 밀려 내려가지 않는다. */
+  overflow: hidden; position: relative;
+  display: flex; flex-direction: column;
 }
+#dock > .drawer:not([hidden]) {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  /* 서랍 끝에서 더 밀어도 뒤 화면이 딸려 오지 않게 */
+  overscroll-behavior: contain;
+}
+
+/* 손으로 그린 스크롤 막대.
+   기기가 그려 주는 막대는 아이패드에서 손을 대야만 잠깐 보인다. 더 있는
+   줄 모르고 지나치게 된다. 우리가 그리면 가만히 있어도 보인다. */
+#dockBar {
+  position: absolute; right: 3px; width: 4px; border-radius: 2px;
+  background: var(--dim); opacity: .45; pointer-events: none;
+  display: none;
+}
+#dockBar.on { display: block; }
 #dock.shut { display: none; }
 
 /* 서랍에 더 볼 게 있으면 그쪽 가장자리를 흐리게 한다.
