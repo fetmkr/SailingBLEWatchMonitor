@@ -233,6 +233,15 @@ input[type="checkbox"], input[type="radio"] {
 #meta { margin-bottom: 10px; font-size: var(--fs-sm); }
 
 /* ── 아래: 상태 한 줄 ────────────────────────────────────────────── */
+/* 시간 막대. 어느 칸을 접어도 늘 보인다. */
+#transport {
+  display: flex; align-items: center; gap: var(--sp3); flex: none;
+  padding: var(--sp2) var(--sp4);
+  border-top: 1px solid var(--line); background: var(--panel);
+}
+#transport #tslider { flex: 1; width: auto; min-width: 80px; }
+#transport #ttime { flex: none; }
+
 #statusbar {
   display: flex; align-items: center; gap: 12px; flex: none;
   padding: var(--sp2) var(--sp4); min-height: 30px;

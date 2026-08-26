@@ -593,6 +593,9 @@ function redraw() {
   // 지도의 배 표시는 그래프 칸이 꺼져 있어도 따라와야 한다
   tmap?.setBoat(pinMs !== null ? pinMs : cursorMs);
 
+  // 시간 막대도 커서를 따라온다. 그래프를 눌러 커서를 옮겨도 맞아야 한다.
+  renderTransport();
+
   // 전체 보기 단추를 흐리게. 이미 전체를 보고 있으면 눌러도 바뀔 게 없는데,
   // 그걸 안 보여주면 "단추가 고장 났나" 싶다 (실제로 그렇게 보였다).
   const fitBtn = document.querySelector<HTMLElement>("#dataPane .handles .fit");
@@ -1761,6 +1764,75 @@ async function useVideoUrl(url: string, name: string, blob: Blob | null) {
   renderVbar();
 }
 
+/* ── 시간을 굴리는 시계 ──────────────────────────────────────────────
+ *
+ * 영상·지도·그래프가 다 같은 시간을 본다. 그런데 지금까지 그 시간을 굴리는
+ * 것은 영상뿐이었다. 영상이 없으면 재생이라는 게 아예 없었다. 카메라를 안
+ * 달고 나간 날은 항적을 돌려볼 수 없었다.
+ *
+ * 이제 시계를 앱이 갖는다.
+ *   영상이 물려 있으면   영상이 시계다 (timeupdate 가 커서를 민다)
+ *   그 밖에는           우리가 실제 흐른 시간을 세어서 커서를 민다
+ */
+let playing = false;
+let clockRaf = 0;
+let clockPrev = 0;
+
+/** 커서가 보는 자리 밖으로 나가면 화면을 따라 밀어 준다. */
+function followCursor() {
+  if (pinMs === null) return;
+  if (pinMs >= view.from && pinMs <= view.to) return;
+  const span = view.to - view.from;
+  view.from = pinMs - span * 0.3;
+  view.to = view.from + span;
+  clampView();
+}
+
+function playAll() {
+  if (pinMs === null) pinMs = fullSpan.from;
+  // 끝에 서 있으면 처음부터 다시 튼다. 안 그러면 눌러도 아무 일이 없다.
+  if (pinMs >= fullSpan.to - 30) { pinMs = fullSpan.from; cursorMs = pinMs; }
+  playing = true;
+  if (videoOn) void video().play();
+  clockPrev = performance.now();
+  cancelAnimationFrame(clockRaf);
+  clockRaf = requestAnimationFrame(clockTick);
+  renderTransport();
+}
+
+function pauseAll() {
+  playing = false;
+  if (videoOn) video().pause();
+  cancelAnimationFrame(clockRaf);
+  renderTransport();
+}
+
+function clockTick(now: number) {
+  if (!playing) return;
+  const dt = now - clockPrev;
+  clockPrev = now;
+  // 영상이 시계 노릇을 하는 경우는 그쪽에 맡긴다. 여기서 또 밀면 두 번 민다.
+  if (!(videoOn && linked) && pinMs !== null) {
+    pinMs = pinMs + dt;
+    if (pinMs >= fullSpan.to) { pinMs = fullSpan.to; cursorMs = pinMs; pauseAll(); return; }
+    cursorMs = pinMs;
+    followCursor();
+    redraw();
+  }
+  clockRaf = requestAnimationFrame(clockTick);
+}
+
+/** 시간 막대를 지금 상태에 맞춘다. */
+function renderTransport() {
+  ($("play") as HTMLButtonElement).textContent = playing ? "⏸" : "▶";
+  const at = pinMs ?? cursorMs ?? fullSpan.from;
+  const span = Math.max(1, fullSpan.to - fullSpan.from);
+  $("ttime").textContent =
+    `${tl.formatDuration(at - originMs())} / ${tl.formatDuration(fullSpan.to - originMs())}`;
+  const sl = $("tslider") as HTMLInputElement;
+  if (!sliderHeld) sl.value = String(Math.round(((at - fullSpan.from) / span) * 1000));
+}
+
 function renderVbar() {
   const v = video();
   const dur = Number.isFinite(v.duration) ? v.duration : 0;
@@ -1789,7 +1861,6 @@ function renderVbar() {
       (sync.guessed ? `  (짐작 ${vid.formatOffset(sync.offsetMs)})` : "");
     off.className = "mono bad";
   }
-  ($("play") as HTMLButtonElement).textContent = v.paused ? "▶" : "⏸";
 }
 
 /** 타임라인 커서 → 영상 위치 */
@@ -1901,7 +1972,22 @@ function wire() {
 
   // ── 영상 조작 ──────────────────────────────────────────────────────
   const v = video();
-  $("play").onclick = () => { v.paused ? v.play() : v.pause(); renderVbar(); };
+  $("play").onclick = () => (playing ? pauseAll() : playAll());
+
+  // 시간 막대의 훑는 칸. 세션 전체를 훑는다 (영상 길이가 아니다).
+  const ts = $("tslider") as HTMLInputElement;
+  const tsSeek = () => {
+    sliderHeld = true;
+    const span = Math.max(1, fullSpan.to - fullSpan.from);
+    pinMs = fullSpan.from + (Number(ts.value) / 1000) * span;
+    cursorMs = pinMs;
+    seekVideoTo(pinMs);
+    followCursor();
+    renderTransport();
+    redraw();
+  };
+  ts.addEventListener("input", tsSeek);
+  ts.addEventListener("change", () => { tsSeek(); sliderHeld = false; });
 
   // 영상 슬라이더. 타임라인 없이 영상만 훑을 때 쓴다.
   const sl = $("vslider") as HTMLInputElement;
@@ -1970,12 +2056,12 @@ function wire() {
     renderVbar();
     redraw();
   }
-  v.addEventListener("play", () => { armFollow(); renderVbar(); });
+  v.addEventListener("play", () => { playing = true; armFollow(); renderVbar(); renderTransport(); });
   v.addEventListener("timeupdate", syncFromVideo);
   armFollow();
 
   v.addEventListener("seeked", () => { seeking = false; syncFromVideo(); });
-  v.addEventListener("pause", renderVbar);
+  v.addEventListener("pause", () => { playing = false; renderVbar(); renderTransport(); });
   v.addEventListener("loadedmetadata", renderVbar);
 
   // 끌어다 놓기
@@ -2414,6 +2500,7 @@ if (import.meta.env.DEV) {
 
 // 만드는 중에는 시험용 데이터를 바로 띄운다. 배포판에서는 안 그런다.
 if (import.meta.env.DEV) loadSample();
+
 
 
 
