@@ -32,6 +32,15 @@ let fileMarks: number[] = [];
 let track: TrackPoint[] = [];
 /** 파일 요약(줄 수, Hz, IMU 종류…). 정보를 그릴 때마다 다시 넣는다 */
 let metaHtml = "";
+/**
+ * 센서 원본을 보여줄지.
+ *
+ * 본 화면은 다섯 줄이면 된다 — SOG · HDG · COG · Heel · Trim. 훈련을
+ * 되돌아볼 때 실제로 보는 것이 그것뿐이다. 가속·자이로·자력계 원본은
+ * 무언가 이상할 때만 들여다본다. 늘 펴 두면 자리만 먹는다.
+ */
+const DEBUG_KEY = "debugRows.v1";
+let debugOn = localStorage.getItem(DEBUG_KEY) === "1";
 let view: tl.View = { from: 0, to: 1 };
 let fullSpan: tl.View = { from: 0, to: 1 };
 /** 마우스가 있는 시각. 마우스를 떼면 사라진다 */
@@ -193,6 +202,7 @@ function buildSeries(s: hlog.Session) {
   const magX = new Float32Array(s.nav.length);
   const magY = new Float32Array(s.nav.length);
   const magZ = new Float32Array(s.nav.length);
+  const batt = new Float32Array(s.nav.length);
   fileMarks = [];
   track = [];
   for (let i = 0; i < s.nav.length; i++) {
@@ -204,6 +214,7 @@ function buildSeries(s: hlog.Session) {
     sv[i] = r.numSv;
     hacc[i] = r.hAccM ?? NaN;
     magX[i] = r.mag[0]; magY[i] = r.mag[1]; magZ[i] = r.mag[2];
+    batt[i] = r.battMv ? r.battMv / 1000 : NaN;
 
     // 방위(HDG). **보드와 같은 식을 쓴다** — atan2(자력Y, 자력X).
     // [확인: firmware-rak/src/main.cpp 의 headingDeg()]
@@ -262,48 +273,62 @@ function buildSeries(s: hlog.Session) {
 
   // 이름은 영어가 기본이다. 클래스도 대회도 영어로 돌아가고, 코치가 다른
   // 분석 도구와 나란히 볼 때 말이 맞아야 한다. 누르면 고칠 수 있다.
-  series = [
+  //
+  // ── 본 화면 다섯 줄 ──
+  //
+  // 훈련을 되돌아볼 때 실제로 보는 것은 이것뿐이다. 다섯이면 하나하나가
+  // 크게 보인다. 나머지는 위 띠의 "센서 원본" 을 눌렀을 때만 나온다.
+  //
+  // HDG 와 COG 를 붙여 둔다 — 뱃머리가 향한 쪽과 배가 실제로 간 쪽이
+  // 다르면 그 차이가 조류나 옆미끄러짐이다.
+  const main: tl.Series[] = [
     { code: "SOG",   name: n("SOG", "Speed Over Ground"), unit: "kn",
       color: "#4ea1ff", xs: navX, ys: sog },
-    { code: "HEEL",  name: n("HEEL", "Heel"), unit: "deg",
-      color: "#ff7a59", xs: imuX, ys: heel, zeroCentered: true },
-    { code: "TRIM",  name: n("TRIM", "Trim"), unit: "deg",
-      color: "#ffc857", xs: imuX, ys: pitch, zeroCentered: true },
-    { code: "YAW",   name: n("YAW", "Yaw Rate"), unit: "deg/s",
-      color: "#9d7bff", xs: imuX, ys: gz, zeroCentered: true },
-    { code: "HEAVE", name: n("HEAVE", "Vertical Accel"), unit: "g",
-      color: "#5ad19a", xs: imuX, ys: az },
-    // 방위(HDG)와 침로(COG)는 나란히 둔다. **둘의 차이가 요트에서 핵심이다** —
-    // 뱃머리가 향한 쪽과 배가 실제로 간 쪽이 다르면 그게 조류나 옆미끄러짐이다.
     { code: "HDG",   name: n("HDG", "Heading"), unit: "deg",
       color: "#ffd166", xs: navX, ys: hdg },
     { code: "COG",   name: n("COG", "Course Over Ground"), unit: "deg",
       color: "#77d4e8", xs: navX, ys: cog },
-    { code: "SAT",   name: n("SAT", "Satellites"), unit: "count",
-      color: "#8a8a8a", xs: navX, ys: sv },
+    { code: "HEEL",  name: n("HEEL", "Heel"), unit: "deg",
+      color: "#ff7a59", xs: imuX, ys: heel, zeroCentered: true },
+    { code: "TRIM",  name: n("TRIM", "Trim"), unit: "deg",
+      color: "#ffc857", xs: imuX, ys: pitch, zeroCentered: true },
+  ];
 
-    // ── 아래는 기본으로 접혀 있다 ──
-    //
-    // 폰·워치가 보여주는 것을 여기서도 다 볼 수 있어야 한다. 다만 늘 펴
-    // 두면 열여섯 줄이라 하나하나가 납작해진다. 필요할 때 ▸ 를 눌러 편다.
-    // 접힘은 기억되니 한 번 펴 두면 다음에도 펴져 있다.
-    { code: "HACC",  name: n("HACC", "Position Accuracy"), unit: "m",
-      color: "#b0a0d0", xs: navX, ys: hacc },
+  // ── 센서 원본 ──
+  //
+  // 무언가 이상할 때 들여다보는 값들이다. 힐이 튀면 가속도 원본을 보고,
+  // 방위가 이상하면 자력계를 본다. 평소에는 자리만 차지한다.
+  const debug: tl.Series[] = [
     { code: "ACCX",  name: n("ACCX", "Accel X"), unit: "g",
       color: "#ff9f7a", xs: imuX, ys: ax_, zeroCentered: true },
     { code: "ACCY",  name: n("ACCY", "Accel Y"), unit: "g",
       color: "#ffb3a0", xs: imuX, ys: ay_, zeroCentered: true },
-    { code: "GYRX",  name: n("GYRX", "Roll Rate"), unit: "deg/s",
+    { code: "ACCZ",  name: n("ACCZ", "Accel Z"), unit: "g",
+      color: "#5ad19a", xs: imuX, ys: az },
+    { code: "GYRX",  name: n("GYRX", "Gyro X"), unit: "deg/s",
       color: "#b39dff", xs: imuX, ys: gx, zeroCentered: true },
-    { code: "GYRY",  name: n("GYRY", "Pitch Rate"), unit: "deg/s",
+    { code: "GYRY",  name: n("GYRY", "Gyro Y"), unit: "deg/s",
       color: "#c9b8ff", xs: imuX, ys: gy, zeroCentered: true },
+    { code: "GYRZ",  name: n("GYRZ", "Gyro Z"), unit: "deg/s",
+      color: "#9d7bff", xs: imuX, ys: gz, zeroCentered: true },
     { code: "MAGX",  name: n("MAGX", "Mag X"), unit: "uT",
       color: "#7ad4b0", xs: navX, ys: magX, zeroCentered: true },
     { code: "MAGY",  name: n("MAGY", "Mag Y"), unit: "uT",
       color: "#8fdcc0", xs: navX, ys: magY, zeroCentered: true },
     { code: "MAGZ",  name: n("MAGZ", "Mag Z"), unit: "uT",
       color: "#a4e4d0", xs: navX, ys: magZ, zeroCentered: true },
+    { code: "SAT",   name: n("SAT", "Satellites"), unit: "count",
+      color: "#8a8a8a", xs: navX, ys: sv },
+    // ★ 파일에는 HDOP 이 아니라 **위치 정확도(hAcc)** 가 들어 있다.
+    //   폰은 NMEA 의 HDOP 을 그대로 보여주는데, 우리 파일에는 그게 없다.
+    //   뜻은 비슷하다 — 작을수록 믿을 만하다. 단위는 미터다.
+    { code: "HACC",  name: n("HACC", "Position Accuracy"), unit: "m",
+      color: "#b0a0d0", xs: navX, ys: hacc },
+    { code: "BATT",  name: n("BATT", "Battery"), unit: "V",
+      color: "#d0c060", xs: navX, ys: batt },
   ];
+
+  series = debugOn ? [...main, ...debug] : main;
   applyRowsShut();   // 접어 둔 줄을 새 파일에도 그대로 적용한다
 }
 
@@ -395,33 +420,20 @@ const n = (code: string, def: string) => names[code] ?? def;
 //
 // 일곱 줄을 다 펴 두면 하나하나가 납작하다. 지금 보려는 것만 펴 두면 그 줄이
 // 화면을 다 쓴다. 접은 줄은 이름만 남는다 — 사라지면 되돌릴 길이 없다.
-//
-// 폰·워치가 보여주는 것을 여기서도 다 볼 수 있게 열여섯 줄을 뒀다. 다만
-// 늘 펴 두면 하나하나가 납작하다. 원본 축들은 기본으로 접어 둔다 —
-// 필요할 때 펴면 되고, 한 번 펴면 다음에도 펴져 있다.
-const SHUT_BY_DEFAULT = [
-  "HACC", "ACCX", "ACCY", "GYRX", "GYRY", "MAGX", "MAGY", "MAGZ",
-];
-
 let rowsShut: Record<string, boolean> = {};
-try {
-  const saved = localStorage.getItem(SHUT_KEY);
-  rowsShut = saved ? JSON.parse(saved)
-                   : Object.fromEntries(SHUT_BY_DEFAULT.map((c) => [c, true]));
-} catch { /* 처음 */ }
+try { rowsShut = JSON.parse(localStorage.getItem(SHUT_KEY) ?? "{}"); } catch { /* 처음 */ }
+
+function renderDbgBtn() {
+  const b = $("dbgBtn");
+  b.textContent = debugOn ? "센서 원본 끄기" : "센서 원본";
+  b.classList.toggle("on", debugOn);
+}
+
+/** 줄 수가 바뀌었으니 굴린 자리를 다시 잡는다. */
+function fitRows() { tl.scrollTo(0); }
 
 function applyRowsShut() {
-  // 나중에 더한 줄은 저장값에 없다. 그런 줄은 기본대로 접어 둔다 —
-  // 예전에 쓰던 사람이 갑자기 열여섯 줄을 마주하지 않게.
-  let changed = false;
-  for (const s of series) {
-    if (!(s.code in rowsShut) && SHUT_BY_DEFAULT.includes(s.code)) {
-      rowsShut[s.code] = true;
-      changed = true;
-    }
-    s.collapsed = !!rowsShut[s.code];
-  }
-  if (changed) localStorage.setItem(SHUT_KEY, JSON.stringify(rowsShut));
+  for (const s of series) s.collapsed = !!rowsShut[s.code];
 }
 
 function toggleRow(i: number) {
@@ -1655,6 +1667,7 @@ function loadLayout() {
 
   mountSplitters();
   watchSizes();
+  renderDbgBtn();
   applyTheme();
   applyDir();
   applyLayout();
@@ -1836,6 +1849,14 @@ function wire() {
     setStatus(centerDir === "row"
       ? "가운데 칸을 좌우로 놓았습니다."
       : "가운데 칸을 위아래로 놓았습니다.");
+  };
+
+  $("dbgBtn").onclick = () => {
+    debugOn = !debugOn;
+    localStorage.setItem(DEBUG_KEY, debugOn ? "1" : "0");
+    renderDbgBtn();
+    if (session) { buildSeries(session); fitRows(); redraw(); }
+    setStatus(debugOn ? "센서 원본을 켰습니다." : "센서 원본을 껐습니다.");
   };
 
   $("addMark").onclick = () => {

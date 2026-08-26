@@ -464,3 +464,6 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
   border-radius: 0 0 6px 6px; background: var(--bg);
 }
 .detail #meta { font-size: 11px; margin-bottom: 8px; }
+
+/* 켜져 있는 위 띠 단추 (센서 원본) */
+#topbar button.on { background: var(--on-bg); color: var(--on-ink); border-color: var(--accent); }
