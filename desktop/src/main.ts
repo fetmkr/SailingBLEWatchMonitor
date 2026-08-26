@@ -569,7 +569,9 @@ function mapUp(): TrackMap | null {
   if (!tmap) {
     tmap = new TrackMap($("map"));
     tmap.onHover = (ms) => { cursorMs = ms; redraw(); };
-    tmap.onPick = (ms) => { pinMs = ms; cursorMs = ms; seekVideoTo(ms); redraw(); };
+    tmap.onPick = (ms) => {
+      pinMs = clampPin(ms); cursorMs = pinMs; seekVideoTo(pinMs); redraw();
+    };
     tmap.start();
     tmap.setSeamark(($("seamark") as HTMLInputElement).checked);
     tmap.setColorBySog(($("bySog") as HTMLInputElement).checked);
@@ -1778,6 +1780,15 @@ let playing = false;
 let clockRaf = 0;
 let clockPrev = 0;
 
+/** 고정 자리는 세션 안에만 있을 수 있다.
+ *
+ *  왼쪽 끝을 넘겨 끌면 0보다 작은 값이 됐다. 그러면 그림 그리는 쪽에서
+ *  "보는 범위 밖" 으로 치고 아예 안 그린다. 화면에서는 커서가 이름칸 뒤로
+ *  숨어 버린 것처럼 보였다. 없는 시각을 가리키고 있으니 당연하다. */
+function clampPin(ms: number): number {
+  return Math.min(fullSpan.to, Math.max(fullSpan.from, ms));
+}
+
 /** 커서가 보는 자리 밖으로 나가면 화면을 따라 밀어 준다. */
 function followCursor() {
   if (pinMs === null) return;
@@ -2089,12 +2100,22 @@ function wire() {
     renderVbar();
     redraw();
   }
-  v.addEventListener("play", () => { playing = true; armFollow(); renderVbar(); renderTransport(); });
+  // ★ 영상 사건이 playing 을 건드리지 않는다.
+  //
+  //   영상은 시간 막대에 딸린 것이지 주인이 아니다. 그런데 여기서
+  //   playing 을 켜 두면, 멈추기를 눌러 껐다가 뒤늦게 도착한 영상의 "play"
+  //   사건이 다시 켜 버린다. 영상 재생은 약속(Promise)이라 늦게 온다.
+  //   그래서 한 번 눌러서는 안 멈추고 두 번 눌러야 멈췄다.
+  //
+  //   이제 playing 을 정하는 것은 playAll 과 pauseAll 뿐이다.
+  v.addEventListener("play", () => { armFollow(); renderVbar(); renderTransport(); });
   v.addEventListener("timeupdate", syncFromVideo);
   armFollow();
 
   v.addEventListener("seeked", () => { seeking = false; syncFromVideo(); });
-  v.addEventListener("pause", () => { playing = false; renderVbar(); renderTransport(); });
+  v.addEventListener("pause", () => { renderVbar(); renderTransport(); });
+  // 영상이 제 끝에 닿아 스스로 섰으면 시간 막대도 같이 선다.
+  v.addEventListener("ended", () => { if (playing) pauseAll(); });
   v.addEventListener("loadedmetadata", renderVbar);
 
   // 끌어다 놓기
@@ -2346,7 +2367,7 @@ function wire() {
     } else {
       // 그림 위를 끌면 훑는다
       drag = { kind: "scrub", x: e.clientX, from: view.from };
-      pinMs = tl.msAtX(c, view, e.clientX);
+      pinMs = clampPin(tl.msAtX(c, view, e.clientX));
       seekVideoTo(pinMs);
       redraw();
     }
@@ -2384,11 +2405,11 @@ function wire() {
       c.style.cursor = "grabbing";
     } else if (drag?.kind === "pill") {
       // 알약을 끌면 고정 자리가 따라온다. 영상도 (물려 있으면) 같이 간다.
-      pinMs = tl.msAtX(c, view, e.clientX);
+      pinMs = clampPin(tl.msAtX(c, view, e.clientX));
       cursorMs = pinMs;
       seekVideoTo(pinMs);
     } else if (drag?.kind === "scrub") {
-      pinMs = tl.msAtX(c, view, e.clientX);
+      pinMs = clampPin(tl.msAtX(c, view, e.clientX));
       cursorMs = pinMs;
       seekVideoTo(pinMs);
     } else if (drag?.kind === "pan") {

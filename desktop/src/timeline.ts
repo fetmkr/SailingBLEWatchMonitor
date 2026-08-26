@@ -687,6 +687,9 @@ export function draw(o: DrawOpts): void {
   //
   // 어두운 바탕에 얇은 선 하나면 눈에 안 들어온다. 굵게 긋고, 시간 축에
   // 시각을 적은 알약을 붙이고, 위아래에 손잡이를 둔다.
+  // 안 그리면 잡히는 자리도 없애야 한다. 안 그러면 지난번에 그린 자리가
+  // 그대로 남아, 아무것도 없는 곳을 눌렀는데 알약을 잡은 것이 된다.
+  pillBox = null;
   if (o.pinMs !== null && o.pinMs >= view.from && o.pinMs <= view.to) {
     const x = Math.round(xOf(o.pinMs)) + 0.5;
 
