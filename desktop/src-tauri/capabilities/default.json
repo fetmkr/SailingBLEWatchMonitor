@@ -46,7 +46,6 @@
     },
     "core:webview:default",
     "fs:allow-read-file",
-    "blec:default",
-    "serialplugin:default"
+    "blec:default"
   ]
 }

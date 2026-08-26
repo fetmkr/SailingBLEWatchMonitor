@@ -21,8 +21,8 @@ import { SerialPort } from "tauri-plugin-serialplugin-api";
 
 const inApp = typeof (globalThis as any).__TAURI_INTERNALS__ !== "undefined";
 
-/** 이 판에서 USB 를 쓸 수 있나. 브라우저로 열어 보는 중이면 못 쓴다. */
-export const usable = inApp;
+// 이 기기에서 USB 를 쓸 수 있는지는 여기서 정하지 않는다.
+// platform.ts 의 caps() 하나만 본다.
 
 /** 꽂혀 있는 것 하나. */
 export interface Port {

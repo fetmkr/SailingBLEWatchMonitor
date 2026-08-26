@@ -14,6 +14,7 @@ import * as lib from "./library";
 import * as vid from "./video";
 import * as ble from "./ble";
 import * as usb from "./usb";
+import * as plat from "./platform";
 import * as panes from "./panes";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import * as tl from "./timeline";
@@ -748,7 +749,7 @@ let boardFiles: FileInfo[] = [];
 function syncBoardBar() {
   // 주소 칸은 BLE 를 못 쓰거나 사람이 "주소로" 를 눌렀을 때만 보인다
   ($("hostBar") as HTMLElement).style.display =
-    (byHand || !ble.usable) ? "flex" : "none";
+    (byHand || !plat.caps().ble) ? "flex" : "none";
   // 연결 해제는 붙어 있을 때만 뜬다. 연락을 보내고 있으면 붙어 있는 것이다.
   ($("btDrop") as HTMLElement).style.display =
     pinger !== null ? "inline-block" : "none";
@@ -876,7 +877,7 @@ async function scanBoards() {
   }
 
   // ── 블루투스로 못 찾았다. USB 를 본다 ──
-  if (!usb.usable) {
+  if (!plat.caps().usb) {
     scanning = false;
     renderBoards();
     setStatus(st.ok ? "못 찾았습니다. 보드가 켜져 있는지 보세요."
@@ -2348,6 +2349,10 @@ wire();
 loadLayout();
 redraw();
 setStatus("파일을 열거나 보드에서 받으세요.");
+
+// 이 기기에서 뭐가 되는지 먼저 물어본다 (platform.ts 참고).
+// 답이 늦게 와도 앱은 이미 떠 있다. 오면 그때 화면만 다시 맞춘다.
+void plat.load().then(() => { syncBoardBar(); renderSide(); });
 
 lib.load().then((l) => { library = l; renderSide(); });
 
