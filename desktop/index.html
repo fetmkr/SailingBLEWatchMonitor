@@ -3,15 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <!--
-      화면 전체가 확대되지 않게 막는다.
+      손가락 두 개로 화면 전체를 키우는 것을 막는다.
 
-      손가락 두 개로 벌리거나 두 번 톡톡 치면 웹 화면은 원래 확대된다.
-      계기판에서는 이러면 안 된다. 그래프를 끌려다 화면이 커져 버리고,
-      돌아오는 방법도 마땅치 않다. 그래프를 넓게 보는 일은 앱 안의
-      시간축이 따로 맡는다.
+      아이패드에서 화면을 만드는 wry 는 확대에 아무것도 안 한다. 소스를
+      읽어 보면 튕김만 끈다 (wkwebview/mod.rs 528줄의 setBounces(false)).
+      확대를 끄는 설정은 있는데 윈도우 전용이다. 그러니 확대를 정하는 건
+      이 한 줄뿐이다.
 
-      viewport-fit=cover 는 화면 가장자리가 둥근 아이패드에서
-      바탕색이 끝까지 차게 한다.
+      ★ "요즘 iOS 는 user-scalable 을 무시한다" 는 이야기는 사파리 이야기다.
+        앱 안의 화면(WKWebView)은 그대로 따른다. 웹킷 쪽에서 직접 밝혔다.
+        [확인: https://webkit.org/blog/7367/new-interaction-behaviors-in-ios-10/]
+
+      ★ 대신 치르는 값이 있다. 눈이 어두운 사람이 화면을 키워 볼 수 없게
+        된다. 접근성 기준(WCAG 2.1 1.4.4)에 어긋난다. 배 위에서 젖은 손으로
+        만지다 화면이 통째로 커지면 돌아올 방법이 마땅치 않아서 이쪽을
+        골랐다. 그래프와 지도는 앱 안에 따로 키우는 방법이 있다.
+
+      viewport-fit=cover 는 모서리가 둥근 아이패드에서 바탕색이 끝까지 차게 한다.
     -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0,
                                    maximum-scale=1.0, user-scalable=no,

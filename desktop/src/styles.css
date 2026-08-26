@@ -213,9 +213,21 @@ input[type="checkbox"], input[type="radio"] {
  * -webkit-text-size-adjust 는 가로로 돌렸을 때 iOS 가 글자 크기를
  * 제멋대로 키우는 것을 막는다. */
 html, body {
-  touch-action: pan-x pan-y;
   -webkit-text-size-adjust: 100%;
-  overscroll-behavior: none;
+}
+
+/* 입력칸을 눌렀을 때 화면이 확대되던 진짜 원인.
+ *
+ * iOS 는 글자가 16px 보다 작은 입력칸을 누르면 "안 보이겠구나" 하고
+ * 화면을 키운다. 우리 기본 글자는 13px 이고 입력칸은 font: inherit 이라
+ * 그대로 13px 이었다. 세션 서랍의 제목·선수·장소·메모 아무거나 누르면
+ * 커졌다.
+ * [확인: https://zudo-tauri-wisdom.takazudomodular.com/docs/mobile/ios-input-auto-zoom/]
+ *
+ * pointer: coarse 는 "손가락으로 만지는 기기" 라는 뜻이다. 마우스를 쓰는
+ * 맥과 윈도는 13px 그대로 두고 아이패드에서만 키운다. 화면 배치가 안 흔들린다. */
+@media (pointer: coarse) {
+  input, textarea, select { font-size: 16px; }
 }
 
 /* 글자를 길게 눌렀을 때 뜨는 선택 표시와 파란 깜빡임을 없앤다.
