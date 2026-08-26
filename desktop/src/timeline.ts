@@ -216,12 +216,31 @@ let pillBox: { x: number; y: number; w: number; h: number } | null = null;
 const flagBoxes: { i: number; x: number; y: number; w: number; h: number }[] = [];
 
 /** 마우스가 파란 알약(고정 손잡이) 위에 있나 */
+/** 손이 닿아야 하는 최소 크기. CSS 의 --tap 을 그대로 읽는다.
+ *  맥은 28, 손가락 기기는 44 다. */
+function tapSize(): number {
+  const v = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue("--tap"));
+  return Number.isFinite(v) ? v : 44;
+}
+
 export function onPinPill(canvas: HTMLCanvasElement, cx: number, cy: number): boolean {
   if (!pillBox) return false;
   const r = canvas.getBoundingClientRect();
   const x = cx - r.left, y = cy - r.top;
-  return x >= pillBox.x - 3 && x <= pillBox.x + pillBox.w + 3 &&
-         y >= pillBox.y - 3 && y <= pillBox.y + pillBox.h + 3;
+
+  // ★ 눈에 보이는 알약보다 잡는 자리를 넓게 잡는다.
+  //   알약은 맥에서 가로 50 세로 17 밖에 안 된다. 애플이 말하는 최소가
+  //   28(마우스)·44(손가락)인데 한참 작다. 잡으려다 빗나가면 그림 위를
+  //   누른 것이 되어 커서가 그 자리로 튄다. 끌리는 게 아니라 튀는 것처럼
+  //   보인다.
+  //
+  //   그려지는 모양은 그대로 두고 닿는 넓이만 키운다.
+  const need = tapSize();
+  const padX = Math.max(3, (need - pillBox.w) / 2);
+  const padY = Math.max(3, (need - pillBox.h) / 2);
+  return x >= pillBox.x - padX && x <= pillBox.x + pillBox.w + padX &&
+         y >= pillBox.y - padY && y <= pillBox.y + pillBox.h + padY;
 }
 
 /** 마우스 밑에 깃발이 있으면 그 번호, 없으면 -1 */
