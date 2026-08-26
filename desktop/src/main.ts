@@ -194,6 +194,19 @@ async function intake(buf: Uint8Array, name: string) {
 
 // ── 값 묶음 만들기 ──────────────────────────────────────────────────────
 
+/**
+ * 선 색을 CSS 에서 읽어 온다.
+ *
+ * 캔버스라 CSS 가 안 먹으니 손으로 가져와야 한다. 색을 styles.css 한 군데에
+ * 모아 두면 판을 바꿀 때 선 색까지 같이 따라온다 — "계기판" 판은 선마다
+ * 쨍한 색을 쓴다.
+ */
+function sc(name: string, fallback: string): string {
+  const v = getComputedStyle(document.documentElement)
+    .getPropertyValue(`--s-${name}`).trim();
+  return v || fallback;
+}
+
 function buildSeries(s: hlog.Session) {
   const t0 = s.imu.length ? s.imu[0].ms : s.nav.length ? s.nav[0].ms : 0;
 
@@ -287,30 +300,30 @@ function buildSeries(s: hlog.Session) {
   // 다르면 그 차이가 조류나 옆미끄러짐이다.
   const main: tl.Series[] = [
     { code: "SOG",   name: n("SOG", "Speed Over Ground"), unit: "kn",
-      color: "#4ea1ff", xs: navX, ys: sog },
+      color: sc("sog", "#4ea1ff"), xs: navX, ys: sog },
     { code: "HDG",   name: n("HDG", "Heading"), unit: "deg",
-      color: "#ffd166", xs: navX, ys: hdg },
+      color: sc("hdg", "#ffd166"), xs: navX, ys: hdg },
     { code: "COG",   name: n("COG", "Course Over Ground"), unit: "deg",
-      color: "#77d4e8", xs: navX, ys: cog },
+      color: sc("cog", "#77d4e8"), xs: navX, ys: cog },
     { code: "HEEL",  name: n("HEEL", "Heel"), unit: "deg",
-      color: "#ff7a59", xs: imuX, ys: heel, zeroCentered: true },
+      color: sc("heel", "#ff7a59"), xs: imuX, ys: heel, zeroCentered: true },
     { code: "TRIM",  name: n("TRIM", "Trim"), unit: "deg",
-      color: "#ffc857", xs: imuX, ys: pitch, zeroCentered: true },
+      color: sc("trim", "#ffc857"), xs: imuX, ys: pitch, zeroCentered: true },
 
     // 가속·자이로 원본도 본 화면에 둔다. 힐과 트림이 여기서 나오고, 파도와
     // 태킹이 그대로 보인다. 100 Hz 로 기록하는 이유가 이 두 줄이다.
     { code: "ACCX",  name: n("ACCX", "Accel X"), unit: "g",
-      color: "#ff9f7a", xs: imuX, ys: ax_, zeroCentered: true },
+      color: sc("accx", "#ff9f7a"), xs: imuX, ys: ax_, zeroCentered: true },
     { code: "ACCY",  name: n("ACCY", "Accel Y"), unit: "g",
-      color: "#ffb3a0", xs: imuX, ys: ay_, zeroCentered: true },
+      color: sc("accy", "#ffb3a0"), xs: imuX, ys: ay_, zeroCentered: true },
     { code: "ACCZ",  name: n("ACCZ", "Accel Z"), unit: "g",
-      color: "#5ad19a", xs: imuX, ys: az },
+      color: sc("accz", "#5ad19a"), xs: imuX, ys: az },
     { code: "GYRX",  name: n("GYRX", "Gyro X"), unit: "deg/s",
-      color: "#b39dff", xs: imuX, ys: gx, zeroCentered: true },
+      color: sc("gyrx", "#b39dff"), xs: imuX, ys: gx, zeroCentered: true },
     { code: "GYRY",  name: n("GYRY", "Gyro Y"), unit: "deg/s",
-      color: "#c9b8ff", xs: imuX, ys: gy, zeroCentered: true },
+      color: sc("gyry", "#c9b8ff"), xs: imuX, ys: gy, zeroCentered: true },
     { code: "GYRZ",  name: n("GYRZ", "Gyro Z"), unit: "deg/s",
-      color: "#9d7bff", xs: imuX, ys: gz, zeroCentered: true },
+      color: sc("gyrz", "#9d7bff"), xs: imuX, ys: gz, zeroCentered: true },
   ];
 
   // ── 디버그 값 ──
@@ -320,20 +333,20 @@ function buildSeries(s: hlog.Session) {
   // 훈련 중에 떨어졌나 볼 때 쓴다. 평소에는 자리만 차지한다.
   const debug: tl.Series[] = [
     { code: "MAGX",  name: n("MAGX", "Mag X"), unit: "uT",
-      color: "#7ad4b0", xs: navX, ys: magX, zeroCentered: true },
+      color: sc("magx", "#7ad4b0"), xs: navX, ys: magX, zeroCentered: true },
     { code: "MAGY",  name: n("MAGY", "Mag Y"), unit: "uT",
-      color: "#8fdcc0", xs: navX, ys: magY, zeroCentered: true },
+      color: sc("magy", "#8fdcc0"), xs: navX, ys: magY, zeroCentered: true },
     { code: "MAGZ",  name: n("MAGZ", "Mag Z"), unit: "uT",
-      color: "#a4e4d0", xs: navX, ys: magZ, zeroCentered: true },
+      color: sc("magz", "#a4e4d0"), xs: navX, ys: magZ, zeroCentered: true },
     { code: "SAT",   name: n("SAT", "Satellites"), unit: "count",
-      color: "#8a8a8a", xs: navX, ys: sv },
+      color: sc("sat", "#8a8a8a"), xs: navX, ys: sv },
     // ★ 파일에는 HDOP 이 아니라 **위치 정확도(hAcc)** 가 들어 있다.
     //   폰은 NMEA 의 HDOP 을 그대로 보여주는데, 우리 파일에는 그게 없다.
     //   뜻은 비슷하다 — 작을수록 믿을 만하다. 단위는 미터다.
     { code: "HACC",  name: n("HACC", "Position Accuracy"), unit: "m",
-      color: "#b0a0d0", xs: navX, ys: hacc },
+      color: sc("hacc", "#b0a0d0"), xs: navX, ys: hacc },
     { code: "BATT",  name: n("BATT", "Battery"), unit: "V",
-      color: "#d0c060", xs: navX, ys: batt },
+      color: sc("batt", "#d0c060"), xs: navX, ys: batt },
   ];
 
   series = debugOn ? [...main, ...debug] : main;
@@ -1469,8 +1482,8 @@ function renderSide() { if (tab) renderTab(tab); }
 // 타임라인은 캔버스라 CSS 가 안 먹는다. 색을 styles.css 한 군데에 모아 두고
 // timeline.ts 가 거기서 읽어 간다. 그래서 여기서는 data-theme 만 바꾸고
 // 다시 그리라고 시키면 된다.
-type Theme = "ink" | "sea" | "paper" | "electric" | "auto";
-const THEMES: Theme[] = ["ink", "sea", "paper", "electric", "auto"];
+type Theme = "ink" | "sea" | "paper" | "electric" | "vivid" | "auto";
+const THEMES: Theme[] = ["ink", "sea", "paper", "electric", "vivid", "auto"];
 const THEME_KEY = "theme.v2";
 const DARK_KEY = "themeDark.v1";
 const MAPRAW_KEY = "mapRaw.v1";
@@ -1499,6 +1512,8 @@ function applyTheme() {
   localStorage.setItem(THEME_KEY, theme);
   localStorage.setItem(MAPRAW_KEY, mapRaw ? "1" : "0");
   renderTheme();
+  // 선 색도 판마다 다르다. 다시 읽어서 새로 만든다.
+  if (session) buildSeries(session);
   // 캔버스는 스스로 다시 안 그린다. 색을 새로 읽게 시킨다.
   //
   // 미루지 않고 바로 그린다. requestAnimationFrame 은 창이 가려져 있으면

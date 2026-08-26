@@ -27,6 +27,42 @@
   color-scheme: dark;
 }
 
+/* ── 선 색 ────────────────────────────────────────────────────────────
+   timeline 이 캔버스라 CSS 가 안 먹는다. main.ts 가 여기서 읽어 간다.
+   판마다 다르게 하고 싶으면 그 판에서 덮어쓰면 된다 (vivid 참조). */
+:root {
+  --s-sog: #4ea1ff;  --s-hdg: #ffd166;  --s-cog: #77d4e8;
+  --s-heel: #ff7a59; --s-trim: #ffc857;
+  --s-accx: #ff9f7a; --s-accy: #ffb3a0; --s-accz: #5ad19a;
+  --s-gyrx: #b39dff; --s-gyry: #c9b8ff; --s-gyrz: #9d7bff;
+  --s-magx: #7ad4b0; --s-magy: #8fdcc0; --s-magz: #a4e4d0;
+  --s-sat: #8a8a8a;  --s-hacc: #b0a0d0; --s-batt: #d0c060;
+}
+
+/* ── 계기판 — 새까만 바탕에 쨍한 색 ────────────────────────────────
+   환자 감시장치가 쓰는 방식이다. 바탕을 완전한 검정으로 두면 선이 스스로
+   빛나 보인다. 배 위 햇빛 아래 그늘에서, 또는 어두운 선실에서 잘 보인다.
+   선마다 색이 뚜렷이 갈려서 여러 줄을 겹쳐 봐도 안 헷갈린다. */
+:root[data-theme="vivid"] {
+  --bg: #000000;      --panel: #070709;
+  --ink: #ffffff;     --dim: #9aa2ad;
+  --grid: #1c1c20;    --line: #24242a;
+  --hover: #16161a;   --btn: #16161a;   --btn-hover: #22222a;
+  --input: #000000;
+  --tl-band: #0a0a0c; --tl-plot: #000000; --tl-thumb: #4a4a55;
+  --mark: #ffb300;    --pin: #00e5ff;
+  --accent: #00e5ff;  --on-bg: #003a44;  --on-ink: #6ff2ff;
+  --map-filter: brightness(.7) saturate(1.1) contrast(1.05);
+  color-scheme: dark;
+
+  --s-sog: #00ff5f;  --s-hdg: #ffd400;  --s-cog: #00e5ff;
+  --s-heel: #ff2d2d; --s-trim: #ff9500;
+  --s-accx: #ff2d95; --s-accy: #ff7ac0; --s-accz: #00ff9d;
+  --s-gyrx: #b46bff; --s-gyry: #d7a6ff; --s-gyrz: #8a2bff;
+  --s-magx: #00d0a0; --s-magy: #35e0bb; --s-magz: #6af0d4;
+  --s-sat: #c8c8c8;  --s-hacc: #ff7ac0; --s-batt: #ffe066;
+}
+
 /* ── 심해 — 남색 어둠. 요트 계기가 쓰는 쪽 ───────────────────────── */
 :root[data-theme="sea"] {
   --bg: #07101c;      --panel: #0d1928;
@@ -226,8 +262,8 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 /* ★ 최소 크기를 풀어야 한다. panes.ts 가 칸마다 최소 크기를 넣어 두는데
      (영상은 180px 처럼), 접었을 때도 그게 살아 있으면 28px 로 안 줄어든다. */
 .mini {
-  flex: 0 0 28px !important;
-  min-width: 28px !important; min-height: 28px !important;
+  flex: 0 0 34px !important;
+  min-width: 34px !important; min-height: 34px !important;
   padding: 0 !important; overflow: hidden;
 }
 .mini > *:not(.rail) { display: none !important; }
@@ -247,15 +283,28 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 }
 .mini > .rail:hover { background: var(--on-bg); color: var(--on-ink); }
 .mini > .rail span:first-child { opacity: .7; }
-.railname { writing-mode: vertical-rl; letter-spacing: 1px; }
+
+/*
+   ★ 세로쓰기(writing-mode)를 안 쓴다.
+     앱은 사파리 엔진으로 도는데, 거기서 한글 세로쓰기가 두 칸으로 갈라져
+     "지도" 가 "도 지" 로 보였다 (실제로 그랬다). 크롬에서는 멀쩡해서
+     브라우저로만 보면 못 잡는다.
+
+     이름이 다 두세 글자라 가로로도 34px 띠에 들어간다. 굳이 돌릴 이유가 없다.
+*/
+.railname {
+  writing-mode: horizontal-tb;
+  font-size: 10px; line-height: 1.15; text-align: center;
+  word-break: keep-all; padding: 0 2px;
+}
 
 /*
    영상과 지도를 둘 다 접으면 그 줄 자체가 28px 띠가 된다.
    접힌 칸 둘이 그 안에 나란히 앉아 각각 절반을 쓴다.
 */
 #mediaRow.rowmini {
-  flex: 0 0 28px !important;
-  min-width: 28px !important; min-height: 28px !important;
+  flex: 0 0 30px !important;
+  min-width: 30px !important; min-height: 30px !important;
 }
 #mediaRow.rowmini > .mini {
   flex: 1 1 0 !important; min-width: 0 !important;
@@ -263,14 +312,12 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 #mediaRow.rowmini > .mini > .rail {
   flex-direction: row; justify-content: center; gap: 6px; padding: 0;
 }
-#mediaRow.rowmini .railname { writing-mode: horizontal-tb; }
 
 /* 좌우로 놓았을 때는 세로 띠가 된다 */
 #center.row #mediaRow.rowmini { flex-direction: column; }
 #center.row #mediaRow.rowmini > .mini > .rail {
   flex-direction: column; padding: 8px 0;
 }
-#center.row #mediaRow.rowmini .railname { writing-mode: vertical-rl; }
 
 /* ── 오른쪽 서랍과 아이콘 줄 ─────────────────────────────────────── */
 /*
@@ -449,13 +496,12 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 
 /* 데이터 칸이 접히면 — 위아래로 놓았을 때는 가로 띠 */
 #center:not(.row) > #dataPane.mini {
-  flex: 0 0 28px !important;
-  min-height: 28px !important; min-width: 0 !important;
+  flex: 0 0 30px !important;
+  min-height: 30px !important; min-width: 0 !important;
 }
 #center:not(.row) > #dataPane.mini > .rail {
   flex-direction: row; justify-content: center; gap: 6px; padding: 0;
 }
-#center:not(.row) > #dataPane.mini .railname { writing-mode: horizontal-tb; }
 
 /* 어느 길로 찾았는지 — 블루투스인가 USB 인가 */
 .via {
