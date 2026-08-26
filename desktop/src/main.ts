@@ -575,6 +575,15 @@ function redraw() {
   // 지도의 배 표시는 그래프 칸이 꺼져 있어도 따라와야 한다
   tmap?.setBoat(pinMs !== null ? pinMs : cursorMs);
 
+  // 전체 보기 단추를 흐리게. 이미 전체를 보고 있으면 눌러도 바뀔 게 없는데,
+  // 그걸 안 보여주면 "단추가 고장 났나" 싶다 (실제로 그렇게 보였다).
+  const fitBtn = document.querySelector<HTMLElement>("#dataPane .handles .fit");
+  if (fitBtn) {
+    const all = Math.abs(view.from - fullSpan.from) < 1 &&
+                Math.abs(view.to - fullSpan.to) < 1;
+    fitBtn.classList.toggle("off", all);
+  }
+
   const c = canvas();
   // 꺼진 칸은 크기가 0 이라 그릴 것도 없다
   if (c.clientWidth < 2 || c.clientHeight < 2) return;
@@ -1536,9 +1545,14 @@ function mountPaneHandles() {
     if (k === "data") {
       const fit = document.createElement("button");
       fit.textContent = "↔";
+      fit.className = "fit";
       fit.title = "전체 보기";
       fit.onclick = (e) => {
         e.stopPropagation();
+        if (fit.classList.contains("off")) {
+          setStatus("이미 전체를 보고 있습니다.");
+          return;
+        }
         view = { ...fullSpan };
         redraw();
       };
