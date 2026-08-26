@@ -391,8 +391,12 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
 /* ★ 최소 크기를 풀어야 한다. panes.ts 가 칸마다 최소 크기를 넣어 두는데
      (영상은 180px 처럼), 접었을 때도 그게 살아 있으면 28px 로 안 줄어든다. */
 .mini {
-  flex: 0 0 34px !important;
-  min-width: 34px !important; min-height: 34px !important;
+  /* ★ 접힌 띠는 누를 수 있는 최소 크기(44)를 지킨다.
+       전에는 34 였는데, 단추의 최소 높이를 44 로 올리자 44 짜리 알맹이가
+       34 짜리 칸에서 밀려나 글자가 아래로 처져 보였다. 띠를 키우는 쪽이
+       맞다. 34 는 손가락으로 누르기에도 작았다. */
+  flex: 0 0 var(--tap) !important;
+  min-width: var(--tap) !important; min-height: var(--tap) !important;
   padding: 0 !important; overflow: hidden;
 }
 .mini > *:not(.rail) { display: none !important; }
@@ -405,8 +409,11 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
      그래서 한 톤 밝게 깔고 테두리를 두른다.
 */
 .mini > .rail {
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-  width: 100%; height: 100%; padding: 8px 0;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: var(--sp2);
+  width: 100%; height: 100%; padding: var(--sp2) 0;
+  /* 띠 자체가 이미 44 다. 단추의 최소 높이를 풀어 띠를 넘지 않게 한다. */
+  min-height: 0;
   background: var(--hover); border: 1px solid var(--line); border-radius: 0;
   color: var(--ink); font-size: var(--fs-xs); cursor: pointer;
 }
@@ -432,8 +439,8 @@ canvas { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
    접힌 칸 둘이 그 안에 나란히 앉아 각각 절반을 쓴다.
 */
 #mediaRow.rowmini {
-  flex: 0 0 30px !important;
-  min-width: 30px !important; min-height: 30px !important;
+  flex: 0 0 var(--tap) !important;
+  min-width: var(--tap) !important; min-height: var(--tap) !important;
 }
 #mediaRow.rowmini > .mini {
   flex: 1 1 0 !important; min-width: 0 !important;
@@ -668,8 +675,8 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 
 /* 데이터 칸이 접히면 — 위아래로 놓았을 때는 가로 띠 */
 #center:not(.row) > #dataPane.mini {
-  flex: 0 0 30px !important;
-  min-height: 30px !important; min-width: 0 !important;
+  flex: 0 0 var(--tap) !important;
+  min-height: var(--tap) !important; min-width: 0 !important;
 }
 #center:not(.row) > #dataPane.mini > .rail {
   flex-direction: row; justify-content: center; gap: 6px; padding: 0;
