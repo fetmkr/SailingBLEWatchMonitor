@@ -112,6 +112,55 @@ def write(path, im):
     print(f"  {os.path.relpath(path, ROOT):58} {im.size[0]}x{im.size[1]}")
 
 
+# watchOS 아이콘 한 벌. (지름 pt, 배율, 쓰이는 곳, 화면 크기)
+WATCH_SPEC = [
+    (24,   2, "notificationCenter", "38mm"),
+    (27.5, 2, "notificationCenter", "42mm"),
+    (33,   2, "notificationCenter", "45mm"),
+    (29,   2, "companionSettings",  None),   # ← 아이폰 워치 앱 목록이 읽는 자리
+    (29,   3, "companionSettings",  None),
+    (40,   2, "appLauncher", "38mm"),
+    (44,   2, "appLauncher", "40mm"),
+    (46,   2, "appLauncher", "41mm"),
+    (50,   2, "appLauncher", "44mm"),
+    (51,   2, "appLauncher", "45mm"),
+    (54,   2, "appLauncher", "49mm"),
+    (86,   2, "quickLook", "38mm"),
+    (98,   2, "quickLook", "42mm"),
+    (108,  2, "quickLook", "44mm"),
+    (117,  2, "quickLook", "45mm"),
+    (129,  2, "quickLook", "49mm"),
+]
+
+
+def watch_icons():
+    import json
+    d = os.path.join(ROOT, "app/Watch/Assets.xcassets/AppIcon.appiconset")
+    for f in os.listdir(d):
+        if f.endswith(".png"):
+            os.remove(os.path.join(d, f))
+
+    images = []
+    for pt, sc, role, sub in WATCH_SPEC:
+        px = int(round(pt * sc))
+        fn = f"AppIcon-{px}.png"
+        render(px, mark_scale=0.92, alpha=False).save(os.path.join(d, fn))
+        e = {"filename": fn, "idiom": "watch", "role": role,
+             "scale": f"{sc}x", "size": f"{pt:g}x{pt:g}"}
+        if sub:
+            e["subtype"] = sub
+        images.append(e)
+
+    render(1024, mark_scale=0.92, alpha=False).save(os.path.join(d, "AppIcon-1024.png"))
+    images.append({"filename": "AppIcon-1024.png", "idiom": "watch-marketing",
+                   "scale": "1x", "size": "1024x1024"})
+
+    with open(os.path.join(d, "Contents.json"), "w") as f:
+        json.dump({"images": images, "info": {"author": "xcode", "version": 1}},
+                  f, indent=2)
+    print(f"  {os.path.relpath(d, ROOT):58} {len(images)}장")
+
+
 def main():
     # ── 아이폰 ────────────────────────────────────────────────────────
     # 앱스토어 아이콘은 투명한 곳이 있으면 안 된다. RGB 로 저장한다.
@@ -121,9 +170,15 @@ def main():
 
     # ── 워치 ──────────────────────────────────────────────────────────
     # 워치는 아이콘을 동그랗게 잘라낸다. 꺾쇠 귀퉁이가 잘리지 않게 살짝 줄인다.
+    #
+    # ★ 1024 한 장만 넣으면 안 된다.
+    #   그렇게 하면 컴파일된 자산 목록에 그림이 딱 한 장만 들어간다. 워치
+    #   본체는 그걸 줄여 쓰니 잘 보이는데, 아이폰의 워치 앱 목록은
+    #   companionSettings 라는 따로 있는 자리(29pt 의 2배·3배, 즉 58 과 87)
+    #   를 읽는다. 그 자리가 비어서 목록에 빈칸으로 나왔다.
+    #   actool 로 직접 컴파일해서 확인했다.
     print("워치  (동그랗게 잘리므로 마크를 92% 로)")
-    write(os.path.join(ROOT, "app/Watch/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"),
-          render(1024, mark_scale=0.92, alpha=False))
+    watch_icons()
 
     # ── 데스크탑 ──────────────────────────────────────────────────────
     print("데스크탑")
