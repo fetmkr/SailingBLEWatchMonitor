@@ -1807,6 +1807,20 @@ function pauseAll() {
   renderTransport();
 }
 
+/* 창이 가려지면 재생을 세운다.
+ *
+ * 맥이든 아이패드든 창이 안 보이면 화면 갱신을 멈춘다. 그러면 우리 시계도
+ * 같이 멈춘다. 그것만이면 괜찮은데, 영상은 안 멈춘다. 돌아와 보면 영상과
+ * 커서가 어긋나 있다.
+ *
+ * 그래서 가려질 때 영상까지 같이 세운다. 자리는 그대로 남는다. 잠깐 다른
+ * 걸 보고 왔는데 재생이 저만치 가 있으면 그게 더 곤란하다.
+ *
+ * 돌아와도 저절로 다시 틀지 않는다. 사람이 누를 때 튼다. */
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && playing) pauseAll();
+});
+
 function clockTick(now: number) {
   if (!playing) return;
   const dt = now - clockPrev;
