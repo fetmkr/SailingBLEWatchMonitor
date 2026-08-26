@@ -135,6 +135,12 @@ input, select {
   background: var(--input); color: var(--ink); border: 1px solid var(--line);
   border-radius: 6px; padding: 5px 9px; font: inherit; width: 160px;
 }
+/* ★ 체크박스는 글 입력칸이 아니다.
+     위 규칙의 width:160px 이 체크박스에도 걸려서, 설정 서랍에서 체크박스가
+     135px 를 차지하고 "디버그 값 보기" 가 한 글자씩 세로로 쌓였다. */
+input[type="checkbox"], input[type="radio"] {
+  width: auto; flex: none; padding: 0; margin: 0;
+}
 .dim { color: var(--dim); }
 .bad { color: #ff6b6b; }
 .good { color: #5ad19a; }
@@ -492,7 +498,11 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .segv button span { font-size: 11px; color: var(--dim); }
 .segv button.on { background: var(--on-bg); color: var(--on-ink); border-color: var(--accent); }
 .segv button.on span { color: inherit; opacity: .8; }
-.chk { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); }
+.chk {
+  display: flex; gap: 6px; align-items: center;
+  font-size: 12px; color: var(--dim);
+  word-break: keep-all;          /* 한글이 낱글자로 갈라지지 않게 */
+}
 
 /* 데이터 칸이 접히면 — 위아래로 놓았을 때는 가로 띠 */
 #center:not(.row) > #dataPane.mini {
