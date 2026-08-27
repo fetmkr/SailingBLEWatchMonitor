@@ -191,6 +191,29 @@
       어긋났는지 맞추는 단추들은 영상 칸에 남겼다. 그건 영상이 있을 때만
       뜻이 있다.
     -->
+    <!--
+      파일 고르기는 화면이 직접 한다.
+
+      Tauri 의 고르기 창을 쓰면 경로만 오고, 그 뒤로 바이트가 IPC 를 거쳐야
+      한다. 그게 아주 느리다 (20MB 에 1분 넘었다는 보고가 있다). 영상은 asset
+      주소로 붙이는데 그쪽도 Range 요청이 없으면 파일을 통째로 메모리에 올린다.
+      [확인: tauri-apps/tauri 의 issue 1817, 4133, 6375]
+
+      화면이 직접 고르면 File 을 그대로 받는다. URL.createObjectURL 은 복사를
+      안 하고 디스크에서 흘려 주고, slice() 는 필요한 조각만 읽는다. 끌어다
+      놓기는 원래부터 이 길로 돌고 있었다.
+    -->
+    <!--
+      ★ 영상 고르기에는 accept 를 안 건다.
+        걸어 두면 iOS 가 사진 창으로 바로 간다. 사진첩 영상은 거기 있지만
+        그 창은 애플이 가운데 작은 판으로 그린다. 비워 두면 먼저 물어본다 —
+        사진 보관함이냐, 파일이냐. 파일 쪽은 전체 화면이다.
+        [확인: developer.apple.com/forums/thread/134250]
+
+        맥에서는 아무 차이가 없다. 고르기 창이 하나뿐이다. -->
+    <input id="pickVideo" type="file" hidden />
+    <input id="pickData"  type="file" accept=".HLG,.hlg" hidden />
+
     <div id="transport">
       <button id="play" title="재생 · 멈춤">▶</button>
       <span id="ttime" class="mono dim">0:00 / 0:00</span>

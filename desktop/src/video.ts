@@ -16,7 +16,26 @@
 //     영상 시각 → 세션 시각   offsetMs + videoTime * 1000
 
 /** MP4 가 적어 둔 찍은 시각을 읽는다. 못 읽으면 null. */
-export async function mp4CreationTime(blob: Blob): Promise<Date | null> {
+/** 파일에서 필요한 조각만 꺼내 오는 것.
+ *
+ *  영상은 몇백 MB 가 예사다. 시각 하나 읽자고 통째로 메모리에 올릴 수 없다.
+ *  실제로 아이패드에서 영상을 고르면 한참 기다려야 했다. 앞 2MB, 뒤 2MB 만
+ *  있으면 되므로 그 두 조각만 달라고 한다. */
+export interface RangeReader {
+  size: number;
+  read(from: number, len: number): Promise<Uint8Array>;
+}
+
+/** 이미 통째로 들고 있는 것(끌어다 놓기, 시험용)은 이걸로 감싼다. */
+export function blobReader(blob: Blob): RangeReader {
+  return {
+    size: blob.size,
+    read: async (from, len) =>
+      new Uint8Array(await blob.slice(from, from + len).arrayBuffer()),
+  };
+}
+
+export async function mp4CreationTime(src: RangeReader): Promise<Date | null> {
   // moov > mvhd 를 찾는다. 파일 앞이나 뒤에 있으므로 양쪽을 본다.
   //
   // 상자 구조:  [크기 4바이트][이름 4바이트][내용 …]
@@ -24,7 +43,7 @@ export async function mp4CreationTime(blob: Blob): Promise<Date | null> {
   const MAC_EPOCH_DIFF = 2082844800;
 
   const scan = async (from: number, len: number): Promise<Date | null> => {
-    const buf = new Uint8Array(await blob.slice(from, from + len).arrayBuffer());
+    const buf = await src.read(from, len);
     const d = new DataView(buf.buffer);
     for (let i = 0; i + 20 < buf.length; i++) {
       if (buf[i] !== 0x6d || buf[i + 1] !== 0x76 ||
@@ -47,11 +66,10 @@ export async function mp4CreationTime(blob: Blob): Promise<Date | null> {
     return null;
   };
 
-  const head = await scan(0, Math.min(blob.size, 2 * 1024 * 1024));
+  const CHUNK = 2 * 1024 * 1024;
+  const head = await scan(0, Math.min(src.size, CHUNK));
   if (head) return head;
-  if (blob.size > 2 * 1024 * 1024) {
-    return await scan(Math.max(0, blob.size - 2 * 1024 * 1024), 2 * 1024 * 1024);
-  }
+  if (src.size > CHUNK) return await scan(Math.max(0, src.size - CHUNK), CHUNK);
   return null;
 }
 

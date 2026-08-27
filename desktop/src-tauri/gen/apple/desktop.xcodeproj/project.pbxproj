@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		1E83CCA8B23807850E085625 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B5A564FE39B13DCF7BBDE23A /* MetalKit.framework */; };
+		28FBD1F1AED3D3DCF2C0B599 /* libapp 2.a in Resources */ = {isa = PBXBuildFile; fileRef = 777CE2BE1BDBBB64714C0C27 /* libapp 2.a */; };
 		3C15E4CA94DE0397D1762460 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7A2559D9FA42404B609B8ACF /* WebKit.framework */; };
 		3F261A433C4A9FC231AE1B86 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 23E1972A7910727CF7C54324 /* Metal.framework */; };
 		453463D8A33F2C1835E8E179 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 7A35E7E59E2418667E34196C /* LaunchScreen.storyboard */; };
@@ -31,6 +32,7 @@
 		5A6C8476CB661BF5AC813BDF /* CoreBluetooth.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreBluetooth.framework; path = System/Library/Frameworks/CoreBluetooth.framework; sourceTree = SDKROOT; };
 		5D9B1A5350D90F61AD5C52B0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		74836CA5EB5832243D76DD9D /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
+		777CE2BE1BDBBB64714C0C27 /* libapp 2.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libapp 2.a"; sourceTree = "<group>"; };
 		7A2559D9FA42404B609B8ACF /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		7A35E7E59E2418667E34196C /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		8AB56B8219EE809C5C3185CC /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
@@ -136,6 +138,7 @@
 		C2C112D649F6188374EBFBC1 /* debug */ = {
 			isa = PBXGroup;
 			children = (
+				777CE2BE1BDBBB64714C0C27 /* libapp 2.a */,
 				8AB56B8219EE809C5C3185CC /* libapp.a */,
 			);
 			path = debug;
@@ -173,7 +176,7 @@
 			path = desktop;
 			sourceTree = "<group>";
 		};
-		"TEMP_1A520464-E9CD-4F4C-AE46-8E9FA4CA1472" /* x86_64 */ = {
+		"TEMP_4566EBAA-9EFC-4546-BB0F-967AFD10C76C" /* x86_64 */ = {
 			isa = PBXGroup;
 			children = (
 			);
@@ -212,6 +215,9 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					E00BC70545A075F4DB9E884E = {
+						DevelopmentTeam = KC8YM8J64N;
+					};
 				};
 			};
 			buildConfigurationList = 2A3CDF1FD0F2D371BB78DFD1 /* Build configuration list for PBXProject "desktop" */;
@@ -241,6 +247,7 @@
 				4EB31719E5BA4F1D7D05E3F5 /* Assets.xcassets in Resources */,
 				453463D8A33F2C1835E8E179 /* LaunchScreen.storyboard in Resources */,
 				A803E492E789017EFD4D2590 /* assets in Resources */,
+				28FBD1F1AED3D3DCF2C0B599 /* libapp 2.a in Resources */,
 				9615A2C9DB979608A93CF72A /* libapp.a in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -412,6 +419,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = desktop_iOS/desktop_iOS.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = KC8YM8J64N;
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -443,6 +451,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = desktop_iOS/desktop_iOS.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = KC8YM8J64N;
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (

@@ -22,6 +22,8 @@
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>배에 달린 기록 장치를 찾아 WiFi 를 켜는 데 씁니다.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>배에 달린 기록 장치에 붙어 훈련 기록을 받아 오는 데 씁니다.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>
@@ -39,7 +41,5 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>같은 WiFi 에 있는 기록 장치를 이름으로 찾는 데 씁니다.</string>
 </dict>
 </plist>

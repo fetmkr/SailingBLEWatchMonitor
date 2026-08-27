@@ -6,8 +6,6 @@
 //
 // 설계는 ../../TRANSFER.md 에 있다.
 
-import { open } from "@tauri-apps/plugin-dialog";
-import { readFile } from "@tauri-apps/plugin-fs";
 import { fetch as tfetch } from "@tauri-apps/plugin-http";
 import * as hlog from "./hlog";
 import * as lib from "./library";
@@ -16,7 +14,6 @@ import * as ble from "./ble";
 import * as usb from "./usb";
 import * as plat from "./platform";
 import * as panes from "./panes";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import * as tl from "./timeline";
 import { TrackMap, type TrackPoint } from "./map";
 import "./styles.css";
@@ -128,15 +125,49 @@ function setStatus(text: string, kind: "" | "bad" | "good" = "") {
 
 // ── 파일 열기 ───────────────────────────────────────────────────────────
 
-async function openFile() {
-  const path = await open({
-    multiple: false,
-    filters: [{ name: "기록 파일", extensions: ["HLG", "hlg"] }],
+/** 화면이 직접 파일을 고르게 한다. 고르면 File 이 그대로 온다.
+ *
+ *  Tauri 고르기 창은 경로만 주고 바이트는 IPC 를 거쳐야 하는데 그게 아주
+ *  느리다. 여기서 받는 File 은 디스크에 그대로 있고, 필요한 조각만 읽힌다.
+ *  (index.html 의 주석에 근거를 적어 뒀다) */
+const waiting = new Map<string, (f: File | null) => void>();
+
+function pickFile(inputId: string): Promise<File | null> {
+  // ★ 앞서 기다리던 것이 있으면 먼저 닫는다.
+  //
+  //   고르기 창을 취소하면 change 가 안 온다. 그대로 두면 기다리던 것이
+  //   안 끝나고 쌓인다. 다음에 또 누르면 하나 더 쌓이고, 마침내 파일을
+  //   고르는 순간 쌓인 것들이 한꺼번에 터진다. 아이패드에서 고르기 창이
+  //   계속 다시 뜨는 것처럼 보였다.
+  waiting.get(inputId)?.(null);
+  return new Promise((resolve) => {
+    waiting.set(inputId, resolve);
+    ($(inputId) as HTMLInputElement).click();
   });
-  if (!path || typeof path !== "string") return;
+}
+
+/** 고르기 칸이 끝났을 때(골랐든 취소했든) 기다리던 것을 닫는다.
+ *  듣는 자리는 앱이 뜰 때 한 번만 단다. 부를 때마다 달면 그것도 쌓인다. */
+function wirePickers() {
+  for (const id of ["pickVideo", "pickData"]) {
+    const el = $(id) as HTMLInputElement;
+    const settle = () => {
+      const done = waiting.get(id);
+      waiting.delete(id);
+      const f = el.files && el.files[0] ? el.files[0] : null;
+      el.value = "";              // 같은 파일을 다시 골라도 알아채게
+      done?.(f);
+    };
+    el.addEventListener("change", settle);
+    el.addEventListener("cancel", settle);   // 취소해도 끝은 끝이다
+  }
+}
+
+async function openFile() {
+  const f = await pickFile("pickData");
+  if (!f) return;
   setStatus("읽는 중…");
-  const bytes = await readFile(path);
-  await intake(new Uint8Array(bytes), path.split("/").pop() ?? path);
+  await intake(new Uint8Array(await f.arrayBuffer()), f.name);
 }
 
 function loadBytes(buf: Uint8Array, name: string): hlog.Session | null {
@@ -1732,16 +1763,28 @@ const video = () => $("vid") as HTMLVideoElement;
 let sliderHeld = false;
 
 async function openVideo() {
-  const path = await open({
-    multiple: false,
-    filters: [{ name: "영상", extensions: ["mp4", "MP4", "mov", "MOV", "m4v"] }],
-  });
-  if (!path || typeof path !== "string") return;
-  await useVideoUrl(convertFileSrc(path), path.split("/").pop() ?? path,
-                    await readFile(path).then((b) => new Blob([new Uint8Array(b)])));
+  try {
+    const f = await pickFile("pickVideo");
+    if (!f) return;
+
+    // [임시 계측] 확인 뒤 지운다
+    const t0 = performance.now();
+    const v0 = video();
+    const ready = new Promise<void>((res) => {
+      const on = () => { v0.removeEventListener("loadedmetadata", on); res(); };
+      v0.addEventListener("loadedmetadata", on);
+      setTimeout(res, 20000);
+    });
+    await useVideoUrl(URL.createObjectURL(f), f.name, vid.blobReader(f));
+    await ready;
+    setStatus(`${f.name} · ${(f.size / 1048576).toFixed(0)}MB · ` +
+              `${((performance.now() - t0) / 1000).toFixed(1)}초 만에 열림`, "good");
+  } catch (e) {
+    setStatus(`영상을 못 열었습니다 — ${e}`, "bad");
+  }
 }
 
-async function useVideoUrl(url: string, name: string, blob: Blob | null) {
+async function useVideoUrl(url: string, name: string, src: vid.RangeReader | null) {
   const v = video();
   v.src = url;
   v.preload = "auto";
@@ -1754,7 +1797,7 @@ async function useVideoUrl(url: string, name: string, blob: Blob | null) {
 
   // 파일이 적어 둔 시각으로 첫 짐작을 만든다
   let ft: Date | null = null;
-  if (blob) { try { ft = await vid.mp4CreationTime(blob); } catch { /* 못 읽어도 된다 */ } }
+  if (src) { try { ft = await vid.mp4CreationTime(src); } catch { /* 못 읽어도 된다 */ } }
   const first = session?.imu[0]?.ms ?? session?.nav[0]?.ms ?? 0;
   sync = vid.guessOffset(ft, session?.header.utcStart ?? 0, first);
 
@@ -1969,7 +2012,7 @@ async function loadSample() {
     const vr = await fetch("/sample.mp4");
     if (vr.ok) {
       const blob = await vr.blob();
-      await useVideoUrl(URL.createObjectURL(blob), "sample.mp4 (시험용)", blob);
+      await useVideoUrl(URL.createObjectURL(blob), "sample.mp4 (시험용)", vid.blobReader(blob));
     }
   } catch { /* 없으면 그만이다 */ }
 }
@@ -2116,6 +2159,13 @@ function wire() {
   v.addEventListener("pause", () => { renderVbar(); renderTransport(); });
   // 영상이 제 끝에 닿아 스스로 섰으면 시간 막대도 같이 선다.
   v.addEventListener("ended", () => { if (playing) pauseAll(); });
+  // 화면이 영상을 못 읽으면 그것도 말해 준다. 그냥 까맣게 두면 왜인지 모른다.
+  v.addEventListener("error", () => {
+    const err = v.error;
+    if (!err) return;
+    const why = ["", "사람이 멈춤", "네트워크", "영상 형식을 못 품", "이 형식은 못 봄"][err.code] ?? "알 수 없음";
+    setStatus(`영상을 못 봅니다 — ${why} (${err.code})  ‹${v.currentSrc.slice(0, 90)}›`, "bad");
+  });
   v.addEventListener("loadedmetadata", renderVbar);
 
   // 끌어다 놓기
@@ -2128,7 +2178,7 @@ function wire() {
   wrap.addEventListener("drop", async (e) => {
     e.preventDefault();
     const f = (e as DragEvent).dataTransfer?.files?.[0];
-    if (f) await useVideoUrl(URL.createObjectURL(f), f.name, f);
+    if (f) await useVideoUrl(URL.createObjectURL(f), f.name, vid.blobReader(f));
   });
 
   // 오른쪽 아이콘 줄. 켜져 있는 것을 다시 누르면 닫힌다.
@@ -2492,6 +2542,7 @@ function wire() {
   // 스스로 끈다. 창이 닫히는 중이라 답을 기다릴 수도 없다.
   addEventListener("beforeunload", () => { if (pinger) void sleepBoard(true); });
   addEventListener("dragover", (e) => e.preventDefault());
+  wirePickers();
 
   // 서랍에 더 볼 게 있으면 그쪽 가장자리를 흐리게 해서 알린다.
   //
