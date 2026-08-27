@@ -65,6 +65,168 @@ uint32_t  gGoneAt = 0;          // 0 이면 상대가 붙어 있다
 
 void used() { gLastUse = millis(); gGoneAt = 0; }
 
+// ── 지금 이 보드를 쓰는 기기들 ───────────────────────────────────────────
+//
+// 보드는 한 번에 한 대만 상대한다. 그래서 다른 기기가 파일을 받는 중이면
+// 내 요청은 그냥 멈춰 있다. 실제로 4MB 를 받는 동안 다른 기기의 상태
+// 물어보기가 21.7초 기다렸다 [확인: 2026-08-27 실측].
+//
+// 이유를 모르면 사람은 고장으로 본다. 그래서 누가 있는지 적어 두고 알려준다.
+// id 는 앱이 스스로 만든 고유 번호다. 주소로 가리면 두 군데서 틀린다 —
+// 공유기가 주소를 바꾸면 같은 앱을 남으로 보고, 한 기기에서 앱 두 개를
+// 띄우면 서로 다른 앱을 나로 본다. 그래서 앱이 제 번호를 들고 다닌다.
+// 연락(ping)에 ?id= 로 실려 온다. 없으면 빈 글자다 (브라우저로 직접 본 경우).
+struct Seen { uint32_t ip; uint32_t at; char id[13]; };
+constexpr int      kMaxSeen     = 4;
+constexpr uint32_t kForgetMs    = 30000;   // 30초 안 오면 나간 것으로 본다
+Seen gSeen[kMaxSeen] = {};
+
+uint32_t gBusyIp = 0;                      // 지금 파일을 받아 가는 기기
+char     gBusyFile[40] = {0};
+
+// 방금 끝난 받기. **이게 실제로 쓰이는 값이다.**
+//
+// 받는 동안에는 보드가 다른 요청을 아예 못 읽는다. 그래서 다른 기기가
+// "누가 받고 있나" 를 물어보면 그 답은 받기가 끝난 뒤에야 나간다. 그때는
+// busy 가 이미 비어 있다. 대신 방금 누가 무엇을 받았는지를 남겨 두면,
+// 오래 기다린 앱이 왜 기다렸는지 사람에게 말해 줄 수 있다.
+uint32_t gLastIpDone   = 0;
+char     gLastFileDone[40] = {0};
+uint32_t gLastDoneAt   = 0;        // millis. 0 이면 아직 없다
+uint32_t gLastDoneMs   = 0;        // 얼마나 걸렸나
+
+void sawClient(uint32_t ip, const char* id = nullptr) {
+    if (ip == 0) return;
+    const uint32_t now = millis();
+    int oldest = 0;
+    for (int i = 0; i < kMaxSeen; i++) {
+        if (gSeen[i].ip == ip) {
+            gSeen[i].at = now;
+            if (id && *id) snprintf(gSeen[i].id, sizeof(gSeen[i].id), "%s", id);
+            return;
+        }
+        if (gSeen[i].ip == 0) {
+            gSeen[i].ip = ip; gSeen[i].at = now;
+            snprintf(gSeen[i].id, sizeof(gSeen[i].id), "%s", (id && *id) ? id : "");
+            return;
+        }
+        if (gSeen[i].at < gSeen[oldest].at) oldest = i;
+    }
+    gSeen[oldest].ip = ip;
+    gSeen[oldest].at = now;
+    snprintf(gSeen[oldest].id, sizeof(gSeen[oldest].id), "%s", (id && *id) ? id : "");
+}
+
+int seenCount() {
+    const uint32_t now = millis();
+    int n = 0;
+    for (int i = 0; i < kMaxSeen; i++) {
+        if (gSeen[i].ip == 0) continue;
+        if (now - gSeen[i].at > kForgetMs) { gSeen[i].ip = 0; continue; }
+        n++;
+    }
+    return n;
+}
+
+void ipText4(uint32_t ip, char* out, size_t n) {
+    if (ip == 0) { if (n) out[0] = 0; return; }
+    snprintf(out, n, "%lu.%lu.%lu.%lu",
+             (unsigned long)(ip & 0xFF), (unsigned long)((ip >> 8) & 0xFF),
+             (unsigned long)((ip >> 16) & 0xFF), (unsigned long)((ip >> 24) & 0xFF));
+}
+
+/**
+ * 이 번호를 뺀 나머지 기기 수. 번호가 빈 글자면 아무도 안 뺀다.
+ *
+ * 앱은 이 값만 보면 된다. 0 이면 나 혼자니 붙어도 되고, 1 이상이면 남이
+ * 쓰고 있으니 안 붙는다. 견주는 일을 보드가 하므로 앱이 헷갈릴 자리가 없다.
+ */
+int usersExcept(const char* id) {
+    const uint32_t now = millis();
+    int n = 0;
+    for (int i = 0; i < kMaxSeen; i++) {
+        if (gSeen[i].ip == 0) continue;
+        if (now - gSeen[i].at > kForgetMs) { gSeen[i].ip = 0; continue; }
+        if (id && *id && strcmp(gSeen[i].id, id) == 0) continue;   // 나다
+        n++;
+    }
+    return n;
+}
+
+/**
+ * 나 말고 쓰고 있는 기기 하나를 사람이 알아볼 이름으로. 사람에게 보여주려는
+ * 것뿐이다. 앱 번호가 있으면 그걸 쓴다 ("ios-8c21"). 브라우저로 직접 본
+ * 경우처럼 번호가 없으면 주소를 쓴다.
+ */
+const char* otherName(const char* id) {
+    static char buf[24];
+    buf[0] = 0;
+    const uint32_t now = millis();
+    for (int i = 0; i < kMaxSeen; i++) {
+        if (gSeen[i].ip == 0) continue;
+        if (now - gSeen[i].at > kForgetMs) { gSeen[i].ip = 0; continue; }
+        if (id && *id && strcmp(gSeen[i].id, id) == 0) continue;
+        if (gSeen[i].id[0]) snprintf(buf, sizeof(buf), "%s", gSeen[i].id);
+        else                ipText4(gSeen[i].ip, buf, sizeof(buf));
+        return buf;
+    }
+    return buf;
+}
+
+
+/** 상태와 연락 답에 같이 붙이는 조각. */
+void whoJson(char* out, size_t n) {
+    char busy[20] = {0}, last[20] = {0}, you[20] = {0};
+    ipText4(gBusyIp, busy, sizeof(busy));
+    ipText4(gLastIpDone, last, sizeof(last));
+    // 묻는 쪽이 자기 주소를 알아야 "남이 받았다" 와 "내가 받았다" 를 가른다.
+    ipText4((uint32_t)gServer.client().remoteIP(), you, sizeof(you));
+    snprintf(out, n,
+             "\"you\":\"%s\",\"users\":%d,\"busy\":\"%s\",\"busy_file\":\"%s\","
+             "\"last_ip\":\"%s\",\"last_file\":\"%s\",\"last_ago_s\":%lu,"
+             "\"last_took_ms\":%lu",
+             you, seenCount(), busy, gBusyFile, last, gLastFileDone,
+             gLastDoneAt ? (unsigned long)((millis() - gLastDoneAt) / 1000) : 99999UL,
+             (unsigned long)gLastDoneMs);
+}
+
+// ── 파일 보낼 때만 빠르게 ────────────────────────────────────────────────
+//
+// 평소에는 BLE 를 켜 둔다. 그래야 아이패드가 붙어 있는 동안에도 데스크탑이
+// 배 찾기로 이 보드를 찾는다. DJI 와 GoPro 도 이렇게 한다.
+//
+// 그런데 둘을 같이 켜면 WiFi 절전을 켜 둬야 한다. 그러면 파일 보내는 속도가
+// 209 KB/초에서 58 KB/초로 떨어진다 [확인: 2026-08-27 이 보드에서 실측].
+//
+// 그래서 파일을 보내는 동안만 BLE 를 내리고 절전을 끈다. 다 보내고 5초가
+// 지나면 되돌린다. 5초를 두는 이유는 파일을 여러 개 이어서 받을 때 매번
+// 껐다 켜지 않게 하려는 것이다.
+//
+// BLE 를 껐다 켜도 메모리는 안 준다. 8번 돌려서 1바이트도 안 줄어드는 것을
+// 확인했다 [확인: 2026-08-27, heap_caps_get_free_size 로 재봄].
+bool     gFast   = false;
+uint32_t gFastAt = 0;
+constexpr uint32_t kFastHoldMs = 5000;
+
+void fastOn() {
+    gFastAt = millis();
+    if (gFast) return;
+    // ★ 순서를 바꾸면 칩이 죽는다. BLE 가 켜진 채로 절전을 끄면 이렇게 말하고
+    //   abort() 한다 — "Should enable WiFi modem sleep when both WiFi and
+    //   Bluetooth are enabled!!!!!!" (main.cpp 의 sailBleStop 주석 참조).
+    ::sailBleStop();
+    WiFi.setSleep(false);
+    gFast = true;
+    Serial.println("[NET] 파일 보내는 동안 BLE 를 내립니다.");
+}
+
+void fastOff() {
+    if (!gFast) return;
+    WiFi.setSleep(true);      // 절전을 먼저 켜고
+    ::sailBleStart();         // 그 다음에 BLE 를 올린다
+    gFast = false;
+}
+
 // ── WiFi 이름·비밀번호 ──────────────────────────────────────────────────
 //
 // 예전에는 secrets.h 에 박아 두고 다시 구웠다. 배가 30대면 대회장 WiFi 가
@@ -157,6 +319,7 @@ void sdDown() {
 // 이 서버는 우리 보드가 만든 닫힌 망에만 있고 비밀도 없다.
 void cors() {
     used();
+    sawClient((uint32_t)gServer.client().remoteIP());
     gServer.sendHeader("Access-Control-Allow-Origin", "*");
     gServer.sendHeader("Access-Control-Allow-Headers", "*");
     gServer.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -167,7 +330,10 @@ void handleStatus() {
     hlog::Status st;
     hlog::getStatus(&st);
 
-    char body[512];
+    char who[200];
+    whoJson(who, sizeof(who));
+
+    char body[768];
     const int n = snprintf(body, sizeof(body),
         "{\"ok\":true,"
         "\"name\":\"%s\","
@@ -179,7 +345,8 @@ void handleStatus() {
         "\"dropped\":%lu,"
         "\"max_stall_ms\":%lu,"
         "\"card\":%s,"
-        "\"free_mb\":%llu}",
+        "\"free_mb\":%llu,"
+        "%s}",
         gSsid,
         (unsigned long)millis(),
         st.recording ? "true" : "false",
@@ -189,7 +356,8 @@ void handleStatus() {
         (unsigned long)st.dropped,
         (unsigned long)st.maxStallMs,
         st.cardPresent ? "true" : "false",
-        (unsigned long long)(gSdUp ? (SD.totalBytes() - SD.usedBytes()) / 1048576ULL : 0));
+        (unsigned long long)(gSdUp ? (SD.totalBytes() - SD.usedBytes()) / 1048576ULL : 0),
+        who);
     gServer.send(200, "application/json", body);
     (void)n;
 }
@@ -303,6 +471,27 @@ void handleFile() {
         return;
     }
 
+    // ── 받기는 한 번에 한 대만 ────────────────────────────────────────
+    //
+    // 보드는 한 번에 한 대만 상대한다. 둘이 같이 받으면 둘 다 느려지고,
+    // 나중 사람은 왜 느린지 모른다. 그래서 먼저 온 쪽이 끝낼 때까지
+    // 나중 사람은 거절한다. **빼앗기는 없다.**
+    //
+    // 자물쇠는 "붙어 있는 동안" 이 아니라 **"실제로 보내는 동안"** 만 잡는다.
+    // 앱을 켜 놓고 노는 사람이 배를 잠가 버리면 안 된다. 그래서 잠기는
+    // 최대 시간은 파일 하나 보내는 시간이다. 받아 가던 기기가 사라지면
+    // 아래 connected() 검사가 바로 푼다.
+    const uint32_t meIp = (uint32_t)gServer.client().remoteIP();
+    if (gBusyIp && gBusyIp != meIp) {
+        char owner[20]; ipText4(gBusyIp, owner, sizeof(owner));
+        char body[192];
+        snprintf(body, sizeof(body),
+                 "{\"ok\":false,\"error\":\"다른 기기가 받는 중입니다\","
+                 "\"owner\":\"%s\",\"owner_file\":\"%s\"}", owner, gBusyFile);
+        gServer.send(409, "application/json", body);
+        return;
+    }
+
     String uri = gServer.uri();          // "/file/S00008.HLG"
     String name = uri.substring(6);
     // 위로 올라가는 경로를 막는다. /LOGS 밖은 못 준다.
@@ -350,13 +539,37 @@ void handleFile() {
     gServer.sendHeader("Accept-Ranges", "bytes");
     if (from != 0 || to != total - 1) gServer.sendHeader("Content-Range", cr);
 
+    fastOn();          // 보내는 동안만 BLE 를 내리고 절전을 끈다
+    gBusyIp = meIp;                      // 여기서 잠근다. 위 갈래로 빠지면 안 잠긴다
+    snprintf(gBusyFile, sizeof(gBusyFile), "%s", name.c_str());
     const uint32_t t0 = millis();
     gServer.setContentLength(len);
     gServer.send((from == 0 && to == total - 1) ? 200 : 206,
                  "application/octet-stream", "");
 
     // 4 KB 씩 흘려보낸다. SD 읽기와 WiFi 보내기가 같은 크기라 편하다.
-    uint8_t buf[4096];
+    //
+    // ★ static 이어야 한다. 그냥 두면 보드가 죽는다.
+    //   loop() 를 도는 자리의 스택이 8 KB 인데 여기서 4 KB 를 차지한다.
+    //   컴파일러는 이 자리를 함수에 들어서는 순간 잡아 두므로, 아래 while 에
+    //   닿기 전인 SD.open() 에서 이미 넘친다. 실제로 이렇게 죽었다.
+    //     Stack canary watchpoint triggered (loopTask)
+    //     netsrv.cpp:317  SD.open → vfs_fat_stat → snprintf
+    //   [확인: 2026-08-27, addr2line 으로 위 주소를 풀어 봤다]
+    //
+    //   이 자리는 loop() 하나에서만 부르니 여럿이 같이 쓸 걱정은 없다.
+    //   바로 아래 handleSpeed() 도 같은 이유로 static 이다.
+    //
+    //   한동안 멀쩡했던 이유도 적어 둔다. 처음 만들 때는 loop() 가 스택을
+    //   320 바이트만 썼다. 그 뒤로 loop() 가 커져서 2032 바이트가 됐고,
+    //   남아 있던 여유 1472 바이트를 다 먹고 240 바이트를 더 넘겼다.
+    //   [확인: objdump 로 두 판의 entry 명령을 읽어 견줬다.
+    //          a66ce0a 는 loop 0x140 / handleFile 0x1160,
+    //          지금은  loop 0x7f0 / handleFile 0x170]
+    //
+    //   교훈은 하나다. **스택에 KB 단위를 올리지 않는다.** 남은 자리는
+    //   내 함수가 아니라 부르는 쪽이 정하므로, 오늘 되는 것이 내일 죽는다.
+    static uint8_t buf[4096];
     uint32_t left = len;
     uint32_t usRead = 0, usWrite = 0;    // 어디서 시간을 쓰는지 갈라 본다
     while (left > 0) {
@@ -365,15 +578,34 @@ void handleFile() {
         const int got = f.read(buf, want);
         usRead += micros() - t;
         if (got <= 0) break;
+        // 받아 가던 기기가 사라졌으면 그만둔다.
+        //
+        // 이게 없으면 90 MB 를 허공에 다 읽어 보낸다. write() 는 실패해도
+        // left 는 줄어드니 언젠가 끝나긴 하지만, 그동안 자물쇠가 잡혀 있어서
+        // 다음 사람이 그만큼 기다린다.
+        if (!gServer.client().connected()) {
+            Serial.println("[NET] 받아 가던 기기가 사라져서 그만둡니다.");
+            break;
+        }
         t = micros();
         gServer.client().write(buf, (size_t)got);
         usWrite += micros() - t;
         left -= (uint32_t)got;
         used();          // 90 MB 를 보내는 중에 저절로 꺼지면 안 된다
+        fastOn();        // 보내는 내내 빠른 구간을 붙잡아 둔다
     }
     f.close();
 
     const uint32_t dt = millis() - t0;
+    // 방금 누가 무엇을 받았는지 남긴다. 줄 서서 기다린 앱이 이걸 보고
+    // 왜 기다렸는지 사람에게 말해 준다.
+    gLastIpDone = gBusyIp;
+    snprintf(gLastFileDone, sizeof(gLastFileDone), "%s", gBusyFile);
+    gLastDoneAt = millis();
+    gLastDoneMs = dt;
+    gBusyIp = 0;
+    gBusyFile[0] = 0;
+
     ++gServedFiles;
     gServedBytes += (len - left);
     Serial.printf("[NET] %s  %lu 바이트  %.1f초  %.0f KB/초"
@@ -524,6 +756,7 @@ void handleSpeed() {
     if (mb < 1) mb = 1;
     if (mb > 32) mb = 32;
 
+    fastOn();
     static uint8_t buf[4096];
     memset(buf, 0x5A, sizeof(buf));
 
@@ -550,15 +783,22 @@ void handleSpeed() {
 // 앱은 4초마다 이걸 부른다. 멈추면 빌린 시간이 지나고 꺼진다.
 void handlePing() {
     cors();                 // cors() 안에서 used() 가 불린다
+    // 앱이 제 번호를 실어 보낸다. 이걸 적어 둬야 나중에 "나 말고 몇 대" 를 센다.
+    if (gServer.hasArg("id")) {
+        sawClient((uint32_t)gServer.client().remoteIP(),
+                  gServer.arg("id").c_str());
+    }
     if (gServer.hasArg("lease")) {
         uint32_t sec = (uint32_t)gServer.arg("lease").toInt();
         if (sec > 300) sec = 300;        // 너무 길게는 못 빌린다
         gLeaseMs = sec * 1000UL;
     }
-    char body[128];
+    char who[200];
+    whoJson(who, sizeof(who));
+    char body[320];
     snprintf(body, sizeof(body),
-             "{\"ok\":true,\"lease_s\":%lu,\"idle_s\":%lu}",
-             (unsigned long)(gLeaseMs / 1000), (unsigned long)(gIdleOffMs / 1000));
+             "{\"ok\":true,\"lease_s\":%lu,\"idle_s\":%lu,%s}",
+             (unsigned long)(gLeaseMs / 1000), (unsigned long)(gIdleOffMs / 1000), who);
     gServer.send(200, "application/json", body);
 }
 
@@ -568,13 +808,41 @@ void handlePing() {
 // 보드가 BLE 말을 못 듣는다. 지금 붙어 있는 길로 시키는 게 맞다.
 void handleWifiOff() {
     cors();
+    // 다른 기기가 파일을 받는 중이면 안 끈다.
+    //
+    // 이제 WiFi 를 켠 동안에도 BLE 가 살아 있어서, 아이패드가 붙어 있는데
+    // 데스크탑이 따로 붙는 일이 흔해진다. 한쪽이 "다 썼다" 를 눌렀다고
+    // 다른 쪽이 받던 파일을 끊으면 안 된다.
+    if (gFast) {
+        char who[200];
+        whoJson(who, sizeof(who));
+        char body[288];
+        snprintf(body, sizeof(body),
+                 "{\"ok\":false,\"error\":\"다른 기기가 받는 중입니다\",%s}", who);
+        gServer.send(409, "application/json", body);
+        return;
+    }
     gServer.send(200, "application/json", "{\"ok\":true,\"wifi\":\"off\"}");
     gServer.client().flush();
     delay(120);            // 답을 다 보내고 나서 끊는다
     stop();
 }
 
+// 길을 등록한다. **딱 한 번만 한다.**
+//
+// WebServer::stop() 은 소켓만 닫고 길 목록은 그대로 둔다. 목록을 지우는 건
+// 소멸자뿐인데 gServer 는 전역이라 소멸자가 안 불린다.
+// [확인: framework-arduinoespressif32 의 WebServer.cpp 91번 줄 ~WebServer,
+//        351번 줄 stop() 은 close() 만 부른다]
+//
+// 그래서 켤 때마다 부르면 길 여덟 개가 그만큼 쌓인다. 실제로 WiFi 를 열 번
+// 껐다 켜는 동안 800바이트씩 사라졌다. 길은 gServer 만큼 오래 살면 되므로
+// 한 번만 등록하면 된다. begin() 과 close() 는 길 목록을 안 건드린다.
 void routes() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+
     gServer.on("/", HTTP_GET, handleRoot);
     gServer.on("/api/ping", HTTP_GET, handlePing);
     gServer.on("/api/wifi/off", HTTP_POST, handleWifiOff);
@@ -601,7 +869,6 @@ void routes() {
 bool startAP() {
     stop();
     snprintf(gSsid, sizeof(gSsid), "%s", ::sailFullName());
-    ::sailBleStop();          // 이름을 읽은 뒤에 내린다
 
     WiFi.onEvent(onWifiEvent);
     WiFi.mode(WIFI_AP);
@@ -617,9 +884,9 @@ bool startAP() {
     // 꺼서 전기를 아끼는데, 그동안은 아무것도 못 보낸다.
     // [확인: framework-arduinoespressif32/libraries/WiFi/src/WiFiGeneric.cpp:769]
     //
-    // 파일을 내보내는 동안에는 전기보다 속도가 중요하다. 어차피 wifi 는
-    // 훈련이 끝난 뒤 잠깐만 켠다 — 그때는 배가 부두에 있다.
-    WiFi.setSleep(false);
+    // 평소에는 절전을 켜 둔다. BLE 와 같이 켜려면 그래야 한다.
+    // 파일을 보낼 때만 fastOn() 이 절전을 끄고 BLE 를 내린다.
+    WiFi.setSleep(true);
 
     snprintf(gIp, sizeof(gIp), "%s", WiFi.softAPIP().toString().c_str());
     routes();
@@ -649,7 +916,6 @@ bool startJoin(uint32_t timeoutMs) {
         return false;
     }
     stop();
-    ::sailBleStop();
     WiFi.onEvent(onWifiEvent);
     WiFi.mode(WIFI_STA);
     WiFi.begin(gStaSsid, gStaPass);
@@ -667,8 +933,8 @@ bool startJoin(uint32_t timeoutMs) {
         ::sailBleStart();
         return false;
     }
-    // 라디오를 재우지 않는다. 자세히는 startAP 의 주석.
-    WiFi.setSleep(false);
+    // 평소에는 절전을 켠 채로 둔다. 자세히는 fastOn 의 주석.
+    WiFi.setSleep(true);
 
     snprintf(gSsid, sizeof(gSsid), "%s", gStaSsid);
     snprintf(gIp, sizeof(gIp), "%s", WiFi.localIP().toString().c_str());
@@ -689,11 +955,21 @@ void stop() {
         gServer.stop();
         sdDown();
     }
+    // mDNS 도 정리한다. 안 하면 켤 때마다 서비스 기록이 쌓인다.
+    // end() 는 mdns_free() 를 부른다 [확인: ESPmDNS.cpp 78번 줄].
+    if (wasUp) MDNS.end();
     WiFi.removeEvent(onWifiEvent);
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     gMode = Mode::Off;
     gGoneAt = 0;
+    gFast   = false;      // WiFi 가 없으면 빠른 구간도 뜻이 없다
+    gBusyIp = 0;
+    gBusyFile[0] = 0;
+    gLastDoneAt = 0;
+    gLastIpDone = 0;
+    gLastFileDone[0] = 0;
+    for (int i = 0; i < kMaxSeen; i++) gSeen[i] = {};
     gLeaseMs = 0;      // 다음에 켤 때 앱이 다시 빌린다
     gIp[0] = '\0';
     // WiFi 를 끄면 BLE 를 되살린다. 워치와 아이폰이 다시 붙는다.
@@ -703,6 +979,9 @@ void stop() {
 void poll() {
     if (gMode == Mode::Off) return;
     gServer.handleClient();
+
+    // 다 보내고 5초가 지났으면 BLE 를 되살린다.
+    if (gFast && millis() - gFastAt > kFastHoldMs) fastOff();
 
     // 1) 쓰던 상대가 사라졌다 — 이게 제일 빠른 신호다
     if (gGoneAt && millis() - gGoneAt > kGoneGraceMs) {
@@ -784,6 +1063,13 @@ int scan(ScanEntry* out, int max) {
     return k;
 }
 
+int         users()       { return seenCount(); }
+
+// 이 번호를 뺀 나머지 기기 수. 앱은 이것만 보고 붙을지 정한다.
+int othersThan(const char* id) { return usersExcept(id); }
+
+// 그 나머지 중 하나를 사람이 알아볼 이름으로.
+const char* otherIpText(const char* id) { return otherName(id); }
 Mode        mode()        { return gMode; }
 const char* ipText()      { return gIp; }
 const char* ssidText()    { return gSsid; }

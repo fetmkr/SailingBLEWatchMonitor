@@ -2471,8 +2471,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 // 없고, 앱이 없어도 시리얼로 똑같이 시험할 수 있다.
 //
 // ★ "wifi on" 을 받으면 답을 **먼저** 보내고 나서 WiFi 를 켠다.
-//   WiFi 가 켜지는 순간 BLE 가 내려가서 그 뒤로는 아무 말도 못 한다.
-//   그래서 답에 "어디로 찾아오라" 를 미리 다 적어 준다.
+//   답에 "어디로 찾아오라" 를 미리 다 적어 준다. WiFi 가 붙는 데 몇 초가
+//   걸리는데 그동안 앱을 기다리게 할 이유가 없다.
+//
+//   WiFi 를 켜도 BLE 는 그대로 있다. 파일을 보내는 동안에만 잠깐 내려간다
+//   (netsrv.cpp 의 fastOn 주석).
 static NimBLECharacteristic* gControlChr = nullptr;
 
 // WiFi 를 켜는 일은 콜백 안에서 하면 안 된다. NimBLE 안쪽에서 부르는데
@@ -2528,27 +2531,61 @@ static void controlLine(const char* raw) {
         return;
     }
     // wifi on / wifi ap — 답을 먼저 보내고 켠다
-    if (line == "wifi on" || line == "wifi join") {
+    //
+    // 뒤에 앱 번호를 붙일 수 있다 ("wifi on a1b2c3d4"). 그 번호를 뺀
+    // 나머지가 몇 대인지 답에 적어 준다. 앱은 그 수가 0 인지만 보면 된다.
+    // 시리얼에서 그냥 "wifi on" 이라고 쳐도 된다. 그때는 아무도 안 뺀다.
+    if (line == "wifi on" || line == "wifi join" ||
+        line.startsWith("wifi on ") || line.startsWith("wifi join ")) {
         if (hlog::recording()) { controlSay("err wifi recording"); return; }
+        String appId = "";
+        {
+            const int sp = line.indexOf(' ', 5);   // "wifi on" 의 두 번째 빈칸
+            if (sp > 0) { appId = line.substring(sp + 1); appId.trim(); }
+        }
+        // 이미 붙어 있으면 다시 붙지 않는다. 다시 붙으면 지금 파일을 받고
+        // 있는 다른 기기가 끊긴다. 지금 주소를 그대로 알려준다.
+        if (netsrv::mode() == netsrv::Mode::Join) {
+            // 이미 켜져 있다. 몇 대가 쓰는지 같이 알려준다. 앱이 그걸 보고
+            // "다른 기기도 씁니다" 라고 사람에게 말한다.
+            const int others = netsrv::othersThan(appId.c_str());
+            const char* oip = netsrv::otherIpText(appId.c_str());
+            snprintf(out, sizeof(out),
+                     "ok wifi joining %s mdns %s.local last %s users %d by %s",
+                     netsrv::staSsid(), netsrv::mdnsHost(), netsrv::ipText(),
+                     others, (others && *oip) ? oip : "-");
+            controlSay(out);
+            return;
+        }
         const char* ss = netsrv::staSsid();
         if (!ss || !*ss) { controlSay("err wifi no-ssid"); return; }
         // 붙고 나면 주소는 공유기가 준다. 미리 못 알려주니 이름으로 찾으라고 한다.
         // 이름과 함께 지난번 주소도 알려준다. 이름이 늦게 잡히거나 아예
         // 안 잡힐 때 앱이 이 주소부터 두드려 볼 수 있다.
         const char* last = netsrv::lastIp();
-        snprintf(out, sizeof(out), "ok wifi joining %s mdns %s.local last %s",
+        snprintf(out, sizeof(out),
+                 "ok wifi joining %s mdns %s.local last %s users 0 by -",
                  ss, netsrv::mdnsHost(), (last && *last) ? last : "-");
         controlSay(out);
         gWifiWant = 1;
         return;
     }
-    if (line == "wifi ap") {
+    if (line == "wifi ap" || line.startsWith("wifi ap ")) {
         if (hlog::recording()) { controlSay("err wifi recording"); return; }
+        String apId = line.length() > 8 ? line.substring(8) : String("");
+        apId.trim();
         // AP 는 이름도 주소도 미리 안다. 그대로 알려준다.
-        snprintf(out, sizeof(out), "ok wifi ap %s pass %s ip 192.168.4.1",
-                 gFullName, netsrv::apPass());
+        const bool apUp = netsrv::mode() == netsrv::Mode::AP;
+        const int others = apUp ? netsrv::othersThan(apId.c_str()) : 0;
+        const char* oip = netsrv::otherIpText(apId.c_str());
+        snprintf(out, sizeof(out),
+                 "ok wifi ap %s pass %s ip 192.168.4.1 users %d by %s",
+                 gFullName, netsrv::apPass(), others,
+                 (others && *oip) ? oip : "-");
         controlSay(out);
-        gWifiWant = 2;
+        // 이미 열어 뒀으면 다시 열지 않는다. 다시 열면 붙어 있던 기기가
+        // 떨어져서 처음부터 다시 붙어야 한다.
+        if (netsrv::mode() != netsrv::Mode::AP) gWifiWant = 2;
         return;
     }
     if (line == "wifi off") { controlSay("ok wifi off"); gWifiWant = 3; return; }
@@ -2827,8 +2864,11 @@ static void handleCommand(String line) {
         }
         // 아래는 BLE 설정 통로와 **같은 말**을 쓴다. 앱 없이 여기서 시험한다.
         //   wifi ssid <이름> / wifi pass <비번> / wifi scan / wifi status
+        // "wifi on <앱번호>" 처럼 뒤에 번호가 붙을 수 있다. 앱이 붙을 때
+        // 쓰는 말과 똑같이 여기서도 시험할 수 있어야 한다.
         if (arg.startsWith("ssid ") || arg.startsWith("pass ") ||
             arg == "scan" || arg == "status" || arg == "on" || arg == "ap" ||
+            arg.startsWith("on ") || arg.startsWith("ap ") ||
             arg.startsWith("idle ")) {
             // 대소문자를 이미 내렸다. 이름·비밀번호는 원문이 필요하다.
             String orig = line.substring(5);
@@ -3238,10 +3278,12 @@ const char* sailFullName() { return gFullName; }
 //   [확인: 보드 시리얼 출력 2026-08-24]
 //
 // 둘이 안테나 하나를 나눠 쓰기 때문이다. 같이 켜면 칩이 번갈아 쓰느라
-// WiFi 를 계속 재워야 하고, 그러면 파일 보내는 속도가 안 나온다.
+// WiFi 를 계속 재워야 하고, 그러면 파일 보내는 속도가 209 KB/초에서
+// 58 KB/초로 떨어진다 [확인: 2026-08-27 이 보드에서 실측].
 //
-// 어차피 WiFi 는 훈련이 끝나고 부두에서 잠깐만 켠다. 그때는 워치도 아이폰도
-// 볼 값이 없다. 파일을 다 받고 `wifi off` 하면 BLE 가 다시 올라온다.
+// 그래서 **파일을 보내는 동안에만** 내린다. 평소에는 WiFi 를 켜 둔 채로
+// BLE 도 같이 켜 둔다. 그래야 한 기기가 붙어 있는 동안에도 다른 기기가
+// 배 찾기로 이 보드를 찾는다. 자세한 것은 netsrv.cpp 의 fastOn 주석.
 void sailBleStart() {
     if (gBleUp) return;
 
@@ -3257,14 +3299,20 @@ void sailBleStart() {
     gTelemetryChr      = svc->createCharacteristic(
         sail::kTelemetryUUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-    gTelemetryChr->setCallbacks(new TelemetryCallbacks());
+    // ★ new 하지 않는다. NimBLE 은 캐릭터리스틱을 지울 때 콜백을 안 지운다
+    //   [확인: NimBLE-Arduino 2.5.1 의 ~NimBLECharacteristic 은 디스크립터만
+    //    지운다]. WiFi 를 켤 때마다 BLE 를 내렸다 올리므로, new 로 두면
+    //    켤 때마다 하나씩 쌓인다. 상태가 없는 물건이라 하나만 두면 된다.
+    static TelemetryCallbacks telemetryCb;
+    gTelemetryChr->setCallbacks(&telemetryCb);
 
     // 설정 통로. 써 넣으면 한 줄로 답한다 (PROTOCOL.md §9).
     gControlChr = svc->createCharacteristic(
         sail::kControlUUID,
         NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
         NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ);
-    gControlChr->setCallbacks(new ControlCallbacks());
+    static ControlCallbacks controlCb;      // 위와 같은 이유
+    gControlChr->setCallbacks(&controlCb);
     gControlChr->setValue("ready");
 
     uint8_t initial[sail::kTelemetryExtLen];
@@ -3277,6 +3325,10 @@ void sailBleStart() {
     gBleUp = true;
     applyAdvertising();
     gAdvNeedsApply = false;
+    // 남은 메모리를 같이 적는다. BLE 를 껐다 켰다 하면 조금씩 새는 일이
+    // 있다고 알려져 있다. 세 자리가 계속 줄면 그게 보인다.
+    Serial.printf("[BLE] 올렸습니다. 남은 메모리 %lu 바이트\n",
+                  (unsigned long)ESP.getFreeHeap());
 }
 
 void sailBleStop() {
@@ -3289,7 +3341,8 @@ void sailBleStop() {
     gTelemetryChr = nullptr;
     gControlChr   = nullptr;
     gConnected    = false;
-    Serial.println("[BLE] 내렸습니다 (WiFi 쓰는 동안). wifi off 하면 돌아옵니다.");
+    Serial.printf("[BLE] 내렸습니다 (WiFi 쓰는 동안). 남은 메모리 %lu 바이트\n",
+                  (unsigned long)ESP.getFreeHeap());
 }
 
 static void pollSerial() {

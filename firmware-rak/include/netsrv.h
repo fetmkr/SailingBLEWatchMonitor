@@ -67,6 +67,15 @@ const char* apPass();
 // BLE 가 끊긴 뒤에 앱이 찾아올 실마리로 쓴다.
 const char* lastIp();
 
+// 지금 이 보드를 쓰고 있는 기기 수. 30초 안에 요청을 보낸 주소를 센다.
+// 붙기 전에 "이미 누가 쓰고 있다" 를 알려주는 데 쓴다.
+int         users();
+// 이 앱 번호를 뺀 나머지 기기 수. 앱은 이것만 보고 붙을지 정한다.
+// 번호가 빈 글자면 아무도 안 뺀다.
+int         othersThan(const char* id);
+// 그 나머지 중 한 대의 주소. 사람에게 보여주려는 것뿐이다.
+const char* otherIpText(const char* id);
+
 Mode        mode();
 const char* ipText();     // "192.168.4.1". 안 켜져 있으면 빈 문자열
 const char* ssidText();

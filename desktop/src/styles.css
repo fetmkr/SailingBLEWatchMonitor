@@ -148,7 +148,12 @@
   --sp4: 12px;    /* 칸 안쪽 기본 여백 */
   --sp5: 16px;
 
-  --tap: 28px;    /* 맥은 22~28 이면 된다. 마우스는 정확하다 */
+  /* 닿는 자리와 보이는 높이는 다른 값이다.
+     --tap 은 손가락(또는 화살표)이 닿아야 하는 넓이,
+     --ctl 은 단추와 입력칸이 실제로 그려지는 높이다.
+     둘을 한 값으로 묶으면 아이패드에서 단추가 44px 로 길쭉해진다. */
+  --tap: 28px;
+  --ctl: 26px;    /* 맥은 22~28 이면 된다. 마우스는 정확하다 */
 
   --r:    8px;
   --r-sm: 6px;
@@ -166,7 +171,8 @@
     --sp4: 16px;
     --sp5: 20px;
 
-    --tap: 44px;      /* 손끝 평균 크기 */
+    --tap: 44px;
+    --ctl: 34px;      /* 손끝 평균 크기 */
   }
 }
 
@@ -215,13 +221,24 @@ body {
 button {
   background: var(--btn); color: var(--ink); border: 1px solid var(--line);
   border-radius: var(--r-sm); padding: 0 var(--sp3); font: inherit; cursor: pointer;
-  min-height: var(--tap);
+  min-height: var(--ctl);
+  position: relative;
+}
+/* 손가락이 닿는 자리를 보이는 단추 밖으로 넓힌다.
+   애플이 말하는 44pt 는 닿는 자리 기준이다 (Human Interface Guidelines).
+   보이는 단추까지 44 로 만들면 위아래가 남아 길쭉해 보인다. */
+@media (pointer: coarse) {
+  button::after {
+    content: ""; position: absolute;
+    left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: max(100%, var(--tap)); height: var(--tap);
+  }
 }
 button:hover { background: var(--btn-hover); }
 input, select {
   background: var(--input); color: var(--ink); border: 1px solid var(--line);
   border-radius: var(--r-sm); padding: 0 var(--sp2); font: inherit; width: 160px;
-  min-height: var(--tap);
+  min-height: var(--ctl);
   /* 글이 칸보다 길면 글자가 반쯤 잘린 채 끝난다. 말줄임표로 끝냈다는 것을
      알린다. 눌러서 고칠 때는 원래대로 다 보인다. */
   text-overflow: ellipsis;
@@ -235,7 +252,7 @@ input[type="checkbox"], input[type="radio"] {
 /* 네모 자체는 작아도 된다. 대신 글자까지 포함한 줄 전체가 눌리는 자리라
    그 줄을 44 로 잡는다. 애플이 말하는 44 는 눈에 보이는 크기가 아니라
    손가락이 닿는 넓이다. */
-.chk { min-height: var(--tap); }
+.chk { min-height: var(--ctl); }
 .dim { color: var(--dim); }
 .bad { color: #ff6b6b; }
 .good { color: #5ad19a; }
@@ -400,12 +417,22 @@ canvas {
 }
 .hasHandles:hover .handles { opacity: 1; }
 .handles button {
-  width: 22px; height: 22px; padding: 0; line-height: 1;
+  width: var(--ctl); height: var(--ctl); padding: 0; line-height: 1;
   font-size: var(--fs-sm); border-radius: 4px;
   background: #1b1e24cc; border: 1px solid var(--line); color: var(--dim);
   backdrop-filter: blur(3px);
 }
 .handles button:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* 이 셋은 서로 2px 옆에 붙어 있다. 닿는 자리를 밖으로 넓히면 서로 겹쳐서
+   키우기를 누른 손가락이 접기에 잡힌다. 그래서 여기서는 넓히지 않고
+   단추 자체를 44 로 키운다. 정사각형이라 길쭉해 보이지 않는다. */
+.handles button::after { display: none; }
+@media (pointer: coarse) {
+  .handles button { width: var(--tap); height: var(--tap); }
+}
+/* 크게 보고 있는 칸의 단추는 켜져 있다고 알린다 */
+.handles button.big.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
 /* 영상 칸은 검은 바탕이라 조금 더 밝게 */
 #videoPane .handles button { background: #000000aa; }
 
@@ -741,6 +768,15 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
   border: 1px solid var(--line); color: var(--dim); vertical-align: middle;
 }
 .via.ble { border-color: var(--accent); color: var(--on-ink); }
+/* 지금 붙어 있는 배. 여기서 연결을 또 누르면 안 되는 이유가 눈에 보여야 한다 */
+.via.on { border-color: #5ad19a; color: #5ad19a; }   /* .good 과 같은 초록 */
+/* 보드를 여럿이 쓸 때 목록 위에 뜨는 줄 */
+.busybar {
+  font-size: var(--fs-sm); color: var(--dim);
+  border-left: 3px solid var(--accent); background: var(--hover);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0; margin-bottom: var(--sp2);
+}
+.board.linked { border-color: #5ad19a; }
 
 /* 연 세션의 정보 — 목록 안, 그 줄 바로 밑 */
 .detail {

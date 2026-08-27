@@ -134,7 +134,7 @@ export async function sniff(path: string, ms = 2500): Promise<string | null> {
  *   watch() 는 줄 단위로 잘라 주면서 줄 끝의 \n 을 떼어 버린다. 그러면
  *   여러 줄이 한 덩어리로 붙어서 나눌 수가 없다. 실측으로 이렇게 왔다.
  *
- *     scan begin 7[CTL] → scan 0 -35 lock FETM2G[CTL] → scan 1 …
+ *     scan begin 7[CTL] → scan 0 -35 lock 우리WiFi[CTL] → scan 1 …
  *
  *   날바이트로 달라고 해도(decode: false) 같았다. 같은 포트를 pyserial 로
  *   읽으면 \n 이 멀쩡하다 — 부품이 없애는 것이다.

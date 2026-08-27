@@ -142,7 +142,7 @@ export class Link {
     for (;;) {
       const l = await this.hear(Math.max(500, until - Date.now()));
       if (l === null || l === "scan end") break;
-      // "scan 0 -34 lock FETM2G"
+      // "scan 0 -34 lock 우리WiFi"
       const m = /^scan (\d+) (-?\d+) (lock|open) (.*)$/.exec(l);
       if (m) out.push({ ssid: m[4], rssi: +m[2], locked: m[3] === "lock" });
       if (Date.now() > until) break;
@@ -154,11 +154,15 @@ export class Link {
 /**
  * WiFi 를 켜라고 시키고, 어디로 찾아갈지 돌려준다.
  *
- * 보드는 답을 먼저 보내고 나서 WiFi 를 켠다. 그 순간 BLE 가 끊긴다 —
- * **그건 잘못된 게 아니라 그래야 하는 것이다.**
+ * 보드는 답을 먼저 보내고 나서 WiFi 를 켠다. 붙는 데 몇 초 걸려서다.
+ * WiFi 를 켜도 BLE 는 그대로 있다 — 파일을 보내는 동안에만 잠깐 내려간다.
  *
- *   AP    ok wifi ap SAIL-random() pass sailing1234 ip 192.168.4.1
- *   접속   ok wifi joining FETM2G mdns sail-random.local
+ *   AP    ok wifi ap SAIL-random() pass sailing1234 ip 192.168.4.1 users 0 by -
+ *   접속   ok wifi joining 우리WiFi mdns sail-random.local last 192.168.0.76 users 1 by 192.168.0.5
+ *
+ * 끝의 users 는 지금 이 보드를 쓰고 있는 기기 수, by 는 그 기기의 주소다.
+ * 보드는 한 번에 한 대만 상대하므로, 남이 쓰고 있으면 아예 안 붙는다.
+ * by 가 내 주소면 내가 앱을 껐다 켠 것이니 그냥 이어서 쓴다.
  */
 export interface WifiUp {
   kind: "ap" | "join";
@@ -173,18 +177,50 @@ export interface WifiUp {
   hosts: string[];
   ssid: string;       // 사람이 붙어야 할 WiFi 이름 (AP 일 때만 뜻이 있다)
   pass: string;
+  /** 지금 이 보드를 쓰고 있는 기기 수. 옛 펌웨어는 안 보내니 0 이다. */
+  users: number;
+  /**
+   * 그 기기의 주소. 없으면 빈 글자.
+   *
+   * 이게 필요한 이유 — users 만 보면 **내 앱을 껐다 켠 경우까지 남으로
+   * 몰린다.** 주소를 견줘서 나면 그냥 이어서 쓴다.
+   */
+  by: string;
 }
 
 export function parseWifiUp(line: string): WifiUp | null {
-  let m = /^ok wifi ap (.+) pass (\S+) ip (\S+)$/.exec(line);
-  if (m) return { kind: "ap", hosts: [m[3]], ssid: m[1], pass: m[2] };
-  // "ok wifi joining FETM2G mdns sail-random.local last 192.168.0.76"
-  // 옛 펌웨어는 last 가 없다. 그때는 이름만 쓴다.
-  m = /^ok wifi joining (.+?) mdns (\S+)(?: last (\S+))?$/.exec(line);
+  // ★ 줄 끝을 딱 맞춰서 읽지 않는다.
+  //
+  //   예전에는 정규식 하나로 끝까지 맞췄다. 그래서 보드에 `users`/`by` 를
+  //   하나 붙였더니 옛 앱이 줄 전체를 못 읽고 "알 수 없는 답" 을 띄웠다.
+  //   실제로 그렇게 깨졌다 (2026-08-27).
+  //
+  //   앞부분만 맞추고, 뒤는 "이름 값" 짝으로 훑는다. 모르는 이름은 지나간다.
+  //   그래야 보드가 앞서 나가도 옛 앱이 계속 돈다.
+  const tail = (rest: string) => {
+    const t: Record<string, string> = {};
+    const w = rest.trim().split(/\s+/).filter(Boolean);
+    for (let i = 0; i + 1 < w.length; i += 2) t[w[i]] = w[i + 1];
+    return t;
+  };
+  const real = (v?: string) => (v && v !== "-" ? v : "");
+
+  //   ok wifi ap <이름…> pass <비번> ip <주소> [users N] [by 이름]
+  let m = /^ok wifi ap (.+) pass (\S+) ip (\S+)(.*)$/.exec(line);
   if (m) {
+    const t = tail(m[4]);
+    return { kind: "ap", hosts: [m[3]], ssid: m[1], pass: m[2],
+             users: Number(t.users ?? 0) || 0, by: real(t.by) };
+  }
+
+  //   ok wifi joining <이름…> mdns <이름.local> [last <주소>] [users N] [by 이름]
+  m = /^ok wifi joining (.+) mdns (\S+)(.*)$/.exec(line);
+  if (m) {
+    const t = tail(m[3]);
     const hosts = [m[2]];
-    if (m[3] && m[3] !== "-") hosts.unshift(m[3]);   // 빠른 쪽을 먼저
-    return { kind: "join", hosts, ssid: m[1], pass: "" };
+    if (real(t.last)) hosts.unshift(t.last);   // 빠른 쪽을 먼저
+    return { kind: "join", hosts, ssid: m[1], pass: "",
+             users: Number(t.users ?? 0) || 0, by: real(t.by) };
   }
   return null;
 }

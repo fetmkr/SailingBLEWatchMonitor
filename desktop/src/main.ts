@@ -752,6 +752,11 @@ async function askBoard(
 function boardWhy(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e);
   const s = raw.toLowerCase();
+  // rust 쪽 http 가 "요청을 못 보냈다" 고 할 때 나오는 말이다. 붙기는
+  // 붙었는데 답이 오다 끊긴 경우도 여기로 온다 — 보드가 다시 켜지면 그렇다.
+  if (s.includes("error sending request") || s.includes("connection closed")) {
+    return `보드가 대답을 멈췄습니다. 배 찾기로 다시 깨워 보세요 (${raw})`;
+  }
   if (s.includes("abort") || s.includes("응답이 없습니다") || s.includes("timed out")
       || s.includes("timeout")) {
     return `보드가 대답이 없습니다. 맥이 보드 WiFi 에 붙어 있는지 보세요 (${raw})`;
@@ -763,7 +768,13 @@ function boardWhy(e: unknown): string {
   return raw;
 }
 
+let listing = false;
+
 async function listBoard() {
+  // 깨우기 끝에서도, 이미 붙은 배의 "목록 새로" 에서도 이걸 부른다.
+  if (listing) { setStatus("목록을 받는 중입니다.", "bad"); return; }
+  if (fetching) { setStatus("파일을 받는 중입니다. 끝난 뒤에 하세요.", "bad"); return; }
+  listing = true;
   setStatus("보드에 물어보는 중…");
   // 보드가 파일마다 머리글을 읽어야 해서 몇 초 걸린다. 그동안 표시를 둔다.
   setProgress("보드에서 파일 목록을 받는 중…");
@@ -780,13 +791,40 @@ async function listBoard() {
     setStatus(`파일 ${j.files?.length ?? 0}개 — 받을 것을 고르세요`, "good");
   } catch (e) {
     setProgress(null);
-    setStatus(`보드에 못 붙었습니다 — ${boardWhy(e)}`, "bad");
+    const also = othersDoing();
+    setStatus(`보드에 못 붙었습니다 — ${boardWhy(e)}` +
+              (also ? ` · ${also}` : ""), "bad");
+  } finally {
+    listing = false;
   }
 }
 
 let boardFiles: FileInfo[] = [];
 
 // 보드 서랍 안의 작은 것들. 서랍을 그릴 때마다 맞춘다.
+/**
+ * 단추를 연달아 눌러도 일은 한 번만 한다.
+ *
+ * 사람은 반응이 없으면 또 누른다. 그게 정상이다. 문제는 그때마다 같은
+ * 요청이 하나씩 더 나가는 것이다. **보드는 한 번에 한 사람만 상대하므로**
+ * 두 번째부터는 줄을 서고, 화면은 점점 더 느려진다. 찾기는 더 나쁘다 —
+ * 두 번째 찾기가 첫 번째의 블루투스 스캔을 꺼 버려서 목록이 빈 채로 끝난다.
+ *
+ * 그래서 일이 끝날 때까지 그 단추를 눌리지 않게 한다. 눌러도 안 되는 게
+ * 아니라 눌러지지 않는 것이라, 사람이 기다려야 한다는 걸 바로 안다.
+ */
+function job(id: string, fn: () => unknown | Promise<unknown>) {
+  const btn = $(id) as HTMLButtonElement;
+  let running = false;
+  btn.onclick = async () => {
+    if (running) return;
+    running = true;
+    btn.disabled = true;
+    try { await fn(); }
+    finally { running = false; btn.disabled = false; }
+  };
+}
+
 function syncBoardBar() {
   // 주소 칸은 BLE 를 못 쓰거나 사람이 "주소로" 를 눌렀을 때만 보인다
   ($("hostBar") as HTMLElement).style.display =
@@ -821,6 +859,18 @@ let byHand = false;          // 사람이 주소를 직접 치겠다고 했나
 /** USB 목록에서 우리 것 같지 않은 포트까지 보여줄지 */
 let usbAll = false;
 let waking: string | null = null;   // 지금 깨우는 중인 것의 열쇠
+/**
+ * 지금 붙어 있는 배의 열쇠. 안 붙었으면 null.
+ *
+ * ★ 위쪽의 `linked` 와 다른 것이다. 그건 영상과 데이터를 맞췄나(싱크)이고
+ *   이건 어느 배에 붙어 있나다. 이름이 겹쳐서 갈라 뒀다.
+ *
+ * 이게 없어서 꼬였다. **보드는 WiFi 를 켜는 동안 블루투스를 내린다**
+ * (firmware-rak: "[BLE] 내렸습니다 (WiFi 쓰는 동안)"). 그런데 앱은 붙고
+ * 나서도 찾기 목록을 그대로 두었다. 거기서 연결을 다시 누르면 이미 사라진
+ * 블루투스에 붙으려 하니 반드시 시간 초과가 난다.
+ */
+let boardLinked: string | null = null;
 
 function renderBoards() {
   const box = $("boards");
@@ -834,12 +884,15 @@ function renderBoards() {
   }
   box.innerHTML = found.map((f) => {
     const busy = waking === f.key;
-    return `<div class="file board" data-key="${f.key}">
+    const on = boardLinked === f.key;
+    return `<div class="file board${on ? " linked" : ""}" data-key="${f.key}">
       <div>
         <b>${f.name}</b> <span class="via ${f.via}">${f.via === "ble" ? "블루투스" : "USB"}</span>
+        ${on ? '<span class="via on">붙어 있음</span>' : ""}
         <div class="dim">${f.sub}</div>
       </div>
-      <button class="wake" ${busy ? "disabled" : ""}>${busy ? "깨우는 중…" : "연결"}</button>
+      <button class="wake" ${busy ? "disabled" : ""}>${
+        busy ? "깨우는 중…" : on ? "목록 새로" : "연결"}</button>
     </div>`;
   }).join("");
 
@@ -865,10 +918,17 @@ function renderBoards() {
   });
 }
 
-/** 세기를 눈으로. -50 이면 코앞, -85 면 겨우 잡힌다. */
-function bars(rssi: number): string {
+/**
+ * 세기를 눈으로. -50 이면 코앞, -85 면 겨우 잡힌다.
+ *
+ * ★ 0 이상이면 세기가 아니다. 블루투스는 못 잰 경우 127 을 준다
+ *   (Bluetooth Core Spec 의 "RSSI is not available"). 아이패드에서 실제로
+ *   "▮▮▮▮ 127 dBm" 이라고 떴다. 없는 값을 세기인 척 보여주면 안 된다.
+ */
+function rssiText(rssi: number): string {
+  if (rssi >= 0) return "세기 모름";
   const n = rssi > -55 ? 4 : rssi > -68 ? 3 : rssi > -80 ? 2 : 1;
-  return "▮".repeat(n) + "▯".repeat(4 - n);
+  return "▮".repeat(n) + "▯".repeat(4 - n) + ` ${rssi} dBm`;
 }
 
 /** BLE 로 찾은 것들을 목록에 반영한다. USB 쪽은 건드리지 않는다. */
@@ -877,7 +937,7 @@ function mergeBle(list: ble.Board[]) {
   found = [
     ...list.map((b): Found => ({
       via: "ble", key: b.address, name: b.name,
-      sub: `${bars(b.rssi)} ${b.rssi} dBm`, board: b,
+      sub: rssiText(b.rssi), board: b,
     })),
     ...usbOnly,
   ];
@@ -892,8 +952,22 @@ function mergeBle(list: ble.Board[]) {
  * 아무것도 못 찾았을 때의 길이다.
  */
 async function scanBoards() {
-  found = [];
+  // 단추 말고 "다른 USB 포트도 보기" 체크박스도 이걸 부른다. 그래서
+  // job() 만으로는 안 되고 여기서도 막는다.
+  if (scanning) return;
   scanning = true;
+  try {
+    await scanBoardsRun();
+  } finally {
+    // ★ finally 여야 한다. 안 그러면 어딘가에서 한 번 터졌을 때 깃발이
+    //   걸린 채 남아, 그 뒤로는 배 찾기를 눌러도 아무 일도 안 일어난다.
+    scanning = false;
+    renderBoards();
+  }
+}
+
+async function scanBoardsRun() {
+  found = [];
   renderBoards();
 
   // ── 블루투스 ──
@@ -917,7 +991,24 @@ async function scanBoards() {
     return;
   }
 
-  // ── 블루투스로 못 찾았다. USB 를 본다 ──
+  // ── 블루투스로 못 찾았다 ──
+  //
+  // 여기가 갇히는 자리였다. 보드가 WiFi 를 켠 채면 블루투스 광고가 안 나가서
+  // 아무리 찾아도 안 보인다. 그런데 그때는 **주소로는 열려 있다.**
+  // 그러니 포기하기 전에 지난번 주소를 두드린다.
+  const known = knownHosts();
+  if (known.length) {
+    setStatus("블루투스로는 안 보입니다. 지난번 주소를 두드려 봅니다…");
+    const hit = await knock(known);
+    if (hit) {
+      setStatus(`${hit} 로 이미 열려 있습니다. 목록을 받습니다.`, "good");
+      keepAliveStart();
+      await listBoard();
+      return;
+    }
+  }
+
+  // ── 주소로도 없다. USB 를 본다 ──
   if (!plat.caps().usb) {
     scanning = false;
     renderBoards();
@@ -965,6 +1056,49 @@ async function scanBoards() {
 }
 
 /**
+ * 그 주소를 블루투스로 다시 찾는다. 못 찾으면 null.
+ *
+ * 찾는 시간은 짧게 잡는다. 이건 다시 해 보는 길이지 처음 찾는 길이 아니다.
+ */
+async function findAgain(address: string): Promise<ble.Board | null> {
+  let hit: ble.Board | null = null;
+  try {
+    await ble.scan(4000, (list) => {
+      const m = list.find((x) => x.address === address);
+      if (m) hit = m;
+    });
+    await new Promise((r) => setTimeout(r, 4200));
+    await ble.scanStop();
+  } catch { /* 못 찾으면 그대로 실패로 둔다 */ }
+  return hit;
+}
+
+/**
+ * 블루투스로 붙는다. **한 번 실패하면 다시 찾아서 한 번 더 해 본다.**
+ *
+ * 왜냐면 — 보드가 WiFi 를 껐다 켜면 블루투스가 통째로 새로 올라온다.
+ * 그 전에 찾아 둔 것으로 붙으려 하면 시간만 흐르고 안 붙는다.
+ *
+ * 실제로 이랬다. 앞사람이 연결을 끊자 보드가 WiFi 를 끄면서 블루투스를
+ * 새로 올렸다. 두 번째 앱은 그 전에 찾아 둔 목록을 들고 있었고, 연결을
+ * 누르니 시간만 흘렀다. 배 찾기를 다시 누르면 됐다.
+ * **사람이 그걸 알아야 할 이유가 없다.**
+ */
+async function openLink(b: ble.Board): Promise<ble.Link> {
+  try {
+    return await ble.Link.open(b);
+  } catch (e) {
+    setStatus(`${b.name} 을 다시 찾는 중… (목록이 오래됐을 수 있습니다)`);
+    const fresh = await findAgain(b.address);
+    if (!fresh) throw e;
+    // 찾은 것으로 목록도 새로 고친다. 세기 표시가 옛 값으로 남으면 안 된다.
+    const row = found.find((f) => f.key === b.address);
+    if (row) { row.board = fresh; row.sub = rssiText(fresh.rssi); renderBoards(); }
+    return await ble.Link.open(fresh);
+  }
+}
+
+/**
  * 보드를 깨운다. BLE 로 붙어서 "WiFi 켜" 를 시키고, 답에 적힌 주소로 옮겨간다.
  *
  * ★ WiFi 가 켜지면 BLE 는 끊긴다. 그건 잘못된 게 아니다 (PROTOCOL.md §9).
@@ -972,6 +1106,26 @@ async function scanBoards() {
  */
 async function wake(b: ble.Board) {
   if (waking) { setStatus("이미 한 대를 깨우는 중입니다.", "bad"); return; }
+  if (fetching) { setStatus("파일을 받는 중입니다. 끝난 뒤에 하세요.", "bad"); return; }
+
+  // 이미 이 배에 붙어 있다. 블루투스로 다시 붙는 길은 아예 없다 —
+  // 보드가 WiFi 를 켜는 동안 블루투스를 내려 두기 때문이다. 사람이 여기서
+  // 바라는 건 목록을 다시 보는 것이니 그걸 한다.
+  if (boardLinked === b.address) {
+    setStatus(`${b.name} 에는 이미 붙어 있습니다. 목록을 다시 받습니다.`);
+    await listBoard();
+    return;
+  }
+  // 다른 배에 붙어 있으면 먼저 놓아준다. 안 놓으면 그 배는 WiFi 를 켠 채로
+  // 남아 전기를 먹고, 블루투스로도 다시 못 찾는다.
+  //
+  // boardLinked 가 아니라 pinger 를 본다. 주소를 손으로 쳐서 붙은 경우에는
+  // 어느 배인지 이름을 모르지만, 연락을 보내고 있다는 건 붙어 있다는 뜻이다.
+  if (pinger) {
+    setStatus("앞의 배를 놓아주는 중…");
+    await sleepBoard(true);
+  }
+
   waking = b.address;
   renderBoards();
   await ble.scanStop();
@@ -979,7 +1133,7 @@ async function wake(b: ble.Board) {
 
   let link: ble.Link | null = null;
   try {
-    link = await ble.Link.open(b);
+    link = await openLink(b);
     const st = await link.ask("wifi status");
     if (st?.startsWith("status") && / rec on/.test(st)) {
       setStatus("기록 중입니다. 기록을 멈춘 뒤에 받으세요.", "bad");
@@ -987,7 +1141,8 @@ async function wake(b: ble.Board) {
     }
 
     setProgress(`${b.name} 의 WiFi 를 켜는 중…`);
-    const reply = await link.ask("wifi on", 8000);
+    // 번호를 같이 보낸다. 보드가 나를 뺀 나머지가 몇 대인지 세어 답한다.
+    const reply = await link.ask(`wifi on ${appId()}`, 8000);
     if (!reply) { setStatus("보드가 대답이 없습니다.", "bad"); return; }
 
     if (reply.startsWith("err wifi no-ssid")) {
@@ -997,7 +1152,24 @@ async function wake(b: ble.Board) {
     const up = ble.parseWifiUp(reply);
     if (!up) { setStatus(`알 수 없는 답 — ${reply}`, "bad"); return; }
 
-    // 여기서부터 BLE 는 끊긴다. 붙잡고 있을 이유가 없다.
+    // ── 남이 쓰고 있으면 아예 안 붙는다 ────────────────────────────
+    //
+    // 보드는 한 번에 한 대만 상대한다. 반쯤 붙여 놓으면 목록은 보이는데
+    // 받기만 안 되는 어정쩡한 상태가 된다. 사람은 그걸 고장으로 본다.
+    // 그래서 여기서 끝낸다.
+    //
+    // users 는 **나를 뺀** 수다. 보드가 내 번호를 알고 빼 준다.
+    // 그래서 앱은 0 인지만 보면 된다. 견주는 일을 앱이 안 한다.
+    if (up.users >= 1) {
+      setProgress(null);
+      setStatus(
+        `${b.name} 은 지금 다른 기기가 쓰고 있습니다` +
+        (up.by ? ` (${up.by})` : "") + `. ` +
+        `보드는 한 번에 한 대만 상대합니다. ` +
+        `그쪽에서 연결을 끊거나 15초쯤 뒤에 다시 해 보세요.`, "bad");
+      return;
+    }
+
     ($("host") as HTMLInputElement).value = up.hosts[0];
 
     if (up.kind === "ap") {
@@ -1019,6 +1191,10 @@ async function wake(b: ble.Board) {
       return;
     }
     setStatus(`${b.name} 준비됐습니다 — ${found}`, "good");
+    // 다음에 블루투스로 못 찾을 때 여기로 들어온다. 답한 주소를 앞에 둔다.
+    localStorage.setItem(HOSTS_KEY,
+      JSON.stringify([found, ...up.hosts.filter((h) => h !== found)]));
+    boardLinked = b.address;
     keepAliveStart();
     await listBoard();
   } catch (e) {
@@ -1075,11 +1251,12 @@ async function wakeUsb(path: string) {
     let up: ble.WifiUp | null = null;
     const already = /status name (\S+).* mode ap ip (\S+)/.exec(st);
     if (already) {
-      up = { kind: "ap", hosts: [already[2]], ssid: already[1], pass: "" };
+      up = { kind: "ap", hosts: [already[2]], ssid: already[1], pass: "",
+             users: 0, by: "" };
       setStatus(`${already[1]} 이 이미 WiFi 를 열어 두었습니다.`);
     } else {
       setProgress("보드가 자기 WiFi 를 여는 중…");
-      const reply = await link.ask("wifi ap", 10000);
+      const reply = await link.ask(`wifi ap ${appId()}`, 10000);
       up = reply ? ble.parseWifiUp(reply) : null;
       if (!up) {
         setProgress(null);
@@ -1125,6 +1302,58 @@ async function wakeUsb(path: string) {
  * 한 번에 6초를 준다. 이름(mDNS)은 실측 2.6초가 걸렸는데, 3초로 잡았더니
  * 아슬아슬하게 놓쳤다.
  */
+/**
+ * 지난번에 붙었던 주소. 보드가 WiFi 를 켠 채로 남았을 때 들어가는 문이다.
+ *
+ * 없으면 갇힌다. 보드는 WiFi 를 켜는 동안 블루투스를 내리므로, 앱이 주소를
+ * 잊으면 블루투스로도 WiFi 로도 못 찾는다. 보드가 스스로 끌 때까지 (연락이
+ * 없으면 5분) 아무것도 못 한다. 그 5분을 없애려고 적어 둔다.
+ */
+const HOSTS_KEY = "board.hosts.v1";
+
+/**
+ * 이 앱의 번호. 보드가 "나 말고 몇 대가 쓰나" 를 셀 때 나를 빼는 데 쓴다.
+ *
+ * 왜 주소로 안 하냐면 두 군데서 틀리기 때문이다.
+ *   공유기가 주소를 바꾸면      같은 앱을 남으로 본다
+ *   한 기기에서 앱 두 개를 띄우면 서로 다른 앱을 나로 본다
+ *
+ * **관리할 것은 없다.** 처음 켤 때 스스로 만들고, 보드는 30초 안 오면 잊고,
+ * 전원을 빼면 사라진다. 잃어버리면 새로 만들면 되고 그 15초만 남으로 보인다.
+ *
+ * 앞에 기기 종류를 붙인다. 사람에게 "ios-8c21 이 쓰고 있습니다" 라고
+ * 보여줄 수 있어야 해서다. 무작위 열두 자리만 보여주면 누군지 모른다.
+ */
+const APPID_KEY = "board.appid.v1";
+
+function appId(): string {
+  let v = localStorage.getItem(APPID_KEY);
+  if (!v) {
+    const r = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
+    v = `${plat.caps().os}-${r}`;
+    localStorage.setItem(APPID_KEY, v);
+  }
+  return v;
+}
+
+function knownHosts(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(HOSTS_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch { return []; }
+}
+
+/** 아는 주소들을 한 번씩만 두드려 본다. 답하면 그 주소를 돌려준다. */
+async function knock(hosts: string[]): Promise<string | null> {
+  const inp = $("host") as HTMLInputElement;
+  for (const h of hosts) {
+    inp.value = h;
+    try { if ((await askBoard("/api/status", 3000)).ok) return h; }
+    catch { /* 그 주소엔 아무도 없다. 다음 */ }
+  }
+  return null;
+}
+
 async function waitForBoard(hosts: string[], ms: number): Promise<string | null> {
   const until = Date.now() + ms;
   const inp = $("host") as HTMLInputElement;
@@ -1154,18 +1383,84 @@ async function waitForBoard(hosts: string[], ms: number): Promise<string | null>
 //
 //   빌리는 시간   15초    이만큼 요청이 없으면 보드가 끈다
 //   보내는 주기    4초    세 번까지 놓쳐도 안 끊긴다
+/**
+ * 보드를 지금 누가 쓰고 있는지. 보드가 연락(ping) 답에 같이 보내 준다.
+ *
+ * 왜 필요하냐면 — **보드는 한 번에 한 대만 상대한다.** 다른 기기가 파일을
+ * 받는 중이면 내 요청은 그냥 멈춰 있다. 4MB 를 받는 동안 다른 기기의 상태
+ * 물어보기가 21.7초 기다린 적이 있다 [확인: 2026-08-27 실측].
+ * 이유를 모르면 사람은 앱이 고장 난 줄 안다.
+ *
+ * busy 는 거의 못 본다. 받는 동안에는 보드가 대답을 못 하니, 내 물음의 답이
+ * 올 때쯤엔 이미 받기가 끝나 있다. 그래서 보드가 last_* 로 방금 누가
+ * 무엇을 받았는지 같이 알려준다. 그걸로 왜 기다렸는지 설명한다.
+ */
+interface BoardWho {
+  you: string; users: number;
+  busy: string; busy_file: string;
+  last_ip: string; last_file: string; last_ago_s: number; last_took_ms: number;
+}
+let who: BoardWho | null = null;
+
+/** 다른 기기가 쓰고 있나. 목록·받기가 느릴 때 이걸 보고 설명한다. */
+function othersHere(): boolean {
+  return !!who && who.users > 1;
+}
+
+/** 남이 방금 받았거나 지금 받는 중이면 사람 말로. 없으면 빈 글자. */
+function othersDoing(): string {
+  if (!who) return "";
+  if (who.busy && who.busy !== who.you) {
+    return `${who.busy} 가 ${who.busy_file} 를 받는 중입니다`;
+  }
+  if (who.last_ip && who.last_ip !== who.you && who.last_ago_s <= 60) {
+    const sec = (who.last_took_ms / 1000).toFixed(1);
+    return `${who.last_ago_s}초 전에 ${who.last_ip} 가 ` +
+           `${who.last_file} 를 받았습니다 (${sec}초 걸림)`;
+  }
+  return "";
+}
+
 const LEASE_S = 15;
 const PING_MS = 4000;
 let pinger: ReturnType<typeof setInterval> | null = null;
 
 function keepAliveStart() {
   if (pinger) return;
+  // 연달아 몇 번 놓쳤나. 한 번 성공하면 0 으로 돌아간다.
+  let missed = 0;
   const tick = async () => {
     // 파일을 받는 중이면 보내지 않는다. 보드는 한 번에 한 사람만 상대하고,
     // 받는 것 자체가 앱이 살아 있다는 표시다.
     if (fetching) return;
-    try { await askBoard(`/api/ping?lease=${LEASE_S}`, 5000); }
-    catch { /* 한 번 놓치는 건 괜찮다. 세 번까지 견딘다 */ }
+    try {
+      const r = await askBoard(
+        `/api/ping?lease=${LEASE_S}&id=${encodeURIComponent(appId())}`, 5000);
+      const j = await r.json();
+      if (j && typeof j.users === "number") { who = j as BoardWho; renderSide(); }
+      missed = 0;
+    }
+    catch {
+      // 한두 번 놓치는 건 흔하다. 보드가 빌린 시간이 15초니 4초짜리를
+      // 세 번 놓치면 보드 쪽도 이미 끈 뒤다. **거기서 화면도 같이 놓는다.**
+      //
+      // 예전에는 여기서 조용히 넘어갔다. 그래서 보드가 죽어 사라진 뒤에도
+      // 앱은 "연결 해제" 단추와 파일 목록을 그대로 보여줬다. 사람이 받기를
+      // 누르고 나서야 알았다.
+      // 다른 기기가 큰 파일을 받는 중이면 보드는 멀쩡한데도 대답을 못 한다.
+      // 그때 "끊겼습니다" 라고 하면 거짓말이다. 더 기다린다.
+      const limit = othersHere() ? 8 : 3;    // 32초 / 12초
+      if (++missed < limit) {
+        if (missed === 2 && othersHere()) {
+          setStatus("보드가 다른 기기를 상대하는 중입니다. 기다립니다…");
+        }
+        return;
+      }
+      keepAliveStop();
+      boardFiles = [];
+      setStatus("보드와 연락이 끊겼습니다. 배 찾기로 다시 깨우세요.", "bad");
+      renderSide();
+    }
   };
   void tick();
   pinger = setInterval(() => void tick(), PING_MS);
@@ -1173,6 +1468,7 @@ function keepAliveStart() {
 }
 
 function keepAliveStop() {
+  boardLinked = null;
   if (!pinger) return;
   clearInterval(pinger);
   pinger = null;
@@ -1183,7 +1479,18 @@ function keepAliveStop() {
 async function sleepBoard(quiet = false) {
   keepAliveStop();
   try {
-    await askBoard("/api/wifi/off", 4000);
+    const r = await askBoard("/api/wifi/off", 4000);
+    // 보드는 다른 기기가 파일을 받는 중이면 안 끈다 (PROTOCOL.md).
+    // 그때는 우리가 손을 놓기만 하면 된다. 마지막 사람이 나가면 보드가
+    // 빌린 시간이 지나고 스스로 끈다.
+    if (!r.ok) {
+      if (!quiet) {
+        setStatus("다른 기기가 파일을 받는 중이라 안 껐습니다. " +
+                  "그쪽이 끝나면 저절로 꺼집니다.", "bad");
+        renderSide();
+      }
+      return;
+    }
     boardFiles = [];
     if (!quiet) {
       setStatus("보드 WiFi 를 껐습니다. 블루투스로 다시 찾을 수 있습니다.", "good");
@@ -1349,16 +1656,27 @@ function renderMarkList() {
   });
 }
 
+/** 보드를 누가 쓰고 있는지 한 줄로. 나 혼자면 아무것도 안 보여준다. */
+function whoLine(): string {
+    if (!who || !pinger) return "";
+    const doing = othersDoing();
+    if (who.users <= 1 && !doing) return "";
+    const head = who.users > 1
+      ? `이 보드를 ${who.users}대가 쓰고 있습니다.` : "";
+    return `<div class="pad busybar">${head}${head && doing ? "<br>" : ""}${doing}</div>`;
+}
+
 function renderFileList(files: FileInfo[]) {
   syncBoardBar();
   const box = $("boardFiles");
   if (!files.length) {
-    box.innerHTML = "<div class='dim pad'>보드에서 목록을 받아오세요.</div>";
+    box.innerHTML = whoLine() +
+      "<div class='dim pad'>보드에서 목록을 받아오세요.</div>";
     return;
   }
 
   const have = new Set(library.entries.map((e) => e.id));
-  box.innerHTML = files
+  box.innerHTML = whoLine() + files
     .map((f) => {
       const when = f.utc_start
         ? new Date(f.utc_start * 1000).toLocaleString()
@@ -1397,19 +1715,34 @@ async function fetchFile(name: string, size?: number) {
   fetching = true;
   document.querySelectorAll<HTMLButtonElement>(".file .get")
     .forEach((b) => { b.disabled = true; });
-  setStatus(`${name} 받는 중…`);
+  setStatus(othersHere()
+    ? `${name} 받는 중… (다른 기기도 이 보드를 씁니다. 줄을 설 수 있습니다)`
+    : `${name} 받는 중…`);
   setProgress(size ? `${name}  0 / ${MB(size)} MB` : `${name} 받는 중…`, size ? 0 : null);
   const t0 = performance.now();
 
   // 90 MB 는 몇 분 걸릴 수 있으니 전체 제한 시간은 안 건다. 대신 **끊긴 것을
-  // 본다** — 20초 동안 한 바이트도 안 오면 그만둔다. 배가 멀어져서 WiFi 가
+  // 본다** — 한동안 한 바이트도 안 오면 그만둔다. 배가 멀어져서 WiFi 가
   // 끊기면 받기가 그냥 멈춰 있는데, 그걸 영원히 기다리면 안 된다.
+  //
+  // 기다리는 시간을 둘로 나눈다.
+  //   첫 바이트까지   120초   다른 기기가 받는 중이면 줄을 선다. 16MB 한 개가
+  //                          300 KB/초로 53초 걸리니 그만큼은 기다려 줘야 한다
+  //   시작한 뒤로는   20초    한 번 흐르기 시작하면 멈추는 건 진짜 문제다
+  //
+  // 예전에는 둘 다 20초였다. 그래서 다른 기기가 큰 파일을 받는 중이면
+  // 줄 서 있다가 20초 만에 포기했다.
+  const FIRST_MS = 120000;
   const STALL_MS = 20000;
   const ac = new AbortController();
-  let stall = setTimeout(() => ac.abort(new Error("20초 동안 아무것도 안 왔습니다")), STALL_MS);
+  let started = false;
+  const why = () => started
+    ? "20초 동안 아무것도 안 왔습니다"
+    : "보드가 계속 다른 일을 하고 있습니다";
+  let stall = setTimeout(() => ac.abort(new Error(why())), FIRST_MS);
   const alive = () => {
     clearTimeout(stall);
-    stall = setTimeout(() => ac.abort(new Error("20초 동안 아무것도 안 왔습니다")), STALL_MS);
+    stall = setTimeout(() => ac.abort(new Error(why())), started ? STALL_MS : FIRST_MS);
   };
 
   try {
@@ -1417,6 +1750,17 @@ async function fetchFile(name: string, size?: number) {
     alive();
     if (!r.ok) {
       setProgress(null);
+      // 409 는 다른 기기가 받는 중이라는 뜻이다 (PROTOCOL.md).
+      // 이건 고장이 아니라 순서를 기다리라는 말이므로 그렇게 말한다.
+      if (r.status === 409) {
+        const j = await r.json().catch(() => null) as
+          { owner?: string; owner_file?: string } | null;
+        setStatus(
+          j?.owner
+            ? `${j.owner} 가 ${j.owner_file} 를 받는 중입니다. 끝나면 다시 누르세요.`
+            : "다른 기기가 받는 중입니다. 끝나면 다시 누르세요.", "bad");
+        return;
+      }
       setStatus(`받기 실패 — HTTP ${r.status}`, "bad");
       return;
     }
@@ -1433,6 +1777,7 @@ async function fetchFile(name: string, size?: number) {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        started = true;      // 흐르기 시작했다. 이제부터는 20초만 본다
         alive();
         chunks.push(value);
         got += value.length;
@@ -1458,7 +1803,8 @@ async function fetchFile(name: string, size?: number) {
       `(${(buf.length / 1024 / sec).toFixed(0)} KB/초)`, "good");
   } catch (e) {
     setProgress(null);
-    setStatus(`받기 실패 — ${boardWhy(e)}`, "bad");
+    const also = othersDoing();
+    setStatus(`받기 실패 — ${boardWhy(e)}` + (also ? ` · ${also}` : ""), "bad");
   } finally {
     clearTimeout(stall);
     fetching = false;
@@ -1613,6 +1959,17 @@ function mountPaneHandles() {
       box.append(fit);
     }
 
+    // 키우기. 이 칸만 남기고 나머지를 접는다.
+    //
+    // 접는 기능이 이미 있으니 그것으로 만든다. 접힌 칸은 얇은 띠로 남아서
+    // 하나씩 도로 펼 수도 있고, 이 단추를 다시 누르면 한 번에 돌아온다.
+    const big = document.createElement("button");
+    big.className = "big";
+    big.textContent = "⤢";
+    big.title = `${MEDIA_NAME[k]} 크게 보기`;
+    big.onclick = (e) => { e.stopPropagation(); toggleMax(k); };
+    box.append(big);
+
     const shut = document.createElement("button");
     shut.textContent = "✕";
     shut.title = `${MEDIA_NAME[k]} 접기`;
@@ -1629,6 +1986,27 @@ function mountPaneHandles() {
   });
 }
 
+/** 지금 혼자 커져 있는 칸. 없으면 null. */
+let maxed: MediaKey | null = null;
+/** 키우기 전의 배치. 되돌릴 때 쓴다. */
+let beforeMax: Record<MediaKey, boolean> | null = null;
+
+/** 이 칸만 남기고 나머지를 접는다. 다시 누르면 원래 배치로 돌아온다. */
+function toggleMax(k: MediaKey) {
+  if (maxed === k) {
+    if (beforeMax) layout = { ...beforeMax };
+    maxed = null;
+    beforeMax = null;
+  } else {
+    // 이미 다른 칸이 커져 있으면 그때 저장해 둔 배치를 그대로 물려받는다.
+    // 안 그러면 "커진 상태" 가 원래 배치로 기억돼 되돌릴 자리를 잃는다.
+    if (!beforeMax) beforeMax = { ...layout };
+    maxed = k;
+    (Object.keys(layout) as MediaKey[]).forEach((o) => { layout[o] = (o === k); });
+  }
+  applyLayout();
+}
+
 function toggleMedia(k: MediaKey) {
   const on = (Object.keys(layout) as MediaKey[]).filter((x) => layout[x]);
   if (layout[k] && on.length === 1) {
@@ -1636,6 +2014,10 @@ function toggleMedia(k: MediaKey) {
     return;
   }
   layout = { ...layout, [k]: !layout[k] };
+  // 손으로 하나를 건드렸으면 "크게 보기" 는 더 이상 유효하지 않다.
+  // 그 상태를 들고 있으면 되돌리기가 엉뚱한 배치로 간다.
+  maxed = null;
+  beforeMax = null;
   applyLayout();
 }
 
@@ -1654,6 +2036,16 @@ function applyLayout() {
   const bothShut = !layout.video && !layout.map;
   $("mediaRow").classList.toggle("rowmini", bothShut);
   $("mediaRow").classList.toggle("shut", bothShut);
+
+  // 키우기 단추는 지금 상태를 보여준다. 커져 있으면 되돌리기 모양이 된다.
+  (Object.keys(MEDIA_EL) as MediaKey[]).forEach((k) => {
+    const b = $(MEDIA_EL[k]).querySelector<HTMLElement>(".handles .big");
+    if (!b) return;
+    const on = maxed === k;
+    b.textContent = on ? "⤡" : "⤢";
+    b.title = on ? `${MEDIA_NAME[k]} 원래대로` : `${MEDIA_NAME[k]} 크게 보기`;
+    b.classList.toggle("on", on);
+  });
 
   // 접거나 폈으니 나누개를 다시 놓는다. 접힌 칸 옆에 나누개가 남아 있으면
   // 잡아 끌어도 움직일 게 없어서 고장 난 것처럼 보인다.
@@ -2074,12 +2466,12 @@ async function loadSample() {
 }
 
 function wire() {
-  $("open").onclick = openFile;
-  $("sample").onclick = loadSample;
-  $("list").onclick = listBoard;
+  job("open", openFile);
+  job("sample", loadSample);
+  job("list", listBoard);
   // ── 보드 찾기 단추들 ──
-  $("btScan").onclick = () => void scanBoards();
-  $("btDrop").onclick = () => void sleepBoard();
+  job("btScan", scanBoards);
+  job("btDrop", () => sleepBoard());
   $("byHand").onclick = () => {
     byHand = !byHand;
     renderSide();
@@ -2111,7 +2503,7 @@ function wire() {
     if (pinMs === null) { setStatus("파란 고정선이 없습니다.", "bad"); return; }
     addMarkAt(pinMs);
   };
-  $("openVideo").onclick = openVideo;
+  job("openVideo", openVideo);
 
   // ── 영상 조작 ──────────────────────────────────────────────────────
   const v = video();
