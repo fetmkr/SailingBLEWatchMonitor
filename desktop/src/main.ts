@@ -734,6 +734,7 @@ const CONNECT_MS = 4000;
 
 async function askBoard(
   path: string, wholeMs: number | null, ac = new AbortController(),
+  connectMs = CONNECT_MS,
 ): Promise<Response> {
   const timer = wholeMs === null ? null
     : setTimeout(() => ac.abort(new Error("응답이 없습니다")), wholeMs);
@@ -741,7 +742,7 @@ async function askBoard(
     return await netFetch(`${boardUrl()}${path}`, {
       method: "GET",
       signal: ac.signal,
-      ...(inApp ? { connectTimeout: CONNECT_MS } : {}),
+      ...(inApp ? { connectTimeout: connectMs } : {}),
     } as RequestInit);
   } finally {
     if (timer) clearTimeout(timer);
@@ -975,8 +976,16 @@ async function scanBoardsRun() {
   if (st.ok) {
     setStatus("블루투스로 주변 배를 찾는 중…");
     try {
+      // 6초를 다 채우지 않는다. 부두에서는 배가 한 대뿐인 경우가 많은데
+      // 그때마다 6초를 서 있을 이유가 없다. 하나라도 찾고 2초가 지나면
+      // 거기서 끊는다. 아무것도 못 찾으면 6초를 다 쓴다.
       await ble.scan(6000, (list) => mergeBle(list));
-      await new Promise((r) => setTimeout(r, 6200));
+      const t0 = performance.now();
+      while (performance.now() - t0 < 6200) {
+        await new Promise((r) => setTimeout(r, 200));
+        const n = found.filter((f) => f.via === "ble").length;
+        if (n && performance.now() - t0 > 2000) break;
+      }
       await ble.scanStop();
     } catch (e) {
       setStatus(`블루투스 찾기 실패 — ${e}`, "bad");
@@ -1354,19 +1363,32 @@ async function knock(hosts: string[]): Promise<string | null> {
   return null;
 }
 
+/**
+ * 보드가 그 주소로 대답할 때까지 두드린다.
+ *
+ * ★ 한 번 물어보는 제한 시간을 짧게 잡는다.
+ *
+ *   보드는 `wifi on` 을 받고 0.7초에 공유기에 붙고 1.8초면 대답한다
+ *   [확인: 2026-08-27 실측]. 그런데 예전에는 한 번에 6초를 기다렸다.
+ *   그래서 아직 안 뜬 보드에 첫 번째로 물어보고는 **6초를 그냥 서 있었다.**
+ *   보드가 빠른데 앱이 느렸다.
+ *
+ *   이제 1.2초씩 짧게, 대신 자주 물어본다. 전체 시간은 그대로다.
+ */
 async function waitForBoard(hosts: string[], ms: number): Promise<string | null> {
+  const TRY_MS = 1200;
   const until = Date.now() + ms;
   const inp = $("host") as HTMLInputElement;
   while (Date.now() < until) {
     for (const h of hosts) {
       inp.value = h;
       try {
-        const r = await askBoard("/api/status", 6000);
+        const r = await askBoard("/api/status", TRY_MS, new AbortController(), TRY_MS);
         if (r.ok) return h;
       } catch { /* 아직 안 떴다. 다음 주소를 두드린다 */ }
       if (Date.now() > until) break;
     }
-    await new Promise((r) => setTimeout(r, 800));
+    await new Promise((r) => setTimeout(r, 250));
   }
   return null;
 }
