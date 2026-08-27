@@ -139,16 +139,22 @@ DJI 와 GoPro 도 평소에 둘을 같이 켜 둔다. 우리는 안테나가 하
 ### 오늘 헤맨 자리 — 다시 하지 말 것
 
 **맥 앱을 네 시간 동안 못 올리고 있었다.** `killall "Sail Analyzer"` 가
-헛돌았다. Tauri 가 만든 실행 파일 이름은 `desktop` 이다. `open` 은 이미
-떠 있으면 그 창을 앞으로 가져올 뿐이라 옛 앱을 계속 보게 된다.
+헛돌았다. 실행 파일 이름이 `desktop` 이었기 때문이다. `open` 은 이미 떠
+있으면 그 창을 앞으로 가져올 뿐이라 옛 앱을 계속 보게 된다. 코드를 여러 번
+고치고 구웠는데 화면은 그대로였고, 원인을 코드에서 찾고 있었다.
+
+**이름을 고쳤다.** `tauri.conf.json` 에 `mainBinaryName` 을 넣었다.
+`npm create tauri-app` 을 `desktop` 폴더에서 돌려서 러스트 꾸러미 이름이
+`desktop` 이 됐던 것이다. 아이패드는 원래부터 `Sail Analyzer` 였고
+(Xcode 가 제 이름을 쓴다) 이름을 바꿔도 빌드·설치·실행 다 통과했다.
+
+그래도 띄운 뒤에는 시작 시각을 찍어서 방금 것인지 확인한다.
 
 ```bash
-pkill -f "Sail Analyzer.app/Contents/MacOS/desktop"
+pkill -f "Sail Analyzer.app/Contents/MacOS/"
 open "…/Sail Analyzer.app"
-ps -o lstart=,command= -p $(pgrep -f "Sail Analyzer.app/Contents/MacOS/desktop" | head -1)
+ps -o lstart= -p $(pgrep -f "Sail Analyzer.app/Contents/MacOS/" | head -1)
 ```
-
-띄운 뒤 시작 시각을 찍어서 방금 것인지 확인한다.
 
 ---
 
