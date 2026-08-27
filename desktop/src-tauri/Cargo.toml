@@ -27,6 +27,10 @@ tauri-plugin-fs = "2.5.1"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-blec = "0.12.0"
 
+# 영상 고르기. 아이패드에서 애플 사진 고르기를 전체 화면으로 띄우고,
+# 원본을 변환 없이 그대로 받는다. plugins/tauri-plugin-videopick 참고.
+tauri-plugin-videopick = { path = "../plugins/tauri-plugin-videopick" }
+
 # USB 시리얼은 아이패드에서 못 쓴다. 부품이 iOS 에서는 serialport 를 아예
 # 빼도록 되어 있다 (tauri-plugin-serialplugin 의 Cargo.toml 85번 줄).
 # 넣어 봐야 아무것도 못 하니 부품 자체를 안 넣는다.

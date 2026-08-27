@@ -13,6 +13,7 @@ import * as vid from "./video";
 import * as ble from "./ble";
 import * as usb from "./usb";
 import * as plat from "./platform";
+import { convertFileSrc, invoke, addPluginListener } from "@tauri-apps/api/core";
 import * as panes from "./panes";
 import * as tl from "./timeline";
 import { TrackMap, type TrackPoint } from "./map";
@@ -1764,10 +1765,14 @@ let sliderHeld = false;
 
 async function openVideo() {
   try {
+    if (plat.caps().os === "ios") return await openVideoNative();
+
     const f = await pickFile("pickVideo");
     if (!f) return;
 
-    // [임시 계측] 확인 뒤 지운다
+    // 얼마나 걸렸는지 남긴다. 시험용으로 넣었다가 그대로 둔다 — 느릴 때
+    // 원인을 가려 준다. 기기에 있는 영상은 1초 안쪽이고, 아이클라우드에서
+    // 내려받으면 몇십 초가 나온다.
     const t0 = performance.now();
     const v0 = video();
     const ready = new Promise<void>((res) => {
@@ -1784,7 +1789,57 @@ async function openVideo() {
   }
 }
 
-async function useVideoUrl(url: string, name: string, src: vid.RangeReader | null) {
+/** 아이패드에서 영상 고르기.
+ *
+ *  애플 사진 고르기를 전체 화면으로 띄우고, 고른 영상을 **변환 없이 원본
+ *  그대로** 받는다. 우리 부품이 하는 일이다 (plugins/tauri-plugin-videopick).
+ *
+ *  Tauri 의 dialog 부품으로도 전체 화면은 되는데, 그쪽은 원본 그대로 받는
+ *  설정을 안 걸어 둬서 아이폰이 찍은 HEVC 영상을 다시 인코딩한다. 11초짜리
+ *  영상에 3초가 걸렸다. 재보고 알았다.
+ *
+ *  붙이는 것은 asset:// 다. 재보니 첫 그림까지 0.1초다 — Tauri 도 wry 도
+ *  Range 요청을 제대로 다룬다. 느렸던 것은 붙이기가 아니라 그 앞이었다. */
+async function openVideoNative() {
+  // 아이클라우드에만 있는 영상은 먼저 내려받는다. 몇십 초가 걸릴 수 있어서
+  // 진행 정도를 알려 준다. 아무 말도 없으면 앱이 멎은 줄 안다.
+  const tap = await addPluginListener<{ percent: number; phase: string }>(
+    "videopick", "progress", (p) => {
+      setStatus(p.phase === "start" || p.percent <= 0
+        ? "영상을 가져오는 중… (아이클라우드에 있으면 내려받습니다)"
+        : `영상을 가져오는 중… ${p.percent}%`);
+    });
+
+  const t0 = performance.now();
+  let r: { path: string; name: string; size: number; shotAt: number };
+  try {
+    r = await invoke("plugin:videopick|pick");
+  } finally {
+    await tap.unregister();
+  }
+  if (!r || !r.path) { setStatus("영상 고르기를 그만두었습니다."); return; }
+  const tPick = performance.now() - t0;
+
+  const t1 = performance.now();
+  const v0 = video();
+  const shown = new Promise<void>((res) => {
+    const on = () => { v0.removeEventListener("loadeddata", on); res(); };
+    v0.addEventListener("loadeddata", on);
+    setTimeout(res, 30000);
+  });
+  // 찍은 시각은 부품이 스위프트에서 읽어 같이 보내 준다. 파일을 화면 쪽으로
+  // 끌어올 필요가 없다.
+  await useVideoUrl(convertFileSrc(r.path), r.name, null,
+                    r.shotAt > 0 ? new Date(r.shotAt) : null);
+  await shown;
+
+  setStatus(`${r.name} · ${(r.size / 1048576).toFixed(0)}MB · ` +
+            `가져오기 ${(tPick / 1000).toFixed(1)}초 · ` +
+            `붙이기 ${((performance.now() - t1) / 1000).toFixed(1)}초`, "good");
+}
+
+async function useVideoUrl(url: string, name: string, src: vid.RangeReader | null,
+                           knownShotAt: Date | null = null) {
   const v = video();
   v.src = url;
   v.preload = "auto";
@@ -1797,7 +1852,8 @@ async function useVideoUrl(url: string, name: string, src: vid.RangeReader | nul
 
   // 파일이 적어 둔 시각으로 첫 짐작을 만든다
   let ft: Date | null = null;
-  if (src) { try { ft = await vid.mp4CreationTime(src); } catch { /* 못 읽어도 된다 */ } }
+  if (knownShotAt) ft = knownShotAt;              // 부품이 이미 읽어 왔다
+  else if (src) { try { ft = await vid.mp4CreationTime(src); } catch { /* 못 읽어도 된다 */ } }
   const first = session?.imu[0]?.ms ?? session?.nav[0]?.ms ?? 0;
   sync = vid.guessOffset(ft, session?.header.utcStart ?? 0, first);
 
@@ -2591,6 +2647,7 @@ loadLayout();
 redraw();
 // 영상이 아직 없으므로 싱크와 어긋남 맞추기를 흐리게 해 둔다.
 renderVbar();
+document.body.classList.add("ready");   // 자리를 다 잡았으니 이제 보여준다
 setStatus("파일을 열거나 보드에서 받으세요.");
 
 // 이 기기에서 뭐가 되는지 먼저 물어본다 (platform.ts 참고).

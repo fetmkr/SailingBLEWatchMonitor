@@ -45,6 +45,8 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        // 영상 고르기. 아이패드에서만 실제로 일한다.
+        .plugin(tauri_plugin_videopick::init())
         .invoke_handler(tauri::generate_handler![greet, caps]);
 
     // USB 시리얼. 블루투스가 없는 컴퓨터에서 보드를 깨우는 데 쓴다.

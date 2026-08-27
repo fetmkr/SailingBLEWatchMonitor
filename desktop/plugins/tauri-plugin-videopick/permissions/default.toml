@@ -1,0 +1,8 @@
+[default]
+description = "영상 고르기와 진행 알림"
+permissions = [
+  "allow-pick",
+  "allow-register-listener",
+  "allow-registerListener",
+  "allow-remove-listener",
+]

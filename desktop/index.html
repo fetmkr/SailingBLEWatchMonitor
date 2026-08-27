@@ -25,6 +25,20 @@
                                    maximum-scale=1.0, user-scalable=no,
                                    viewport-fit=cover" />
     <title>Sail Analyzer</title>
+    <!--
+      바탕색을 여기 직접 박아 둔다.
+
+      CSS 파일이 오기 전 잠깐 동안 글자만 흰 바탕에 먼저 그려진다. 앱이
+      켜질 때마다 0.3초쯤 번쩍인다. 화면 파일이 읽히는 순간 바로 걸리는
+      색을 여기 두면 그 틈이 안 보인다.
+
+      styles.css 의 :root --bg 와 같은 값이다. 판을 바꿔도 첫 순간만
+      이 색이고 곧 고른 판으로 넘어간다. -->
+    <style>
+      html, body { margin: 0; background: #0e1116; color: #e6e6e6; }
+      body > * { visibility: hidden; }        /* 자리 잡기 전에는 안 보인다 */
+      body.ready > * { visibility: visible; }
+    </style>
   </head>
   <body>
     <!--
