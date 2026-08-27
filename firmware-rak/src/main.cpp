@@ -124,6 +124,23 @@ static float   gHeelSign  = -1.0f;  // 실물에서 좌우가 반대로 나와 �
 static uint8_t gPitchAxis = 2;
 static float   gPitchSign = 1.0f;   // -1 이면 앞뒤가 뒤집혀 있다는 뜻
 
+// ── 방위를 만드는 두 축 ──────────────────────────────────────────────────
+//
+// 방위는 자력계의 **수평 두 축**으로 만든다. atan2(A, B) 다.
+// 어느 둘이 수평인지는 보드를 어떻게 다느냐에 달려 있다. 위아래를 향하는
+// 축을 빼고 남은 둘이 그것이다.
+//
+// 힐·피치와 마찬가지로 시리얼에서 바꾸고 NVS 에 남긴다. 케이스를 바꿔
+// 달 때마다 다시 구울 이유가 없다 (`hdg` 명령).
+//
+// ★ 여기에 자기 편각은 안 들어 있다. 한국은 약 8도 서편이다.
+//   `hdg off <도>` 로 그 보정과 보드 방향 어긋남을 한꺼번에 넣는다.
+static uint8_t gHdgAxisA = 1;       // atan2 의 첫 인자 (기본 Y)
+static uint8_t gHdgAxisB = 0;       // 두 번째 인자 (기본 X)
+static float   gHdgSignA = 1.0f;
+static float   gHdgSignB = 1.0f;
+static float   gHdgOffsetDeg = 0.0f;
+
 // "지금 이 자세가 평형" 이라고 알려주는 기준각. 배를 물에 띄우고 평형일 때
 // `level` 을 치면 그때 각도를 0 으로 삼는다. NVS 에 저장되므로 재부팅해도,
 // 다시 구워도 남는다.
@@ -250,6 +267,11 @@ static void loadSettings() {
     gPitchAxis      = gPrefs.getUChar("pitch_axis", 2); // 기본 피치 Z
     gPitchSign      = gPrefs.getChar("pitch_sgn", 1) < 0 ? -1.0f : 1.0f;
     gPitchOffsetDeg = gPrefs.getFloat("pitch_off", 0.0f);
+    gHdgAxisA       = gPrefs.getUChar("hdg_a", 1);
+    gHdgAxisB       = gPrefs.getUChar("hdg_b", 0);
+    gHdgSignA       = gPrefs.getChar("hdg_sa", 1) < 0 ? -1.0f : 1.0f;
+    gHdgSignB       = gPrefs.getChar("hdg_sb", 1) < 0 ? -1.0f : 1.0f;
+    gHdgOffsetDeg   = gPrefs.getFloat("hdg_off", 0.0f);
     gDampLevel      = gPrefs.getUChar("damp", 2);
     gDeadbandKn     = gPrefs.getFloat("dead_kn", 0.10f);
     gGyrOffX        = gPrefs.getFloat("gyr_x", 0.0f);
@@ -288,13 +310,25 @@ static void saveIdentity(const char* userName) {
 static void applySensorPower(int pin, bool cycle) {
     // 안 쓰는 후보 핀은 입력으로 되돌려 둔다. 두 핀을 동시에 몰면
     // 어느 쪽이 진짜인지 판정할 수 없다.
+    //
+    // ★ 저장 버튼 자리는 절대 건드리지 않는다.
+    //   후보 B(GPIO2)는 2026-08-21 실측에서 탈락했고, 지금은 저장 버튼이
+    //   달려 있다. 여기서 pinMode(2, INPUT) 을 하면 버튼의 내부 풀업이
+    //   풀려 핀이 뜬 채로 남고, 그게 LOW 로 흘러 "2초 길게 눌림" 으로
+    //   먹힌다. 실제로 그랬다 — `power 14` 를 쳤더니 기록이 시작됐다
+    //   (2026-08-27).
+    const int btn = rak::kAin1;
     int other = (pin == rak::kSensorPowerA) ? rak::kSensorPowerB : rak::kSensorPowerA;
-    pinMode(other, INPUT);
+    if (other != btn) pinMode(other, INPUT);
 
     if (pin == 0) {
-        pinMode(rak::kSensorPowerA, INPUT);
-        pinMode(rak::kSensorPowerB, INPUT);
-        Serial.println("[PWR] 센서 전원 끔 (두 후보 핀 모두 입력으로)");
+        if (rak::kSensorPowerA != btn) pinMode(rak::kSensorPowerA, INPUT);
+        if (rak::kSensorPowerB != btn) pinMode(rak::kSensorPowerB, INPUT);
+        Serial.println("[PWR] 센서 전원 끔 (버튼 자리는 그대로 둡니다)");
+        return;
+    }
+    if (pin == btn) {
+        Serial.printf("[PWR] GPIO%d 은 저장 버튼 자리입니다. 안 건드립니다.\n", pin);
         return;
     }
 
@@ -1620,10 +1654,18 @@ static void imuUpdate() {
 //     1) 기울기 보정 — 배가 기울면 방위가 틀어진다
 //     2) 자기 편각   — 자북과 진북의 차이 (한국은 약 8도 서편)
 //   배에 달고 실제 방위와 대조한 뒤에 보정을 넣는다.
+/** 자력계의 한 축 값을 축 번호로 꺼낸다. */
+static float magAxis(uint8_t axis) {
+    return axis == 0 ? gMag.x : axis == 1 ? gMag.y : gMag.z;
+}
+
 static float headingDeg() {
     if (!gMagOk) return -1.0f;
-    float h = atan2f(gMag.y, gMag.x) * 180.0f / (float)M_PI;
-    if (h < 0.0f) h += 360.0f;
+    const float a = magAxis(gHdgAxisA) * gHdgSignA;
+    const float b = magAxis(gHdgAxisB) * gHdgSignB;
+    float h = atan2f(a, b) * 180.0f / (float)M_PI + gHdgOffsetDeg;
+    while (h < 0.0f)    h += 360.0f;
+    while (h >= 360.0f) h -= 360.0f;
     return h;
 }
 
@@ -1963,16 +2005,23 @@ static void doSdBench(uint32_t rows) {
 // 기능명세 「조작」의 "저장 버튼을 눌러 기록 시작/종료 — 선수가 명확히 통제".
 //
 // RAK19007 에는 리셋 버튼밖에 없다 [확인: 데이터시트 261번째 줄]. 그래서
-// 2.54 mm 헤더에 직접 단다. **J10 헤더의 1번(BOOT = GPIO0)과 2번(GND)** 이
-// 바로 옆에 붙어 있어서 버튼 두 다리를 그대로 꽂으면 된다.
+// 2.54 mm 헤더에 직접 단다. **J11 헤더 1번(AIN1 = GPIO2)과 GND** 다.
 //
-// 쓸 수 있는 핀인지 짐작하지 않고 쟀다 (`pin` 명령).
-//   GPIO0  풀업 HIGH, 아무도 안 건드림  → 쓸 수 있다
-//   GPIO21 풀업인데 LOW 로 붙어 있음     → 못 쓴다 (J11 의 IO1)
-//   GPIO14 센서 전원 스위치라 못 쓴다 (J11 의 IO2)
+// 쓸 수 있는 핀인지 짐작하지 않고 쟀다 (`pin` 명령, 2026-08-27).
 //
-// ★ 주의: GPIO0 은 부팅할 때 눌려 있으면 보드가 다운로드 모드로 들어간다.
-//   전원을 넣는 순간 누르고 있으면 안 된다. 최종 보드에서는 전용 핀을 쓴다.
+//   AIN1 (GPIO2)   풀업 HIGH · 풀다운 LOW   비어 있다        ← 여기 단다
+//   IO1  (GPIO21)  풀업 LOW  · 풀다운 LOW   GPS 가 잡고 있다
+//   IO2  (GPIO14)  센서 전원 스위치         쓰면 센서가 다 꺼진다
+//   BOOT (GPIO0)   풀업 HIGH · 풀다운 LOW   비어 있지만 함정이 있다
+//
+// **왜 IO1 이 안 되나.** IO1 과 IO2 는 J11 헤더와 센서 슬롯으로 같이 나가는
+// 한 선이다. 슬롯 A 12번 핀이 IO1 인데 거기 GPS 가 꽂혀 있어서 LOW 로
+// 잡고 있다. 센서 전원을 끄면 HIGH 로 올라오는 것으로 확인했다.
+// AIN0/AIN1 은 슬롯으로 안 나가서 안 물린다.
+//
+// **왜 BOOT 가 아닌가.** GPIO0 은 전원을 넣는 순간 눌려 있으면 보드가
+// 다운로드 모드로 들어가 안 켜진다. 배 위에서 그러면 곤란하다.
+// GPIO2 는 ESP32-S3 의 strapping 핀이 아니라 그런 게 없다.
 //
 // 누르는 법
 //   짧게(0.05~1초)  이벤트 표식 (마킹)
@@ -1980,11 +2029,22 @@ static void doSdBench(uint32_t rows) {
 //
 // 시작·종료를 길게로 둔 이유는 실수로 세션이 끊기면 안 되기 때문이다.
 // 훈련 중에 자주 쓰는 건 마킹 쪽이다.
-static constexpr int      kButtonPin   = 0;
+static constexpr int      kButtonPin   = rak::kAin1;   // GPIO2, J11 1번
 static constexpr uint32_t kBtnLongMs   = 2000;
-static constexpr uint32_t kBtnDebounce = 50;
 
-static bool     gBtnDown     = false;
+// ── 채터링(접점 튐) 걷어내기 ─────────────────────────────────────────────
+//
+// 기계 접점은 붙을 때와 떨어질 때 수 ms 동안 여러 번 튄다. 그대로 읽으면
+// 한 번 눌렀는데 마킹이 서너 개 찍힌다.
+//
+// **값이 바뀐 순간부터 이만큼 안 흔들려야** 진짜 바뀐 것으로 본다.
+// 예전에는 뗄 때만 "50ms 보다 짧으면 버린다" 로 걸렀는데, 그건 누를 때의
+// 튐을 못 막는다. 누르는 순간 튀면 그 자리에서 눌린 것으로 쳐 버렸다.
+static constexpr uint32_t kBtnStableMs = 30;
+
+static bool     gBtnRaw      = false;  // 방금 읽은 값 (튐 포함)
+static uint32_t gBtnRawAt    = 0;      // 그 값이 된 시각
+static bool     gBtnDown     = false;  // 튐을 걷어낸 값
 static uint32_t gBtnDownAt   = 0;
 static bool     gBtnLongDone = false;  // 길게가 이미 먹었나 (떼면서 또 먹지 않게)
 
@@ -1992,28 +2052,38 @@ static bool logStartNow();             // 아래 "기록 (hlog)" 항목
 
 static void buttonBegin() {
     pinMode(kButtonPin, INPUT_PULLUP);
-    delay(5);
-    if (digitalRead(kButtonPin) == LOW) {
-        Serial.println("[BTN] GPIO0 이 LOW 입니다 — 버튼이 눌려 있거나 잘못 달렸습니다.");
+    delay(20);
+    gBtnRaw = (digitalRead(kButtonPin) == LOW);
+    gBtnRawAt = millis();
+    gBtnDown = gBtnRaw;
+    if (gBtnRaw) {
+        Serial.printf("[BTN] GPIO%d 이 LOW 입니다 — 버튼이 눌려 있거나 잘못 달렸습니다.\n",
+                      kButtonPin);
     } else {
-        Serial.printf("[BTN] 저장 버튼 GPIO%d (J10 헤더 1번-2번). "
+        Serial.printf("[BTN] 저장 버튼 GPIO%d (J11 헤더 1번 AIN1 - GND). "
                       "짧게=마킹, 2초=시작/종료\n", kButtonPin);
     }
 }
 
 static void buttonPoll(uint32_t nowMs) {
-    const bool down = (digitalRead(kButtonPin) == LOW);
+    // ── 튐을 먼저 걷어낸다 ──
+    // 값이 바뀌면 그 시각을 적어 두고, 30ms 동안 그대로여야 받아들인다.
+    const bool raw = (digitalRead(kButtonPin) == LOW);
+    if (raw != gBtnRaw) { gBtnRaw = raw; gBtnRawAt = nowMs; }
+    const bool settled = (nowMs - gBtnRawAt >= kBtnStableMs);
 
-    if (down && !gBtnDown) {
+    if (settled && gBtnRaw && !gBtnDown) {
         gBtnDown = true;
-        gBtnDownAt = nowMs;
+        // 눌리기 시작한 시각은 **처음 바뀐 그 순간**으로 잡는다. 30ms 뒤로
+        // 잡으면 "2초 길게" 가 매번 30ms 씩 늦어진다.
+        gBtnDownAt = gBtnRawAt;
         gBtnLongDone = false;
         return;
     }
 
     // 누르고 있는 동안 2초가 지나면 그 자리에서 먹는다.
     // 떼야 반응하면 "먹었나?" 를 알 수가 없다. 지금은 LED 로 바로 알려준다.
-    if (down && gBtnDown && !gBtnLongDone && nowMs - gBtnDownAt >= kBtnLongMs) {
+    if (gBtnDown && !gBtnLongDone && nowMs - gBtnDownAt >= kBtnLongMs) {
         gBtnLongDone = true;
         if (hlog::recording()) {
             Serial.println("[BTN] 길게 — 기록 종료");
@@ -2025,11 +2095,10 @@ static void buttonPoll(uint32_t nowMs) {
         return;
     }
 
-    if (!down && gBtnDown) {
-        const uint32_t held = nowMs - gBtnDownAt;
+    if (settled && !gBtnRaw && gBtnDown) {
+        const uint32_t held = gBtnRawAt - gBtnDownAt;
         gBtnDown = false;
         if (gBtnLongDone) return;                 // 이미 길게로 먹었다
-        if (held < kBtnDebounce) return;          // 튐
         if (hlog::recording()) {
             Serial.printf("[BTN] 짧게(%ums) — 마킹\n", (unsigned)held);
             hlog::mark();
@@ -2703,6 +2772,8 @@ static void printHelp() {
     Serial.println("  usbbench [KB] USB 시리얼 속도 실측 (기본 512 KB)");
     Serial.println("  level         ★ 지금 자세를 힐·피치 0° 로 삼기 (배가 평형일 때)");
     Serial.println("  heel [x|y|z]  힐을 어느 가속도 축에서 볼지 (앞에 - 로 뒤집기)");
+    Serial.println("  hdg <A> <B>   방위를 만들 자력계 두 축. 예) hdg -z x");
+    Serial.println("  hdg off <도>  방위 0점 보정 (자기 편각 + 보드 어긋남)");
     Serial.println("  pitch [x|y|z] 피치를 어느 가속도 축에서 볼지");
     Serial.println("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)");
     Serial.println("  help          이 도움말");
@@ -2784,8 +2855,26 @@ static void handleCommand(String line) {
     // 짐작하지 않는다 — GPS 가 슬롯 A 의 IO1 로 PPS 를 낼 수도 있다.
     if (line.startsWith("pin ")) {
         const int g = line.substring(4).toInt();
-        pinMode(g, INPUT_PULLUP);
-        delay(5);
+
+        // 먼저 내부 저항이 듣는지 본다.
+        //
+        // 풀업만 걸어 보고 HIGH 가 나오면 "풀업이 듣는다" 고 말할 수 없다.
+        // 아무것도 안 물린 핀이 그냥 HIGH 로 앉아 있어도 같은 값이 나온다.
+        // 풀다운을 걸었을 때 LOW 로 내려가야 내부 저항이 진짜 듣는 것이다.
+        //
+        // 셋을 나란히 보면 이렇게 읽는다.
+        //   풀업 HIGH · 풀다운 LOW   비어 있다. 버튼 달 수 있다
+        //   풀업 LOW  · 풀다운 LOW   무언가 LOW 로 붙잡고 있다. 못 쓴다
+        //   풀업 HIGH · 풀다운 HIGH  무언가 HIGH 로 붙잡고 있다. 못 쓴다
+        pinMode(g, INPUT_PULLUP);   delay(20); const int up   = digitalRead(g);
+        pinMode(g, INPUT_PULLDOWN); delay(20); const int down = digitalRead(g);
+        pinMode(g, INPUT_PULLUP);   delay(20);
+        Serial.printf("[PIN] GPIO%d  풀업 %s · 풀다운 %s  → %s\n", g,
+            up == LOW ? "LOW" : "HIGH", down == LOW ? "LOW" : "HIGH",
+            (up == HIGH && down == LOW) ? "비어 있음 (버튼 달 수 있다)"
+            : (up == LOW && down == LOW) ? "무언가 LOW 로 잡고 있다"
+            : (up == HIGH && down == HIGH) ? "무언가 HIGH 로 잡고 있다"
+            : "이상한 값");
         Serial.printf("[PIN] GPIO%d 를 5초 봅니다 (내부 풀업). 눌러 보세요.\n", g);
         int last = digitalRead(g);
         uint32_t changes = 0, lowMs = 0, t0 = millis(), lastT = t0;
@@ -2996,6 +3085,73 @@ static void handleCommand(String line) {
     // 힐과 피치를 어느 가속도 축에서 볼지. 보드를 다는 방법이 바뀌면 여기만 고친다.
     //   heel  y   힐을 Y 축에서
     //   pitch -z  피치를 Z 축에서, 앞뒤 뒤집어서
+    // 방위를 만드는 두 축을 바꾼다.
+    //
+    //   hdg              지금 설정과 값 보기
+    //   hdg <A> <B>      atan2(A, B) 로 만든다. 예) hdg -z x
+    //   hdg off <도>     0 점 보정 (자기 편각 + 보드 방향 어긋남)
+    //
+    // 어느 둘이 수평인지는 **돌려 보면** 안다. 케이스를 평평하게 두고 제자리에서
+    // 한 바퀴 돌리면, 수평인 두 축은 값이 크게 오르내리고 위아래 축은 거의
+    // 그대로다. `mag` 명령이 그걸 보여준다.
+    if (line == "hdg" || line.startsWith("hdg ")) {
+        String arg = line.substring(3); arg.trim(); arg.toLowerCase();
+
+        auto parseAxis = [](String t, uint8_t& axis, float& sign) -> bool {
+            sign = 1.0f;
+            if (t.startsWith("-")) { sign = -1.0f; t = t.substring(1); }
+            else if (t.startsWith("+")) { t = t.substring(1); }
+            if (t == "x") { axis = 0; return true; }
+            if (t == "y") { axis = 1; return true; }
+            if (t == "z") { axis = 2; return true; }
+            return false;
+        };
+
+        if (arg.startsWith("off")) {
+            String v = arg.substring(3); v.trim();
+            gHdgOffsetDeg = v.length() ? v.toFloat() : 0.0f;
+            gPrefs.begin("sail", false);
+            gPrefs.putFloat("hdg_off", gHdgOffsetDeg);
+            gPrefs.end();
+            Serial.printf("[IMU] 방위 0점 보정 %+.1f°\n", gHdgOffsetDeg);
+        } else if (arg.length() > 0) {
+            const int sp = arg.indexOf(' ');
+            if (sp <= 0) {
+                Serial.println("  hdg <A> <B>   예) hdg -z x   (앞에 - 를 붙이면 뒤집기)");
+                Serial.println("  hdg off <도>  0점 보정");
+                return;
+            }
+            uint8_t a = 0, b = 0; float sa = 1.0f, sb = 1.0f;
+            String ta = arg.substring(0, sp), tb = arg.substring(sp + 1);
+            ta.trim(); tb.trim();
+            if (!parseAxis(ta, a, sa) || !parseAxis(tb, b, sb)) {
+                Serial.println("  축은 x y z 중에서 고르세요. 예) hdg -z x");
+                return;
+            }
+            if (a == b) {
+                Serial.println("  두 축이 같으면 방위가 안 나옵니다. 서로 다른 축이어야 합니다.");
+                return;
+            }
+            gHdgAxisA = a; gHdgAxisB = b; gHdgSignA = sa; gHdgSignB = sb;
+            gPrefs.begin("sail", false);
+            gPrefs.putUChar("hdg_a", a);  gPrefs.putUChar("hdg_b", b);
+            gPrefs.putChar("hdg_sa", sa < 0 ? -1 : 1);
+            gPrefs.putChar("hdg_sb", sb < 0 ? -1 : 1);
+            gPrefs.end();
+        }
+
+        imuUpdate();
+        const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
+        Serial.println("──────────────────────────────────────────");
+        Serial.printf("  지금 자력  %+.1f %+.1f %+.1f µT\n", gMag.x, gMag.y, gMag.z);
+        Serial.printf("  방위  atan2(자력 %s, 자력 %s) %+.1f°  →  %.1f°\n",
+                      aAx.text, bAx.text, gHdgOffsetDeg, headingDeg());
+        Serial.println("──────────────────────────────────────────");
+        Serial.println("  케이스를 평평하게 두고 제자리에서 한 바퀴 돌려 보세요.");
+        Serial.println("  수평인 두 축은 크게 오르내리고, 위아래 축은 거의 그대로입니다.");
+        return;
+    }
+
     if (line == "heel" || line.startsWith("heel ") ||
         line == "pitch" || line.startsWith("pitch ")) {
         const bool isHeel = line.startsWith("heel");
@@ -3215,6 +3371,13 @@ static void handleCommand(String line) {
             if (pin != rak::kSensorPowerA && pin != rak::kSensorPowerB) {
                 Serial.printf("[PWR] %d 은 후보가 아닙니다. %d, %d, off 중에서 고르세요.\n",
                               pin, rak::kSensorPowerA, rak::kSensorPowerB);
+                return;
+            }
+            // 후보 B(GPIO2)는 저장 버튼과 같은 핀이다. 실측으로 이미 탈락한
+            // 후보이기도 하다. 여기로 바꾸면 버튼을 누를 때마다 센서 전원이
+            // 흔들린다. 막는다.
+            if (pin == kButtonPin) {
+                Serial.printf("[PWR] GPIO%d 은 저장 버튼 자리입니다. 못 씁니다.\n", pin);
                 return;
             }
         }

@@ -35,7 +35,7 @@ RAK3112 의 ESP32-S3 GPIO 가 WisBlock 슬롯 신호로 어떻게 나가는지.
 | I2C2 SDA / SCL | 17 / 18 | 코어 커넥터에서 끝남 |
 | SPI CS/CLK/MOSI/MISO | 12 / 13 / 11 / 10 | |
 | UART1 TX / RX | 43 / 44 | 슬롯 A·D 에만 나감 |
-| AIN0 / AIN1 | 1 / 2 | AIN0 에 배터리 분압이 물림 |
+| AIN0 / AIN1 | 1 / 2 | AIN0 에 배터리 분압이 물림. **AIN1 = 저장 버튼** (J11 1번) |
 | LED 초록 / 파랑 | 46 / 45 | 빨강은 충전 표시라 MCU 가 못 건드림 |
 
 출처: RAK3312 datasheet (WisBlock Pin Assignments), RAK19007 datasheet (핀 정의 + 회로도).
