@@ -86,6 +86,20 @@ export function register(
 /** 접거나 편 뒤에 부른다. 나누개를 다시 놓는다. */
 export function refresh() { for (const c of ctxs) relayout(c); }
 
+/**
+ * 등록을 지운다. 칸을 다른 통으로 옮길 때 쓴다.
+ *
+ * 세로 영상을 열면 영상 칸을 영상·지도 줄에서 빼내 가운데로 옮긴다.
+ * 그러면 통마다 담긴 칸이 달라지므로 등록을 새로 해야 한다. 안 지우고
+ * 또 등록하면 옛 등록이 남아서 없는 칸에 나누개를 놓으려 든다.
+ */
+export function forget(box: HTMLElement) {
+  box.querySelectorAll(":scope > .gutter").forEach((g) => g.remove());
+  for (let i = ctxs.length - 1; i >= 0; i--) {
+    if (ctxs[i].box === box) ctxs.splice(i, 1);
+  }
+}
+
 /** 통의 방향을 바꾼다 (가로 ↔ 세로). */
 export function setDir(box: HTMLElement, dir: Dir) {
   const c = ctxs.find((x) => x.box === box);

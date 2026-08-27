@@ -82,12 +82,13 @@
                 </div>
               </div>
             </div>
-            <!-- 영상 스크러빙 슬라이더. 타임라인 없이도 영상만 훑을 수 있어야 한다 -->
-            <div id="vseek">
-              <input id="vslider" type="range" min="0" max="1000" value="0" step="1" />
-            </div>
-            <!-- 영상 자기 시간만 남긴다. 맞추는 단추들은 아래 시간 막대에 있다. -->
+            <!-- 영상 제 것만 다루는 한 줄.
+                 재생·슬라이더·시각을 한 줄에 둔다. 두 줄로 나누면 그만큼
+                 영상 자리가 줄어드는데, 세로 영상에서는 그 몇십 px 이 아깝다.
+                 아래 시간 막대와 하는 일이 다르다 — 싱크 전에는 영상만 움직인다. -->
             <div id="vbar">
+              <button id="vplay" title="영상만 재생">▶</button>
+              <input id="vslider" type="range" min="0" max="1000" value="0" step="1" />
               <span id="vtime" class="mono dim">0:00 / 0:00</span>
             </div>
           </div>
@@ -95,8 +96,8 @@
             <div id="map"></div>
             <div id="mapBar">
               <select id="baseSel" title="바탕 지도"></select>
-              <label><input id="seamark" type="checkbox" /> 해도</label>
-              <label><input id="bySog" type="checkbox" checked /> 속도 색칠</label>
+              <label class="chk"><input id="seamark" type="checkbox" /> 해도</label>
+              <label class="chk"><input id="bySog" type="checkbox" checked /> 속도 색칠</label>
               <button id="mapFit" title="항적 전체가 보이게">항적 맞춤</button>
             </div>
             <div id="mapNone" class="dim">위치가 없는 세션입니다.</div>

@@ -2051,11 +2051,16 @@ function applyLayout() {
     // 생김새를 바꾸다가 크기 셈이 같이 틀어지면 안 된다.
     el.classList.toggle("shut", !layout[k]);
   });
-  // 영상과 지도가 둘 다 접히면 그 줄 자체가 28px 띠가 된다.
+  // 한 줄에 담긴 둘이 다 접히면 그 줄 자체가 얇은 띠가 된다.
   //
-  // ★ .mini 가 아니라 .rowmini 다. .mini 를 붙이면 그 안의 영상·지도가
-  //   통째로 사라지고 되살릴 띠까지 없어진다 (styles.css 의 주석 참조).
-  const bothShut = !layout.video && !layout.map;
+  // ★ .mini 가 아니라 .rowmini 다. .mini 를 붙이면 그 안의 칸들이 통째로
+  //   사라지고 되살릴 띠까지 없어진다 (styles.css 의 주석 참조).
+  //
+  // ★ 담긴 둘이 배치마다 다르다. 보통은 영상·지도가 한 줄이고,
+  //   영상을 왼쪽 전체로 놓으면 지도·데이터가 한 줄이다.
+  const bothShut = shape === "videoLeft"
+    ? (!layout.map && !layout.data)
+    : (!layout.video && !layout.map);
   $("mediaRow").classList.toggle("rowmini", bothShut);
   $("mediaRow").classList.toggle("shut", bothShut);
 
@@ -2082,11 +2087,144 @@ function applyLayout() {
 //
 // 기본은 위아래다. 영상·지도가 위에 나란히, 데이터가 아래에 가로 전체.
 // 타임라인은 너비가 생명이라 가로로 까는 편이 훨씬 잘 보인다.
+/* ── 세로 영상 배치 ──────────────────────────────────────────────────
+ *
+ * 요즘 영상은 세로가 많다 (9:16). 세로 영상은 **높이가 밑천**인데, 기본
+ * 배치는 영상을 납작한 칸에 넣는다. 재보면 이렇다.
+ *
+ *   기본 배치        칸 611x257   영상 145x257    칸의 76%가 검은 띠
+ *   영상 왼쪽 전체    칸 340x604   영상 340x604    띠가 없다
+ *
+ * 영상 넓이가 5.5배다. 지도와 데이터도 안 좁아진다 (882 폭).
+ *
+ * 그래서 세로 영상을 열면 칸을 이렇게 옮긴다.
+ *
+ *   보통                        영상 왼쪽 전체
+ *   ┌───────┬───────┐          ┌─────┬───────────┐
+ *   │ 영상  │ 지도  │          │     │   지도    │
+ *   ├───────┴───────┤          │영상 ├───────────┤
+ *   │    데이터     │          │     │  데이터   │
+ *   └───────────────┘          └─────┴───────────┘
+ *
+ * 옮기는 것은 둘뿐이다. 영상을 영상·지도 줄에서 빼내 가운데의 첫 칸으로,
+ * 데이터를 그 줄 안으로 넣는다. 그러면 그 줄이 오른쪽 세로줄이 된다.
+ */
+type Shape = "normal" | "videoLeft";
+const SHAPE_KEY = "shape.v1";
+let shape: Shape =
+  localStorage.getItem(SHAPE_KEY) === "videoLeft" ? "videoLeft" : "normal";
+/** 사람이 배치를 손으로 정했나. 그러면 영상을 열어도 안 건드린다. */
+let shapeByHand = localStorage.getItem(SHAPE_KEY + ".byHand") === "1";
+/** 영상 칸을 마지막으로 맞춰 준 너비. 사람이 끌었는지 가리는 데 쓴다. */
+let fittedW = 0;
+
+/**
+ * 칸을 옮기고 나누개를 다시 단다.
+ *
+ * ★ 등록을 지우고 다시 한다. 통마다 담긴 칸이 달라지기 때문이다.
+ *   안 지우고 또 등록하면 옛 등록이 남아서 없는 칸에 나누개를 놓으려 든다.
+ */
+function applyShape() {
+  const C = $("center"), MR = $("mediaRow"), V = $("videoPane"), D = $("dataPane");
+  const after = () => { tmap?.resize(); redraw(); };
+
+  panes.forget(C);
+  panes.forget(MR);
+  fittedW = 0;      // 배치가 바뀌면 맞춰 준 폭도 뜻이 없어진다
+
+  if (shape === "videoLeft") {
+    C.insertBefore(V, MR);
+    MR.appendChild(D);
+    C.style.flexDirection = "row";
+    MR.style.flexDirection = "column";
+    panes.register(C, "row", [
+      { el: V,  kind: "fixed", base: 340, min: 160 },
+      { el: MR, kind: "flex",  min: 260 },
+    ], after);
+    // ★ 등록한 뒤에 폭을 다시 박는다.
+    //   panes 는 칸마다 지난 크기를 이름으로 기억하는데, 보통 배치에서 영상은
+    //   "몫 1.0" 으로 저장돼 있다. 여기서는 그 1.0 을 1px 로 읽어서 영상 칸이
+    //   최소 크기(160)로 쪼그라들었다 (실측).
+    V.style.flex = `0 0 ${fittedW || 340}px`;
+    panes.register(MR, "col", [
+      { el: $("mapPane"),  kind: "flex", min: 140 },
+      { el: $("dataPane"), kind: "flex", min: 160 },
+    ], after);
+  } else {
+    MR.insertBefore(V, $("mapPane"));
+    C.appendChild(D);
+    C.style.flexDirection = centerDir === "row" ? "row" : "column";
+    MR.style.flexDirection = "row";
+    panes.register(C, centerDir, [
+      { el: MR, kind: "flex", min: 140 },
+      { el: D,  kind: "flex", min: 160 },
+    ], after);
+    panes.register(MR, "row", [
+      { el: V,             kind: "flex", min: 180 },
+      { el: $("mapPane"),  kind: "flex", min: 180 },
+    ], after);
+  }
+
+  C.classList.toggle("row", shape === "videoLeft" || centerDir === "row");
+  localStorage.setItem(SHAPE_KEY, shape);
+  localStorage.setItem(SHAPE_KEY + ".byHand", shapeByHand ? "1" : "0");
+  applyLayout();
+  requestAnimationFrame(() => { fitVideoPane(); tmap?.resize(); redraw(); });
+}
+
+/**
+ * 영상 칸 너비를 영상 비율에 딱 맞춘다. 검은 띠가 사라진다.
+ *
+ * 사람이 나누개를 끌어 폭을 바꿨으면 안 건드린다. 자동이 사람을 이기면 안 된다.
+ */
+function fitVideoPane() {
+  if (shape !== "videoLeft") return;
+  const v = video();
+  if (!v.videoWidth || !v.videoHeight) return;
+  const wrap = v.parentElement as HTMLElement;
+  const h = wrap.getBoundingClientRect().height;
+  if (h < 60) return;
+  const cur = $("videoPane").getBoundingClientRect().width;
+  if (fittedW && Math.abs(cur - fittedW) > 4) return;   // 사람이 끌었다
+  const want = Math.round(h * (v.videoWidth / v.videoHeight));
+  $("videoPane").style.flex = `0 0 ${want}px`;
+  fittedW = want;
+}
+
+// [시험용] 브라우저 탭이 숨어 있으면 영상이 아예 안 열려서 (크롬이 숨은
+// 탭의 디코딩을 미룬다) 배치 바꾸기를 눌러 볼 수가 없다. 여기서 직접 부른다.
+if (import.meta.env.DEV) {
+  (window as unknown as Record<string, unknown>).__shape =
+    (s: Shape) => { shape = s; shapeByHand = false; applyShape(); };
+}
+
+/** 세로 영상이면 배치를 바꾼다. 사람이 정해 뒀으면 그대로 둔다. */
+function shapeForVideo() {
+  const v = video();
+  if (!v.videoWidth || !v.videoHeight) return;
+  if (shapeByHand) return;
+  const want: Shape = v.videoHeight > v.videoWidth ? "videoLeft" : "normal";
+  if (want === shape) { fitVideoPane(); return; }
+  shape = want;
+  applyShape();
+  setStatus(want === "videoLeft"
+    ? "세로 영상입니다. 영상을 왼쪽 전체로 놓았습니다."
+    : "가로 영상입니다. 배치를 되돌렸습니다.");
+}
+
 const DIR_KEY = "centerDir.v2";
 let centerDir: panes.Dir =
   (localStorage.getItem(DIR_KEY) as panes.Dir) === "row" ? "row" : "col";
 
 function applyDir() {
+  // 영상을 왼쪽 전체로 놓은 동안에는 방향을 여기서 안 건드린다.
+  // applyShape 이 이미 가로로 세워 뒀는데 여기서 되돌리면 배치가 깨진다.
+  if (shape === "videoLeft") {
+    document.querySelectorAll<HTMLElement>("#dirSeg button").forEach((b) => {
+      b.classList.toggle("on", b.dataset.dir === centerDir);
+    });
+    return;
+  }
   $("center").classList.toggle("row", centerDir === "row");
   panes.setDir($("center"), centerDir);
   document.querySelectorAll<HTMLElement>("#dirSeg button").forEach((b) => {
@@ -2125,15 +2263,12 @@ function mountSplitters() {
     { el: $("dock"),   kind: "fixed", base: 340, min: 240 },
   ], after);
 
-  panes.register($("center"), centerDir, [
-    { el: $("mediaRow"), kind: "flex", min: 140 },
-    { el: $("dataPane"), kind: "flex", min: 160 },
-  ], after);
+  // 가운데와 그 안쪽은 배치에 따라 달라진다. applyShape 가 맡는다.
+  applyShape();
 
-  panes.register($("mediaRow"), "row", [
-    { el: $("videoPane"), kind: "flex", min: 180 },
-    { el: $("mapPane"),   kind: "flex", min: 180 },
-  ], after);
+  // 창 크기가 바뀌면 영상 칸 너비를 다시 맞춘다. 높이가 달라지면 비율도
+  // 달라지기 때문이다. 사람이 끌어 둔 폭은 fitVideoPane 이 알아서 지킨다.
+  window.addEventListener("resize", () => fitVideoPane());
 }
 
 function loadLayout() {
@@ -2312,6 +2447,28 @@ function followCursor() {
   clampView();
 }
 
+/**
+ * 지금 돌고 있나.
+ *
+ * ★ 깃발 하나만 보면 안 된다. "돌고 있다" 가 두 군데에 따로 있기 때문이다.
+ *
+ *   playing        시간 막대의 시계가 도나
+ *   !video.paused  영상이 도나
+ *
+ * 싱크 전에는 이 둘이 따로 노는 게 맞다. 영상만 돌려 보고 데이터는 세워 둘
+ * 수 있어야 한다. 그런데 **싱크한 뒤에는 하나여야 한다.**
+ *
+ * 어긋나는 자리가 있었다. 영상만 돌리는 중에 [싱크] 를 누르면 영상은 도는데
+ * playing 은 꺼진 채였다. 그 상태에서 멈추려고 누르면 코드가 깃발만 보고
+ * "아직 안 돈다" 로 읽어 오히려 다시 틀었다. 그래서 두 번 눌러야 멈췄다
+ * [확인: 2026-08-27 화면에서 눌러 가며 재현].
+ *
+ * 그래서 싱크된 동안에는 둘 중 하나라도 돌면 도는 것으로 본다.
+ */
+function running(): boolean {
+  return linked ? (playing || (videoOn && !video().paused)) : playing;
+}
+
 function playAll() {
   if (pinMs === null) pinMs = fullSpan.from;
   // 끝에 서 있으면 처음부터 다시 튼다. 안 그러면 눌러도 아무 일이 없다.
@@ -2374,7 +2531,7 @@ function clockTick(now: number) {
 /** 시간 막대를 지금 상태에 맞춘다.
  *  여기가 다루는 것은 언제나 세션 시간이다. 영상 시간이 아니다. */
 function renderTransport() {
-  ($("play") as HTMLButtonElement).textContent = playing ? "⏸" : "▶";
+  ($("play") as HTMLButtonElement).textContent = running() ? "⏸" : "▶";
   const sl = $("tslider") as HTMLInputElement;
   const at = pinMs ?? cursorMs ?? fullSpan.from;
   const span = Math.max(1, fullSpan.to - fullSpan.from);
@@ -2399,6 +2556,11 @@ function renderVbar() {
   for (const id of ["n10", "n1", "p1", "p10"]) {
     ($(id) as HTMLButtonElement).disabled = !videoOn;
   }
+
+  const vp = $("vplay") as HTMLButtonElement;
+  vp.disabled = !videoOn;
+  vp.textContent = (videoOn && !v.paused) ? "⏸" : "▶";
+  vp.title = linked ? "재생 (싱크됐으니 데이터도 같이)" : "영상만 재생";
 
   const sl = $("vslider") as HTMLInputElement;
   sl.disabled = !videoOn || dur <= 0;
@@ -2463,6 +2625,9 @@ function toggleSync() {
   const at = pinMs ?? cursorMs ?? view.from;
   sync = { ...sync, offsetMs: at - video().currentTime * 1000, guessed: false };
   linked = true;
+  // 영상이 돌고 있는 채로 물렸으면 시계도 돈다고 적어 둔다.
+  // 여기서 안 맞추면 그 뒤로 계속 어긋난 채 남는다.
+  if (!video().paused) playing = true;
   timeOrigin = "video";      // 이제 두 숫자가 같아진다
   setStatus("싱크 맞췄습니다. 같이 움직입니다.", "good");
   renderVbar();
@@ -2513,6 +2678,9 @@ function wire() {
   document.querySelectorAll<HTMLElement>("#dirSeg button").forEach((b) => {
     b.onclick = () => {
       centerDir = b.dataset.dir as panes.Dir;
+      // 사람이 배치를 정했다. 이제부터 영상을 열어도 안 건드린다.
+      shapeByHand = true;
+      if (shape !== "normal") { shape = "normal"; applyShape(); }
       applyDir();
       setStatus(centerDir === "row"
         ? "가운데 칸을 좌우로 놓았습니다."
@@ -2529,7 +2697,7 @@ function wire() {
 
   // ── 영상 조작 ──────────────────────────────────────────────────────
   const v = video();
-  $("play").onclick = () => (playing ? pauseAll() : playAll());
+  $("play").onclick = () => (running() ? pauseAll() : playAll());
 
   // 시간 막대의 훑는 칸. 세션 전체를 훑는다 (영상 길이가 아니다).
   const ts = $("tslider") as HTMLInputElement;
@@ -2545,6 +2713,29 @@ function wire() {
   };
   ts.addEventListener("input", tsSeek);
   ts.addEventListener("change", () => { tsSeek(); sliderHeld = false; });
+
+  /*
+   * 영상만 돌려 보는 단추.
+   *
+   * 아래 시간 막대의 재생과 하는 일이 다르다.
+   *
+   *   싱크 전   영상만 움직인다. 데이터는 가만히 있는다.
+   *             영상에서 "이 순간" 을 찾아 두고 [싱크] 를 누르라는 뜻이다.
+   *   싱크 후   영상이 시계다. 둘이 같이 움직이므로 시간 막대와 같은 일을
+   *             한다. 그때는 아래 단추 모양도 같이 바뀐다.
+   */
+  $("vplay").onclick = () => {
+    if (!videoOn) { setStatus("영상을 먼저 여세요.", "bad"); return; }
+    if (linked) { running() ? pauseAll() : playAll(); return; }
+    if (v.paused) {
+      // 끝에 서 있으면 처음부터 다시 튼다. 시간 막대와 같은 규칙이다.
+      if (v.duration && v.currentTime >= v.duration - 0.05) v.currentTime = 0;
+      void v.play();
+      setStatus("영상만 돌립니다. 같은 순간을 찾으면 [싱크] 를 누르세요.");
+    } else {
+      v.pause();
+    }
+  };
 
   // 영상 슬라이더. 타임라인 없이 영상만 훑을 때 쓴다.
   const sl = $("vslider") as HTMLInputElement;
@@ -2636,7 +2827,7 @@ function wire() {
     const why = ["", "사람이 멈춤", "네트워크", "영상 형식을 못 품", "이 형식은 못 봄"][err.code] ?? "알 수 없음";
     setStatus(`영상을 못 봅니다 — ${why} (${err.code})  ‹${v.currentSrc.slice(0, 90)}›`, "bad");
   });
-  v.addEventListener("loadedmetadata", renderVbar);
+  v.addEventListener("loadedmetadata", () => { renderVbar(); shapeForVideo(); });
 
   // 끌어다 놓기
   const drop = $("vdrop");

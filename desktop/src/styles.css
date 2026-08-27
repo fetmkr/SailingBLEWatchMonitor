@@ -152,7 +152,7 @@
      --tap 은 손가락(또는 화살표)이 닿아야 하는 넓이,
      --ctl 은 단추와 입력칸이 실제로 그려지는 높이다.
      둘을 한 값으로 묶으면 아이패드에서 단추가 44px 로 길쭉해진다. */
-  --tap: 28px;
+  --tap: 34px;
   --ctl: 26px;    /* 맥은 22~28 이면 된다. 마우스는 정확하다 */
 
   --r:    8px;
@@ -224,21 +224,29 @@ button {
   min-height: var(--ctl);
   position: relative;
 }
-/* 손가락이 닿는 자리를 보이는 단추 밖으로 넓힌다.
+/* 닿는 자리를 보이는 단추 밖으로 넓힌다.
    애플이 말하는 44pt 는 닿는 자리 기준이다 (Human Interface Guidelines).
-   보이는 단추까지 44 로 만들면 위아래가 남아 길쭉해 보인다. */
-@media (pointer: coarse) {
-  button::after {
-    content: ""; position: absolute;
-    left: 50%; top: 50%; transform: translate(-50%, -50%);
-    width: max(100%, var(--tap)); height: var(--tap);
-  }
+   보이는 단추까지 44 로 만들면 위아래가 남아 길쭉해 보인다.
+
+   ★ 손가락뿐 아니라 마우스에도 적용한다. 예전에는 손가락일 때만 넓혔는데,
+     맥에서 영상 재생 단추(29x26)가 잘 안 눌린다는 말을 들었다. 보이는
+     크기는 그대로 두고 닿는 자리만 넓히면 생김새를 안 건드리고 해결된다. */
+button::after {
+  content: ""; position: absolute;
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: max(100%, var(--tap)); height: var(--tap);
 }
 button:hover { background: var(--btn-hover); }
 input, select {
   background: var(--input); color: var(--ink); border: 1px solid var(--line);
   border-radius: var(--r-sm); padding: 0 var(--sp2); font: inherit; width: 160px;
-  min-height: var(--ctl);
+  /* ★ 여기는 --ctl 이 아니라 --tap 이다.
+       단추는 보이는 크기를 줄이고 ::after 로 닿는 자리를 넓힐 수 있다.
+       그런데 input 과 select 에는 ::after 가 안 붙는다. 브라우저가 제
+       모양으로 그리는 것이라서다. 그래서 보이는 크기가 곧 닿는 자리다.
+       오늘 이걸 --ctl 로 바꿨다가 맥 26 · 패드 34 로 작아졌다. 되돌린다.
+       글 넣는 칸은 원래 좀 커야 하고, 폭이 넓어서 길쭉해 보이지도 않는다. */
+  min-height: var(--tap);
   /* 글이 칸보다 길면 글자가 반쯤 잘린 채 끝난다. 말줄임표로 끝냈다는 것을
      알린다. 눌러서 고칠 때는 원래대로 다 보인다. */
   text-overflow: ellipsis;
@@ -252,7 +260,18 @@ input[type="checkbox"], input[type="radio"] {
 /* 네모 자체는 작아도 된다. 대신 글자까지 포함한 줄 전체가 눌리는 자리라
    그 줄을 44 로 잡는다. 애플이 말하는 44 는 눈에 보이는 크기가 아니라
    손가락이 닿는 넓이다. */
-.chk { min-height: var(--ctl); }
+.chk {
+  min-height: var(--ctl);
+  /* 네모는 13px 이라 그것만으로는 못 누른다. 글자까지 포함한 줄 전체가
+     누르는 자리이고, 거기에 닿는 자리를 한 겹 더 씌운다. */
+  position: relative;
+}
+.chk::after {
+  /* 옆으로도 조금 넓힌다. "해도" 처럼 글자가 짧으면 줄 자체가 38px 밖에
+     안 돼서 겨냥하기 힘들다. */
+  content: ""; position: absolute; left: -6px; right: -6px;
+  top: 50%; height: var(--tap); transform: translateY(-50%);
+}
 .dim { color: var(--dim); }
 .bad { color: #ff6b6b; }
 .good { color: #5ad19a; }
@@ -357,13 +376,27 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 
 #vbar {
   display: flex; align-items: center; gap: var(--sp2); padding: var(--sp2) var(--sp3);
-  border-top: 1px solid var(--line); background: var(--panel); flex-wrap: wrap;
+  border-top: 1px solid var(--line); background: var(--panel);
+  /* ★ 줄바꿈을 안 한다. 셋뿐이라 한 줄에 들어가고, 넘치면 슬라이더가 줄면 된다.
+       예전에는 wrap 이었는데 그건 단추가 여럿이던 시절 이야기다. */
+  flex-wrap: nowrap;
 }
 #vbar button { padding: 0 var(--sp2); }
+/* 재생 단추 둘 (영상 칸의 것과 시간 막대의 것).
+   가장 자주 누르는 것이라 조금 더 크게 두고, 닿는 자리는 한 겹 더 넓힌다. */
+#vplay, #play {
+  flex: none; padding: 0;
+  width: calc(var(--ctl) + 10px); height: calc(var(--ctl) + 6px);
+  font-size: var(--fs-sm);
+}
+#vplay::after, #play::after {
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: calc(var(--tap) + 14px); height: calc(var(--tap) + 12px);
+}
 /* 앞뒤로 건너뛰는 단추 넷. 흩어지지 않게 한 덩어리로 묶는다. */
 #vbar .grp { display: flex; gap: var(--sp1); flex: none; }
 /* 안내 글은 언제나 제 줄에서 시작한다. 단추 사이에 끼어들면 지저분하다. */
-#vbar #voff { flex: 1 0 100%; }
+#vtime { flex: none; white-space: nowrap; }
 .mono { font: var(--fs-sm) ui-monospace, SFMono-Regular, Menlo, monospace; }
 .ghost { background: transparent; border-color: transparent; color: var(--dim); }
 .ghost:hover { background: var(--hover); }
@@ -413,7 +446,10 @@ canvas {
 .hasHandles { position: relative; }
 .handles {
   position: absolute; top: 4px; right: 6px; z-index: 5;
-  display: flex; gap: 2px; opacity: 0.35; transition: opacity .12s;
+  /* 사이를 12px 로 벌린다. 그래야 아래 ::after 를 옆으로 10px 넓혀도
+     서로 2px 여유가 남는다. 2px 이던 시절에는 넓히면 서로 겹쳐서
+     키우기를 누른 손이 접기에 잡혔다. */
+  display: flex; gap: 12px; opacity: 0.35; transition: opacity .12s;
 }
 .hasHandles:hover .handles { opacity: 1; }
 .handles button {
@@ -423,10 +459,14 @@ canvas {
   backdrop-filter: blur(3px);
 }
 .handles button:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
-/* 이 셋은 서로 2px 옆에 붙어 있다. 닿는 자리를 밖으로 넓히면 서로 겹쳐서
-   키우기를 누른 손가락이 접기에 잡힌다. 그래서 여기서는 넓히지 않고
-   단추 자체를 44 로 키운다. 정사각형이라 길쭉해 보이지 않는다. */
-.handles button::after { display: none; }
+/* 이 셋은 서로 2px 옆에 붙어 있다. **옆으로는** 못 넓힌다 — 넓히면 서로
+   겹쳐서 키우기를 누른 손가락이 접기에 잡힌다.
+   대신 **위아래로만** 넓힌다. 위아래에는 이웃이 없으니 겹칠 일이 없다.
+   맥에서 26x26 이라 마우스로도 작았다. */
+.handles button::after {
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: calc(100% + 10px); height: var(--tap);
+}
 @media (pointer: coarse) {
   .handles button { width: var(--tap); height: var(--tap); }
 }
@@ -585,9 +625,10 @@ canvas {
 .rbtn.on { background: var(--on-bg); color: var(--on-ink); }
 
 /* ── 영상 스크러빙 슬라이더 ─────────────────────────────────────── */
-#vseek { padding: 6px 10px 0; background: var(--panel); }
 #vslider {
-  width: 100%; margin: 0; padding: 0; height: 18px;
+  /* 한 줄 안에서 남는 자리를 다 갖는다. 재생 단추와 시각은 제 크기만 쓴다. */
+  flex: 1 1 auto; min-width: 60px;
+  margin: 0; padding: 0; height: 18px;
   background: transparent; border: none; -webkit-appearance: none; appearance: none;
   cursor: pointer;
 }
@@ -732,6 +773,14 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 
 /* 밝게 놓았을 때 손봐야 하는 몇 군데 */
 :root[data-theme="paper"] #videoPane .handles button { background: #ffffffdd; }
+
+/* 지도 확대·축소 단추는 maplibre 가 만든 것이라 29x29 로 작다.
+   위아래로 딱 붙어 있어서 덧자리를 넓히면 서로 겹친다. 그러니 단추 자체를
+   키운다. 안쪽 그림은 가운데 맞춰져 있어서 커져도 제대로 보인다. */
+.maplibregl-ctrl button {
+  width: var(--tap) !important;
+  height: var(--tap) !important;
+}
 
 /* 지도는 늘 제 색으로 둔다.
    어두운 판에서 하얗게 튄다고 눌러 봤는데, 바다와 뭍의 색이 흐려져서
