@@ -200,6 +200,14 @@ static void feedWatchdog();
 //
 // 지금 어느 핀을 전원 스위치로 쓰고 있는지. 0 이면 끈 상태.
 // 문서끼리 값이 어긋나므로(board_rak.h 참고) 실기기에서 판정하고 NVS 에 남긴다.
+// ── 움직임 종류 번갈아 재기 (`ab` 명령) ─────────────────────────────────
+//
+// 두 모드를 따로 나가서 재면 바람도 위성도 달라서 견줄 수가 없다.
+// 같은 자리에서 몇 초씩 번갈아 걸면 조건이 거의 같아진다.
+// 0 이면 꺼져 있다.
+static uint16_t gAbSec  = 0;
+static uint32_t gAbNext = 0;
+
 static int gSensorPowerPin = rak::kSensorPowerA;
 
 // ── 이름 관리 ────────────────────────────────────────────────────────────
@@ -272,6 +280,7 @@ static void loadSettings() {
     gHdgSignA       = gPrefs.getChar("hdg_sa", 1) < 0 ? -1.0f : 1.0f;
     gHdgSignB       = gPrefs.getChar("hdg_sb", 1) < 0 ? -1.0f : 1.0f;
     gHdgOffsetDeg   = gPrefs.getFloat("hdg_off", 0.0f);
+    gAbSec          = gPrefs.getUShort("ab_sec", 0);
     gDampLevel      = gPrefs.getUChar("damp", 2);
     gDeadbandKn     = gPrefs.getFloat("dead_kn", 0.10f);
     gGyrOffX        = gPrefs.getFloat("gyr_x", 0.0f);
@@ -522,6 +531,7 @@ static uint8_t gGpsHz = 10; // 실제로 건 갱신율 (진단 출력용)
 // 255 면 아직 안 물어봤다는 뜻이다. 기록 헤더에 이 값이 들어간다 —
 // 나중에 "왜 이 세션만 저속이 뭉개졌지" 를 따질 때 이게 없으면 못 찾는다.
 static uint8_t gGpsDyModel = 255;
+
 
 // CASIC 바이너리 쪽은 아래에 정의돼 있다. gpsBegin() 이 먼저 나와서 앞선언한다.
 static void casicSend(uint8_t cls, uint8_t id, const uint8_t* payload, uint16_t len);
@@ -1193,21 +1203,29 @@ static void gpsCfgDump() {
         uint32_t mask;     memcpy(&mask,     buf + 0,  4);
         const uint8_t nav = buf[13];
 
-        // ── 어느 모드를 쓸지는 아직 안 정해졌다 ──────────────────────
+        // ── 지금은 4(선박)를 쓴다. 여기까지 오는 데 뒤집힌 이야기가 많다 ──
         //
-        // 4(선박)는 확실히 아니다. 그걸로 두면 느린 움직임을 정지로 보고
-        // 0 으로 뭉갠다 [확인: 2026-08-22, 걸으면 0 · 뛰면 8.76 kn].
+        // 8/22  선박(4)에서 걸으면 0, 뛰면 8.76 kn. "선박이 원인" 으로 보고
+        //       0(휴대)로 바꾸고 「해결」이라고 적었다. **그런데 고친 뒤
+        //       걸어서 다시 재보지 않았다.**
+        // 8/27  0(휴대)인 채로 밖에서 걸었더니 여전히 0. HDOP 1.7 로 신호는
+        //       좋았다. 2(보행)로 바꾸니 561줄 전부 값이 나왔다.
+        // 8/28  20초마다 선박↔보행을 번갈아 걸며 걸어 봤다.
+        //       **둘 다 잘 나왔다.** 모드가 원인이 아니었다.
         //
-        // ★ 0(휴대)으로 바꾸면 고쳐진다고 적어 뒀는데 **그건 확인 안 된
-        //   말이었다.** 설정이 바뀐 것만 되물어보고 증상은 다시 안 재봤다.
-        //   2026-08-27 에 0(휴대)인 채로 밖에서 걸었더니 HDOP 1.7 로 신호가
-        //   좋은데도 속도가 계속 0 이었다. 손으로 휘둘러야 값이 나왔다.
+        // 그 사이 펌웨어를 예닐곱 번 다시 구우며 모듈 전원이 여러 번 오르
+        // 내렸다. 무엇이 되살렸는지는 **아직 모른다.**
         //
-        // 그래서 2(보행)로 바꿔 두고 다시 잰다. 어느 쪽이 맞는지는 걸어서
-        // 재본 값으로만 정한다. 설정 확인은 증상 확인이 아니다.
+        // 4(선박)를 고른 이유는 물 위에서 속도를 재는 사람들이 그걸 쓰기
+        // 때문이다. 윈드서핑용 ESP-GPS-Logger 는 평소 Sea(5, u-blox 번호)로
+        // 두고 25 m/s 를 넘을 때만 Portable 로 바꾼다
+        // [확인: github.com/RP6conrad/ESP-GPS-Logger 의 GPS_data.cpp].
+        //
+        // ★ 어느 모드가 옳은지 단정하지 않는다. 화면에 경고를 띄우지도
+        //   않는다. 전에 "선박은 저속을 뭉갠다. 바꿀 것" 이라고 띄워 뒀는데
+        //   그 판정 자체가 뒤집혔다. `ab` 명령으로 언제든 다시 재면 된다.
         gGpsDyModel = buf[4];   // 실제로 걸려 있는 값을 기억해 둔다
-        Serial.printf("  움직임 종류   %u  %s%s\n", buf[4], dyModelName(buf[4]),
-                      buf[4] == 4 ? "   ★ 선박은 저속을 뭉갠다. 바꿀 것" : "");
+        Serial.printf("  움직임 종류   %u  %s\n", buf[4], dyModelName(buf[4]));
         Serial.printf("  정지 문턱값   %.2f m/s (= %.2f kn)%s\n",
                       staticTh, staticTh * 1.943844f,
                       staticTh > 0.0f ? "   ★ 이 아래 속도는 0 으로 뭉갠다" : "   — 꺼져 있다");
@@ -1297,6 +1315,31 @@ static void gpsNavPv(int samples) {
 //   B13 staticHoldTh   정지로 볼 속도
 //
 // ★ ACK 가 왔다고 믿지 않는다. 반드시 되읽어서 값이 바뀌었는지 확인한다.
+/**
+ * 조용히 움직임 종류만 바꾼다. 번갈아 재기(`ab`)가 10초마다 부른다.
+ *
+ * 시끄러운 판(gpsCfgSetNavx)을 그대로 쓰면 화면이 열 줄씩 덮여서 정작 봐야 할
+ * 속도가 안 보인다. 바꾼 결과는 심장박동 줄의 b/p 한 글자로 알린다.
+ *
+ * NVS 에도 안 적는다. 시험이 끝나면 마지막에 걸린 값이 남을 뿐, 그걸 다음
+ * 부팅까지 끌고 갈 이유가 없다.
+ */
+static bool gpsSetModelQuiet(uint8_t model) {
+    uint8_t  p[44];
+    uint16_t len = 0;
+    if (!casicQuery(0x06, 0x07, p, sizeof(p), &len) || len < 44) return false;
+    const uint32_t mask = (1UL << 0);
+    memcpy(p + 0, &mask, 4);
+    p[4] = model;
+    casicSend(0x06, 0x07, p, 44);
+    delay(120);
+    if (casicQuery(0x06, 0x07, p, sizeof(p), &len) && len >= 44) {
+        gGpsDyModel = p[4];
+        return p[4] == model;
+    }
+    return false;
+}
+
 static void gpsCfgSetNavx(bool setModel, uint8_t model,
                           bool setStatic, float staticTh) {
     uint8_t  p[44];
@@ -2776,6 +2819,7 @@ static void printHelp() {
     Serial.println("  dead <kn>     잡음 바닥. 이보다 작은 속도는 0 (기본 0.10)");
     Serial.println("  navpv         NMEA 거치기 전 속도를 RMC 와 나란히 (navpv l 은 길게)");
     Serial.println("  gpscfg mode <0~7>  움직임 종류 (0휴대 1정지 2보행 3자동차 4선박)");
+    Serial.println("  ab [초]       선박↔보행을 번갈아 걸며 견준다 (기본 10초, ab off)");
     Serial.println("  gpscfg static <m/s> 정지로 볼 속도 문턱값");
     Serial.println("  nmea <본문>   NMEA 명령을 보내고 응답을 봅니다 (체크섬 자동)");
     Serial.println("  batt          배터리 전압 실측");
@@ -3327,6 +3371,35 @@ static void handleCommand(String line) {
     if (line == "navpv")   { gpsNavPv(8);  return; }
     if (line == "navpv l") { gpsNavPv(40); return; }
 
+    // ab [초]  움직임 종류를 번갈아 걸며 속도를 나란히 본다
+    //
+    // 왜 번갈아 하냐면 — 두 모드를 따로 나가서 재면 바람도 위성도 다르다.
+    // 같은 물, 같은 바람에서 10초씩 번갈아 걸면 조건이 거의 같다.
+    // 화면 SOG 옆에 지금 어느 모드인지 한 글자로 찍는다.
+    //
+    //   b  선박(4)   Nautical
+    //   p  보행(2)   Walking
+    if (line == "ab" || line.startsWith("ab ")) {
+        String arg = line.substring(2); arg.trim();
+        if (arg == "off") {
+            gAbSec = 0;
+            gPrefs.begin("sail", false); gPrefs.putUShort("ab_sec", 0); gPrefs.end();
+            Serial.println("[AB] 번갈아 재기 껐습니다. 지금 모드로 그대로 둡니다.");
+            return;
+        }
+        int sec = arg.length() ? arg.toInt() : 10;
+        if (sec < 3)  sec = 3;      // 모드를 걸고 잡히는 데 시간이 든다
+        if (sec > 120) sec = 120;
+        gAbSec  = (uint16_t)sec;
+        gAbNext = millis();          // 다음 loop 에서 바로 첫 전환
+        // 밖에서 USB 를 뺐다 꽂으면 보드가 다시 켜진다. 그때 시험이 꺼지면
+        // 사람은 이유를 모른 채 글자가 사라진 것만 본다. 적어 둔다.
+        gPrefs.begin("sail", false); gPrefs.putUShort("ab_sec", gAbSec); gPrefs.end();
+        Serial.printf("[AB] %d초마다 선박(4) ↔ 보행(2) 를 번갈아 겁니다.\n", sec);
+        Serial.println("     화면 SOG 옆의 b/p 가 지금 걸린 모드입니다. 끄려면 ab off");
+        return;
+    }
+
     // gpscfg mode <0~7>   움직임 종류를 바꾼다 (4=선박, 2=보행, 0=휴대)
     if (line.startsWith("gpscfg mode ")) {
         const int m = line.substring(12).toInt();
@@ -3665,6 +3738,21 @@ void loop() {
         hlog::healthCheck();
     }
 
+    // 1d-2) 움직임 종류 번갈아 걸기 (`ab` 명령이 켜 뒀을 때만)
+    //
+    // ★ 기록 중에는 안 바꾼다. 한 파일 안에 두 모드가 섞이면 나중에 그 파일을
+    //   읽을 때 어느 줄이 어느 모드였는지 알 수가 없다. 머리글에는 한 값만
+    //   들어간다. 번갈아 재기는 **화면으로 보는 시험**이다.
+    if (gAbSec && !hlog::recording() && (int32_t)(now - gAbNext) >= 0) {
+        gAbNext = now + (uint32_t)gAbSec * 1000UL;
+        const uint8_t want = (gGpsDyModel == 4) ? 2 : 4;
+        if (!gpsSetModelQuiet(want)) {
+            Serial.printf("[AB] %u 로 못 바꿨습니다. 번갈아 재기를 멈춥니다.\n", want);
+            gAbSec = 0;
+            gPrefs.begin("sail", false); gPrefs.putUShort("ab_sec", 0); gPrefs.end();
+        }
+    }
+
     // 1e) 저장 버튼. 사람 손가락이라 자주 볼 필요 없다.
     buttonPoll(now);
 
@@ -3758,6 +3846,10 @@ void loop() {
         ds.recSeconds   = ds.recording ? (now - hlog::recStartedMs()) / 1000 : 0;
 
         ds.sogKn      = gLatest.sogKn; // 다듬고 잡음 바닥까지 적용된 값
+        ds.gnssMode   =
+            gGpsDyModel == 0 ? 'h' : gGpsDyModel == 1 ? 's' :
+            gGpsDyModel == 2 ? 'p' : gGpsDyModel == 3 ? 'c' :
+            gGpsDyModel == 4 ? 'b' : '?';
         ds.cogDeg     = gLatest.cogDeg;
         ds.headingDeg = headingDeg();
         ds.heelDeg    = gLatest.heelDeg;
@@ -3793,9 +3885,22 @@ void loop() {
         if (gLatest.heelValid) snprintf(heelTxt, sizeof(heelTxt), "%+6.1f", gLatest.heelDeg);
         else                   snprintf(heelTxt, sizeof(heelTxt), "%6s", "---");
 
+        // 움직임 종류를 한 글자로. **늘 찍는다.**
+        //
+        // 번갈아 재기가 켜졌을 때만 찍었더니 두 가지가 나빴다. 보드를 다시
+        // 켜면 번갈아 재기가 꺼져서 글자가 사라졌고, 켜고 끌 때마다 뒤 칸이
+        // 두 글자씩 밀려 줄이 안 맞았다. 자리를 고정하고 늘 있게 한다.
+        //
+        //   h 휴대 · s 정지 · p 보행 · c 자동차 · b 선박 · ? 모름
+        const char modeCh =
+            gGpsDyModel == 0 ? 'h' : gGpsDyModel == 1 ? 's' :
+            gGpsDyModel == 2 ? 'p' : gGpsDyModel == 3 ? 'c' :
+            gGpsDyModel == 4 ? 'b' : '?';
+
         Serial.printf(
-            "[%7.1fs] %s | SOG %s kn | COG %s° | HEEL %s° | BATT %3d%% %.2fV | seq %3u | %s%s\n",
-            now / 1000.0f, gFullName, sogTxt, cogTxt, heelTxt,
+            "[%7.1fs] %s | SOG %c %s kn | COG %s° | HEEL %s° | BATT %3d%% %.2fV | seq %3u | %s%s\n",
+            now / 1000.0f, gFullName, modeCh, sogTxt,
+            cogTxt, heelTxt,
             (int)sail::encodeBatt(gLatest.battPct), gBattVolts, gSeq,
             gConnected ? "CONNECTED" : "ADVERTISING",
             gConnected ? (gSubscribed ? " (notify ON)" : " (notify OFF)") : "");

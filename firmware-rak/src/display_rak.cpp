@@ -185,7 +185,29 @@ void displayUpdate(const DisplayState& s) {
     } else {
         // 큰 폰트는 숫자 전용(tn)이라 글자를 못 그린다. 작은 폰트로 바꾼다.
         gOled.setFont(u8g2_font_6x10_tf);
-        gOled.drawStr(2, kSogBaseline, "NO GPS FIX");
+        gOled.drawStr(2, kSogBaseline, "NO GPS");
+    }
+
+    // GPS 움직임 종류. 속도 바로 옆에 낱말로 쓴다.
+    //
+    // ★ 한 글자로 썼더니 눈에 안 띄었다. 밖에서 걸으며 흘깃 보는 것이라
+    //   낱말이어야 한다.
+    //
+    // ★ fix 가 없을 때도 그린다. 실내에서 설정을 바꿔 놓고 화면으로 확인할
+    //   수 있어야 한다. 값이 없으면 안 그리는 규칙은 **잰 값**에 대한 것이고,
+    //   이건 우리가 건 설정이라 언제나 확실하다.
+    //
+    // 자리 (6x10 폰트, 글자당 6px)
+    //   fix 있음   "6.38 kn" 이 x=76 에서 끝난다. x=80 부터 47px 비어 있다
+    //   fix 없음   "NO GPS" 가 x=38 에서 끝나고 SAT 딱지가 x=92 부터다.
+    //              그 사이 x=64 에 넣는다 (28px 자리에 boat 24px)
+    {
+        const char* mw =
+            s.gnssMode == 'h' ? "port" : s.gnssMode == 's' ? "stat" :
+            s.gnssMode == 'p' ? "ped"  : s.gnssMode == 'c' ? "car"  :
+            s.gnssMode == 'b' ? "boat" : "?";
+        gOled.setFont(u8g2_font_6x10_tf);
+        gOled.drawStr(s.sogValid ? 80 : 64, kSogBaseline, mw);
     }
 
     // 위성이 몇 개나 보이는지. 밖에서 처음 잡을 때 35초쯤 걸리는데,

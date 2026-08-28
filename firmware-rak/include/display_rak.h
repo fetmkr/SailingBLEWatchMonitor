@@ -34,6 +34,10 @@ struct DisplayState {
     float headingDeg = -1.0f; // 자력계 방위 — 뱃머리가 보는 방향. 음수면 없음
     float heelDeg  = 0.0f;
     float pitchDeg = 0.0f;
+    /// GPS 움직임 종류를 한 글자로. 속도 옆에 그린다.
+    /// h 휴대 · s 정지 · p 보행 · c 자동차 · b 선박 · ? 모름
+    /// 저속이 0 으로 뭉개지는 게 이 설정 탓인지 밖에서 봐야 해서 넣었다.
+    char gnssMode = '?';
 
     // ── 9축 원본 ─────────────────────────────────────────────────────────
     float accX = 0.0f, accY = 0.0f, accZ = 0.0f; // g
