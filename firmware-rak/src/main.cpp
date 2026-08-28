@@ -34,6 +34,7 @@
 
 #include "board_rak.h"
 #include "display_rak.h"
+#include "lora.h"
 #include "hlog.h"
 #include "netsrv.h"
 #include "protocol.h"
@@ -57,6 +58,21 @@ static float   gDeadbandKn = 0.10f;  // 이보다 작은 속도는 0 으로 내�
 static char        gUserName[sail::kMaxUserNameLen + 1] = {0}; // "hojun"
 static char        gFullName[sail::kMaxFullNameLen + 1] = {0}; // "SAIL-hojun"
 static uint8_t     gModuleID = 1;
+
+// ── 로라 배 번호 (PROTOCOL.md §10.11) ────────────────────────────────────
+//
+// gModuleID 와 **다른 값이다.** gModuleID 는 이름을 1바이트로 접은 해시라
+// 배가 30척이면 어딘가 겹칠 확률이 83 % 다. 말할 차례를 정하는 데는 못 쓴다.
+// gBoatId 는 사람이 준 번호이고, 이것만 로라 차례를 정한다.
+//
+//   0        번호 없음. 로라로 안 보낸다
+//   1 ~ 30   선수 배            차례 0 ~ 29
+//   31       코치보트 · 본부     차례 30
+//   32       예비               차례 31
+static uint8_t  gBoatId       = 0;
+static uint32_t gBoatIdSetAt  = 0; // 바꾼 시각. 30초 동안 flags 로 알린다
+static constexpr uint8_t  kBoatIdMax     = 32;
+static constexpr uint32_t kBoatIdShoutMs = 30000;
 
 // ── BLE 전역 상태 ────────────────────────────────────────────────────────
 static NimBLEServer*         gServer       = nullptr;
@@ -267,6 +283,7 @@ static void loadSettings() {
     String saved    = gPrefs.getString("name", "");
     gNotifyPeriodMs = gPrefs.getUInt("notify_ms", sail::kNotifyPeriodMs);
     gSensorPowerPin = (int)gPrefs.getInt("pwr_pin", rak::kSensorPowerA);
+    gBoatId         = gPrefs.getUChar("boat", 0);       // 0 = 번호 없음
     // 힐 기준각의 키가 heel_off → heel_off2 로 바뀌었다. 옛 키에 남아 있는
     // 값은 roll 기준이라 지금 계산법에서는 뜻이 다르다. 그냥 안 읽는다.
     gHeelAxis       = gPrefs.getUChar("heel_axis", 1);  // 기본 힐 Y
@@ -2792,6 +2809,13 @@ static void printHelp() {
     Serial.println("  name <이름>   보드 이름 설정 (최대 11자, 영숫자/-/_)");
     Serial.println("                예) name hojun  →  SAIL-hojun");
     Serial.println("  hz <1~100>    notify 주기 설정. 예) hz 20  (기본 10)");
+    Serial.println("  boat <0~32>   로라 배 번호. 0 은 번호 없음. 예) boat 7");
+    Serial.println("  lora          로라 상태 (주파수·전파시간·받은 개수)");
+    Serial.println("  lora on       로라 켜기");
+    Serial.println("  lora regs     칩 버그 세 개가 실제로 걸렸는지 레지스터로 확인");
+    Serial.println("  lora rssi     이 주파수의 바닥 잡음. 보드 한 대로 하는 확인");
+    Serial.println("  lora tx       시험 삼아 하나 보내기");
+    Serial.println("  lora watch    받을 때마다 한 줄씩 뱉기 (두 대로 시험할 때)");
     Serial.println("  info          현재 설정 출력");
     Serial.println("");
     Serial.println("  ── 보드 진단 ──");
@@ -3492,6 +3516,44 @@ static void handleCommand(String line) {
         return;
     }
 
+    if (line == "lora")      { lora::report();     return; }
+    if (line == "lora regs") { lora::reportRegs(); return; }
+    if (line == "lora tx")   { lora::txTest();     return; }
+    if (line == "lora rssi")  { lora::reportNoise();  return; }
+    if (line == "lora watch") { lora::watchToggle();  return; }
+    if (line == "lora on")   { lora::begin();      return; }
+
+    // 로라 배 번호. PROTOCOL.md §10.11
+    if (line == "boat" || line.startsWith("boat ")) {
+        if (line == "boat") {
+            if (gBoatId == 0) Serial.println("[BOAT] 번호 없음 — 로라로 안 보낸다");
+            else Serial.printf("[BOAT] %u번 (차례 %u)\n", gBoatId, gBoatId - 1);
+            return;
+        }
+        // ★ 달리는 중에는 안 바꾼다. 번호가 바뀌면 말할 차례가 옮겨 가는데,
+        //   물 위에서 옮기면 남의 차례에 떨어질 수 있다. 멈춰야 바뀐다.
+        if (hlog::recording()) {
+            Serial.println("[BOAT] 기록 중에는 못 바꿉니다. 먼저 stop 하세요");
+            return;
+        }
+        String arg = line.substring(5); arg.trim();
+        long n = arg.toInt();
+        if (arg.length() == 0 || (n == 0 && arg != "0") || n < 0 || n > kBoatIdMax) {
+            Serial.printf("[BOAT] 0~%u 로 입력하세요. 0 은 번호 없음. 예) boat 7\n",
+                          kBoatIdMax);
+            return;
+        }
+        gBoatId      = (uint8_t)n;
+        gBoatIdSetAt = millis();
+        gPrefs.begin("sail", false);
+        gPrefs.putUChar("boat", gBoatId);
+        gPrefs.end();
+        if (gBoatId == 0) Serial.println("[BOAT] 번호 없음 — 로라로 안 보낸다");
+        else Serial.printf("[BOAT] %u번 (차례 %u). 뱃머리 번호표와 같은지 보세요\n",
+                           gBoatId, gBoatId - 1);
+        return;
+    }
+
     if (line.startsWith("name ")) {
         String arg = line.substring(5);
         arg.trim();
@@ -3681,6 +3743,11 @@ void setup() {
         Serial.println("[OLED] 없음 — J12 헤더에 꽂으면 자동으로 잡힙니다");
     }
 
+    // 무전기는 부팅 때 올린다. 배에서 명령을 칠 수가 없다.
+    // **번호가 있든 없든 늘 받는다.** 보내는 것만 번호가 정한다 (PROTOCOL.md §10.11).
+    // 무전기가 없거나 실패해도 보드는 그대로 돌아간다.
+    lora::begin();
+
     Serial.println("[SRC] SOG/COG 는 GPS 가 위성을 잡으면 실측, 못 잡으면 시뮬레이터");
     Serial.println("      HEEL 은 IMU 가 붙어 있으면 언제나 실측");
 
@@ -3694,6 +3761,10 @@ void setup() {
 void loop() {
     const uint32_t loopT0 = micros();
     const uint32_t now = millis();
+
+    // 코어 0 의 받기 일꾼이 링버퍼에 넣어 둔 것을 꺼낸다. 여기서 안 꺼내 가면
+    // 64개가 차고 나서 버리기 시작한다 (`lora` 의 "버림" 이 0 이 아니게 된다).
+    lora::pump();
 
     static uint32_t lastNotify = 0;
     static uint32_t lastAdv    = 0;
@@ -3840,13 +3911,14 @@ void loop() {
         ds.userName     = gUserName;
         ds.bleConnected = gConnected;
         ds.bleNotifying = gSubscribed;
-        ds.battPct      = gLatest.battPct;
         ds.battVolts    = gBattVolts;
+        ds.boatId       = gBoatId;
         ds.recording    = hlog::recording();
         ds.recSeconds   = ds.recording ? (now - hlog::recStartedMs()) / 1000 : 0;
 
         ds.sogKn      = gLatest.sogKn; // 다듬고 잡음 바닥까지 적용된 값
-        ds.gnssMode   =
+        // 번갈아 재기가 켜져 있을 때만 화면에 띄운다. 0 이면 안 그린다.
+        ds.gnssMode   = gAbSec == 0 ? 0 :
             gGpsDyModel == 0 ? 'h' : gGpsDyModel == 1 ? 's' :
             gGpsDyModel == 2 ? 'p' : gGpsDyModel == 3 ? 'c' :
             gGpsDyModel == 4 ? 'b' : '?';
@@ -3855,9 +3927,6 @@ void loop() {
         ds.heelDeg    = gLatest.heelDeg;
         ds.pitchDeg   = currentPitchDeg();
 
-        ds.accX  = gAcc.x; ds.accY = gAcc.y; ds.accZ = gAcc.z;
-        ds.gyrX  = gGyr.x; ds.gyrY = gGyr.y; ds.gyrZ = gGyr.z;
-        ds.magX  = gMag.x; ds.magY = gMag.y; ds.magZ = gMag.z;
         ds.imuOk = gImuOk;
         ds.magOk = gMagOk;
 

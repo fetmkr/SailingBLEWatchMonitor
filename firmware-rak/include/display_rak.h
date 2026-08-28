@@ -17,10 +17,15 @@ struct DisplayState {
     const char* userName = "";    // "2FB5" — 접두사 뺀 이름
     bool  bleConnected   = false;
     bool  bleNotifying   = false;
-    float battPct        = 100.0f;
     /// 배터리 전압 (V). 0 이하면 아직 못 잰 것이라 안 그린다.
-    /// 퍼센트만 보면 3.8~3.9 V 구간에서 잔량이 뚝뚝 떨어지는 것처럼 보인다.
+    ///
+    /// **퍼센트는 안 그린다.** 리튬폴리머는 3.8~3.9 V 에서 방전 곡선이 거의
+    /// 평평해서, 전압이 0.05 V 떨어지면 퍼센트가 20 씩 내려앉는다. 퍼센트만
+    /// 보면 배터리가 갑자기 닳는 것처럼 보인다. 전압은 그런 거짓말을 안 한다.
+    /// 퍼센트는 BLE 로는 그대로 나간다 (PROTOCOL.md §3).
     float battVolts      = 0.0f;
+    /// 로라 배 번호 (PROTOCOL.md §10.11). 0 이면 번호 없음 — `B--` 로 그린다.
+    uint8_t boatId       = 0;
     /// 기록 중인가. 참이면 이름 자리에 REC 와 지난 시간을 보여준다.
     bool  recording      = false;
     uint32_t recSeconds  = 0;
@@ -34,15 +39,19 @@ struct DisplayState {
     float headingDeg = -1.0f; // 자력계 방위 — 뱃머리가 보는 방향. 음수면 없음
     float heelDeg  = 0.0f;
     float pitchDeg = 0.0f;
-    /// GPS 움직임 종류를 한 글자로. 속도 옆에 그린다.
+/// GPS 움직임 종류. 속도 옆에 낱말로 그린다.
+    ///
+    /// **0 이면 안 그린다.** 평소에는 어느 모드로 걸어 뒀는지 이미 알고
+    /// 있으니 화면에 자리를 뺏을 이유가 없다. 모드를 번갈아 걸며 견주는
+    /// 동안(`ab` 명령)만 띄운다.
+    ///
     /// h 휴대 · s 정지 · p 보행 · c 자동차 · b 선박 · ? 모름
-    /// 저속이 0 으로 뭉개지는 게 이 설정 탓인지 밖에서 봐야 해서 넣었다.
-    char gnssMode = '?';
+    char gnssMode = 0;
 
-    // ── 9축 원본 ─────────────────────────────────────────────────────────
-    float accX = 0.0f, accY = 0.0f, accZ = 0.0f; // g
-    float gyrX = 0.0f, gyrY = 0.0f, gyrZ = 0.0f; // °/s
-    float magX = 0.0f, magY = 0.0f, magZ = 0.0f; // µT
+    // ── 센서가 살아 있나 ─────────────────────────────────────────────────
+    // 9축 원본 세 축은 화면에서 뺐으므로 여기에도 안 둔다. 화면이 안 쓰는
+    // 값을 이 구조체에 남겨 두면 "화면에 나오는 값" 으로 오해하게 된다.
+    // 원본은 BLE 확장 페이로드(PROTOCOL.md §3.1)와 시리얼로 나간다.
     bool  imuOk = false;
     bool  magOk = false;
 

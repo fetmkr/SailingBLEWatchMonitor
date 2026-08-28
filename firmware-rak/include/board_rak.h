@@ -93,6 +93,35 @@ static constexpr int kIO4 = 42;
 static constexpr int kIO5 = 38;
 static constexpr int kIO6 = 39;
 
+// ── GPS 의 1초 신호 (PPS) ────────────────────────────────────────────────
+//
+// 로라 차례를 맞추는 시계가 이것이다 (PROTOCOL.md §10.3).
+//
+// 두 장의 표를 맞물리면 자리가 나온다.
+//   RAK12501 datasheet   1PPS 는 커넥터 12번과 13번 핀
+//   RAK19007 datasheet   슬롯 A 의 12번 = IO1,  13번 = NC
+//   pins_arduino.h       WB_IO1 = GPIO21
+//   → 슬롯 A 에 꽂으면 PPS 는 GPIO21 하나로만 온다
+//   (슬롯 D 에 꽂으면 12번이 IO5 라 GPIO38 이 된다)
+//
+// ★ RAK12501 datasheet 에는 "UART 관련 핀과 VDD·GND 만 연결된다" 는 문구도
+//   같이 있어서 글로만 보면 PPS 가 안 나온 것처럼 읽힌다. 그래서 실측했다.
+//
+//   [확인: `pin 21`, 2026-08-28 실내]
+//     GPIO21  풀업 LOW · 풀다운 LOW  → 무언가 LOW 로 잡고 있다
+//
+//   아무것도 안 물려 있으면 내부 풀업에 HIGH 가 나와야 한다. 안 올라온다는 것은
+//   바깥에서 능동적으로 LOW 로 누르고 있다는 뜻이고, 슬롯 A 에 꽂힌 것은
+//   GPS 뿐이다. **선은 연결되어 있다.**
+//
+//   같은 실측이 하나 더 말해 준다 — 그때 위성이 0개였고 5초 동안 한 번도 안
+//   바뀌었다. **위성을 못 잡으면 PPS 가 안 나온다.** 그래서 §10.5 를 "PPS 를
+//   한 번도 못 받았으면 안 보낸다" 로 짠 것이 맞다.
+//
+// 남은 확인: 밖에서 위성을 잡은 뒤 `pin 21` 로 1초에 한 번 바뀌는 것 보기.
+static constexpr int kGpsPpsSlotA = 21; // = kIO1
+static constexpr int kGpsPpsSlotD = 38; // = kIO5
+
 // ── ADC 입력 두 개 (J11 헤더 1번 = AIN1) ─────────────────────────────────
 //
 // 이 둘은 **센서 슬롯으로 안 나간다.** 코어 커넥터에서 J11 헤더로만 간다.
@@ -192,5 +221,29 @@ static constexpr BattPoint kBattCurve[] = {
     {3.74f, 20.0f},  {3.68f, 10.0f}, {3.45f, 5.0f},  {3.00f, 0.0f},
 };
 static constexpr int kBattCurveLen = sizeof(kBattCurve) / sizeof(kBattCurve[0]);
+
+// ── LoRa (RAK3112 안에 든 SX1262) ────────────────────────────────────────
+//
+// RAK3112 는 ESP32-S3 와 SX1262 를 한 모듈에 넣은 것이다. 무전기가 밖에
+// 붙는 게 아니라 안에 있고, **전용 SPI 로 붙어 있다.**
+//
+//   출처: rakwireless/variants/rak3112/pins_arduino.h 69행
+//         "// Internal SPI to LoRa transceiver"
+//
+// SD카드가 쓰는 SPI(MISO 10 · MOSI 11 · SCK 13)와 핀이 하나도 안 겹친다.
+// 그래서 SD 에 쓰는 중에 무전기를 써도 서로 안 기다린다.
+// 안테나도 2.4㎓(WiFi·BLE)와 따로 나 있다.
+static constexpr int kLoraSck   = 5;
+static constexpr int kLoraMiso  = 3;
+static constexpr int kLoraMosi  = 6;
+static constexpr int kLoraCs    = 7;
+static constexpr int kLoraReset = 8;
+static constexpr int kLoraDio1  = 47;
+static constexpr int kLoraBusy  = 48;
+
+// DIO2 가 송수신 전환 스위치를 직접 몬다. DIO3 가 TCXO 에 1.8 V 를 준다.
+// 이 둘을 안 걸면 무전기가 켜지긴 해도 신호가 안 나간다.
+static constexpr bool  kLoraDio2AsRfSwitch = true;
+static constexpr float kLoraTcxoVolts      = 1.8f;
 
 } // namespace rak

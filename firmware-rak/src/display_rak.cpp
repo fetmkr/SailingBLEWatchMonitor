@@ -38,36 +38,49 @@ bool gOk = false;
 //
 //        0                                      127
 //    0   ┌──────────────────────────────────────┐
-//    7   │ random()      BLE*  3.89V     94%  │  5x7
-//    9   ├──────────────────────────────────────┤
-//   27   │                             ██SIM██  │  6x10 반전 (SIM 일 때만)
-//   30   │  6.38 kn                             │  logisoso18 — 제일 크게
-//   41   │ COG 045       HDG 344                │  6x10
-//   49   │ HEEL  -1.9   PITCH  +2.9             │  5x7
-//   56   │ GYR  -0.5  +0.9  +1.1                │  5x7
-//   63   │ ACC +0.04 -0.08 -1.00                │  5x7
+//    8   │ random()               ADV      B07   │
+//   12   ├──────────────────────────────────────┤
+//   23   │ SOG 12.34 kn    ped                   │
+//   36   │ COG 045     HDG 344                   │
+//   49   │ HEEL -12.4  PIT -2.9                  │
+//   62   │ 4.06V                        SAT 12   │
 //        └──────────────────────────────────────┘
 //
-// 배에서 제일 먼저 눈에 들어와야 하는 건 속도다. 그래서 SOG 만 18px 로 쓰고
-// 나머지는 작게 깐다.
+// **글자 크기는 하나다 — 6x10.** 예전에는 속도만 18px 로 키우고 나머지를
+// 5x7 로 깔았는데, 자이로·가속도 두 줄을 빼면서 자리가 남았다. 자리가 있는데
+// 크기를 섞을 이유가 없다. 다섯 줄을 13px 씩 고르게 벌려 놓았다.
 //
 //   COG 는 배가 실제로 가는 방향 (GPS). 멈춰 있으면 안 나온다.
 //   HDG 는 뱃머리가 보는 방향 (자력계). 멈춰 있어도 나온다.
 //   요트에서는 이 둘이 다르다. 그래서 나란히 보여준다.
-//   자력계 원본 세 축은 HDG 로 대신하고 화면에서는 뺐다 (시리얼에는 나온다).
+//   자력계·자이로·가속도 원본은 화면에서 뺐다 (시리얼에는 나온다).
 //
-// SOG 는 왼쪽, SIM 표시는 오른쪽이라 세로로 겹쳐도 서로 침범하지 않는다.
+// ── 자리를 눈대중으로 잡지 않았다 ────────────────────────────────────────
+//
+// 실기기에서 getStrWidth() 로 잰 값이다 [확인: `fontw` 명령, 2026-08-28].
+// 6x10_tf 는 높이 10 (위 7 · 아래 2), 글자당 정확히 6px 이다.
+//
+//   "COG 045" 41    "HDG 344" 41    "PITCH -2.9" 59    "PIT -2.9" 47
+//   "SAT 12"  35    "4.06V"   29    "B07"        17    "12.34"    29
+//
+// 가로 — 한 줄에 최대 21글자(126px)가 들어간다. 제일 빡빡한 줄이 힐·피치다.
+//   최악  "HEEL -90.0"(59) + 사이 6 + "PIT -90.0"(53) = 118  →  들어간다
+//   PITCH 를 PIT 로 줄인 이유가 이것이다. 다 쓰면 130 이라 넘친다.
+//
+// 세로 — 기준선 8·23·36·49·62. 6x10 은 기준선 위 7 · 아래 2 를 쓰므로
+//   1~10 · 16~25 · 29~38 · 42~51 · 55~64. 겹치는 데가 없고 64 를 안 넘는다.
 constexpr int kW = 128;
 constexpr int kH = 64;
 
-constexpr int kTopBaseline = 7;
-constexpr int kLineY       = 9;  // 상태줄 아래 가로선
-constexpr int kTagBaseline = 27; // 속도 신뢰도 (SIM / H1.2 / FIX)
-constexpr int kSogBaseline = 30;
-constexpr int kCogBaseline = 41;
-constexpr int kAttBaseline = 49; // 힐 / 피치
-constexpr int kGyrBaseline = 56;
-constexpr int kAccBaseline = 63;
+constexpr int kRow1 = 8;  // 이름 / REC · BLE · 배 번호
+constexpr int kLineY = 12; // 상태줄 아래 가로선
+constexpr int kRow2 = 23; // 속도
+constexpr int kRow3 = 36; // 침로와 방위
+constexpr int kRow4 = 49; // 힐과 피치
+constexpr int kRow5 = 62; // 배터리 · 위성. 가운데는 로라 자리로 비워 둔다
+
+constexpr int kColL = 2;  // 왼쪽 값
+constexpr int kColR = 68; // 오른쪽 값 (힐 59px 뒤에 6px 띄운 자리)
 
 // 5x7 폰트는 글자당 5px, 6x10 은 6px 이다. 오른쪽 정렬을 이 폭으로 계산한다.
 constexpr int kW5 = 5;
@@ -135,132 +148,100 @@ void displayUpdate(const DisplayState& s) {
     char buf[40];
     gOled.clearBuffer();
 
-    // ── 상태줄 ───────────────────────────────────────────────────────────
-    gOled.setFont(u8g2_font_5x7_tf);
+    // 글자 크기는 이 하나뿐이다. 아래에서 다시 setFont 을 부르지 않는다.
+    gOled.setFont(u8g2_font_6x10_tf);
+
+    // 한 줄 안에서 왼쪽·오른쪽에 하나씩 놓는다. 오른쪽 것은 오른쪽 정렬이라
+    // 자릿수가 바뀌어도 끝이 안 흔들린다.
+    auto atRight = [&](int y, const char* t) {
+        gOled.drawStr(kW - gOled.getStrWidth(t) - 2, y, t);
+    };
+
+    // ── 1줄  이름 · BLE · 배 번호 ────────────────────────────────────────
     // 기록 중이면 이름 대신 REC 와 지난 시간. 배에서 제일 궁금한 게 이거다.
     if (s.recording) {
         char rec[24];
         snprintf(rec, sizeof(rec), "REC %02u:%02u",
                  (unsigned)(s.recSeconds / 60), (unsigned)(s.recSeconds % 60));
-        gOled.drawBox(0, kTopBaseline - 7, 5 * (int)strlen(rec) + 3, 9);
+        gOled.drawBox(0, kRow1 - 8, gOled.getStrWidth(rec) + 4, 11);
         gOled.setDrawColor(0);
-        gOled.drawStr(2, kTopBaseline, rec);
+        gOled.drawStr(2, kRow1, rec);
         gOled.setDrawColor(1); // 안 되돌리면 다음 그리기가 다 뒤집힌다
     } else {
-        drawChecked(2, kTopBaseline, s.userName, "이름");
+        drawChecked(kColL, kRow1, s.userName, "이름");
     }
 
-    // 오른쪽 끝부터 [잔량%] [전압] [BLE] 순으로 붙인다.
-    // 전압을 같이 놓는 이유는 display_rak.h 의 battVolts 주석 참고.
-    snprintf(buf, sizeof(buf), "%3d%%", (int)(s.battPct + 0.5f));
-    gOled.drawStr(rightX5(4), kTopBaseline, buf);
-
-    if (s.battVolts > 0.0f) {
-        snprintf(buf, sizeof(buf), "%.2fV", s.battVolts);
-        gOled.drawStr(rightX5(10), kTopBaseline, buf);
-    }
+    // 배 번호가 제일 오른쪽이다. 배를 물에 내리기 전에 뱃머리 번호표와 눈으로
+    // 맞춰 보는 값이라, 앱 없이 화면만 훑어도 읽혀야 한다 (PROTOCOL.md §10.11).
+    if (s.boatId > 0) snprintf(buf, sizeof(buf), "B%02u", (unsigned)s.boatId);
+    else              snprintf(buf, sizeof(buf), "B--");
+    atRight(kRow1, buf);
 
     // 별표는 앱이 notify 를 구독 중이라는 뜻.
     const char* ble = s.bleConnected ? (s.bleNotifying ? "BLE*" : "BLE") : "ADV";
-    gOled.drawStr(rightX5(15), kTopBaseline, ble);
+    gOled.drawStr(kW - 2 - 17 - 6 - gOled.getStrWidth(ble), kRow1, ble);
 
     gOled.drawHLine(0, kLineY, kW);
 
-    // ── 속도 — 제일 크게 ─────────────────────────────────────────────────
+    // ── 2줄  속도 ────────────────────────────────────────────────────────
     //
     // ★ 값이 없으면 숫자를 아예 안 그린다. 그럴듯한 숫자가 떠 있으면 사람은
     //   그걸 읽는다. 예전에는 시뮬레이터 값에 SIM 을 붙여 띄웠는데 결국
     //   헷갈렸다. 0 도 안 된다 — 정박 중 0.0 kn 과 구별되지 않는다.
-    if (s.sogValid) {
-        snprintf(buf, sizeof(buf), "%.2f", s.sogKn);
-        gOled.setFont(u8g2_font_logisoso18_tn); // 숫자와 마침표만 있는 폰트
-        drawChecked(2, kSogBaseline, buf, "SOG");
+    if (s.sogValid) snprintf(buf, sizeof(buf), "SOG %.2f kn", s.sogKn);
+    else            snprintf(buf, sizeof(buf), "SOG --- kn");
+    drawChecked(kColL, kRow2, buf, "SOG");
 
-        gOled.setFont(u8g2_font_6x10_tf);
-        gOled.drawStr(64, kSogBaseline, "kn");
-
-        // 위치 차분 속도를 작게 옆에 붙인다 (비교 중).
-        // 모듈이 주는 도플러 속도는 걷는 속도를 0 으로 뭉개고, 움직여도
-        // 3초쯤 지나야 값이 올라온다. 어느 쪽을 쓸지 밖에서 보고 정한다.
-    } else {
-        // 큰 폰트는 숫자 전용(tn)이라 글자를 못 그린다. 작은 폰트로 바꾼다.
-        gOled.setFont(u8g2_font_6x10_tf);
-        gOled.drawStr(2, kSogBaseline, "NO GPS");
-    }
-
-    // GPS 움직임 종류. 속도 바로 옆에 낱말로 쓴다.
-    //
-    // ★ 한 글자로 썼더니 눈에 안 띄었다. 밖에서 걸으며 흘깃 보는 것이라
-    //   낱말이어야 한다.
-    //
-    // ★ fix 가 없을 때도 그린다. 실내에서 설정을 바꿔 놓고 화면으로 확인할
-    //   수 있어야 한다. 값이 없으면 안 그리는 규칙은 **잰 값**에 대한 것이고,
-    //   이건 우리가 건 설정이라 언제나 확실하다.
-    //
-    // 자리 (6x10 폰트, 글자당 6px)
-    //   fix 있음   "6.38 kn" 이 x=76 에서 끝난다. x=80 부터 47px 비어 있다
-    //   fix 없음   "NO GPS" 가 x=38 에서 끝나고 SAT 딱지가 x=92 부터다.
-    //              그 사이 x=64 에 넣는다 (28px 자리에 boat 24px)
-    {
+    // GPS 움직임 종류. 모드를 번갈아 걸며 견주는 동안(`ab`)만 그린다. 평소에는
+    // 어느 모드로 걸어 뒀는지 이미 알고 있어서 자리만 뺏는다. 한 글자로 썼더니
+    // 눈에 안 띄어서 낱말로 쓴다. fix 가 없을 때도 그린다 — 실내에서 설정을
+    // 바꿔 놓고 화면으로 확인해야 하고, 이건 잰 값이 아니라 우리가 건 설정이라
+    // 언제나 확실하다.
+    if (s.gnssMode) {
         const char* mw =
             s.gnssMode == 'h' ? "port" : s.gnssMode == 's' ? "stat" :
             s.gnssMode == 'p' ? "ped"  : s.gnssMode == 'c' ? "car"  :
             s.gnssMode == 'b' ? "boat" : "?";
-        gOled.setFont(u8g2_font_6x10_tf);
-        gOled.drawStr(s.sogValid ? 80 : 64, kSogBaseline, mw);
+        gOled.drawStr(kColR + 12, kRow2, mw);
     }
 
-    // 위성이 몇 개나 보이는지. 밖에서 처음 잡을 때 35초쯤 걸리는데,
-    // 그동안 아무 변화가 없으면 고장인지 기다리는 중인지 알 수가 없다.
-    // 0 → 1 → 3 → 6 으로 늘어나는 게 보이면 제대로 가고 있다는 뜻이다.
-    gOled.setFont(u8g2_font_6x10_tf);
-    if (!s.sogValid) {
-        char tag[16];
-        snprintf(tag, sizeof(tag), "SAT %d", s.satellites);
-        const int tw = gOled.getStrWidth(tag);
-        const int bx = kW - tw - 6;
-        gOled.drawBox(bx, kTagBaseline - 9, tw + 5, 12);
-        gOled.setDrawColor(0); // 박스 위에는 검은 글씨
-        gOled.drawStr(bx + 2, kTagBaseline, tag);
-        gOled.setDrawColor(1); // 원래대로 돌려놓지 않으면 다음 그리기가 다 뒤집힌다
-    } else {
-        if (s.hdop >= 0.0f) snprintf(buf, sizeof(buf), "H%.1f", s.hdop);
-        else                snprintf(buf, sizeof(buf), "FIX");
-        gOled.drawStr(kW - gOled.getStrWidth(buf) - 2, kTagBaseline, buf);
-    }
-
-    // ── 침로와 방위 ──────────────────────────────────────────────────────
+    // ── 3줄  침로와 방위 ─────────────────────────────────────────────────
     // COG 는 GPS 가 준 "가는 방향", HDG 는 자력계가 준 "뱃머리 방향".
     if (s.sogValid) snprintf(buf, sizeof(buf), "COG %03d", (int)(s.cogDeg + 0.5f) % 360);
     else            snprintf(buf, sizeof(buf), "COG ---");
-    drawChecked(2, kCogBaseline, buf, "COG");
+    drawChecked(kColL, kRow3, buf, "COG");
 
-    if (s.headingDeg >= 0.0f) {
-        snprintf(buf, sizeof(buf), "HDG %03d", (int)(s.headingDeg + 0.5f) % 360);
-    } else {
-        snprintf(buf, sizeof(buf), "HDG ---");
+    if (s.headingDeg >= 0.0f) snprintf(buf, sizeof(buf), "HDG %03d", (int)(s.headingDeg + 0.5f) % 360);
+    else                      snprintf(buf, sizeof(buf), "HDG ---");
+    drawChecked(kColR, kRow3, buf, "HDG");
+
+    // ── 4줄  힐과 피치 ───────────────────────────────────────────────────
+    // 우현으로 누우면 힐 양수, 뱃머리가 들리면 피치 양수 (PROTOCOL.md §3.1).
+    // PITCH 를 다 쓰면 한 줄에 안 들어간다. 위 배치 주석의 계산 참고.
+    if (s.heelValid) snprintf(buf, sizeof(buf), "HEEL %.1f", s.heelDeg);
+    else             snprintf(buf, sizeof(buf), "HEEL ---");
+    drawChecked(kColL, kRow4, buf, "HEEL");
+
+    if (s.heelValid) snprintf(buf, sizeof(buf), "PIT %.1f", s.pitchDeg);
+    else             snprintf(buf, sizeof(buf), s.imuOk ? "PIT ---" : "NO IMU");
+    drawChecked(kColR, kRow4, buf, "PIT");
+
+    // ── 5줄  배터리와 위성 ───────────────────────────────────────────────
+    // 배터리는 전압만. 퍼센트를 안 그리는 이유는 display_rak.h 주석 참고.
+    // 가운데는 로라 상태(§10) 자리로 비워 둔다.
+    if (s.battVolts > 0.0f) {
+        snprintf(buf, sizeof(buf), "%.2fV", s.battVolts);
+        drawChecked(kColL, kRow5, buf, "전압");
     }
-    gOled.drawStr(66, kCogBaseline, buf);
 
-    // ── 자세 ─────────────────────────────────────────────────────────────
-    gOled.setFont(u8g2_font_5x7_tf);
-    if (s.heelValid) {
-        snprintf(buf, sizeof(buf), "HEEL%+6.1f  PITCH%+6.1f", s.heelDeg, s.pitchDeg);
-    } else {
-        snprintf(buf, sizeof(buf), "HEEL  ---   NO IMU");
-    }
-    drawChecked(2, kAttBaseline, buf, "자세");
-
-    // ── 9축 원본 ─────────────────────────────────────────────────────────
-    if (s.imuOk) {
-        snprintf(buf, sizeof(buf), "GYR%+6.1f%+6.1f%+6.1f", s.gyrX, s.gyrY, s.gyrZ);
-        drawChecked(2, kGyrBaseline, buf, "자이로");
-
-        snprintf(buf, sizeof(buf), "ACC%+6.2f%+6.2f%+6.2f", s.accX, s.accY, s.accZ);
-        drawChecked(2, kAccBaseline, buf, "가속도");
-    } else {
-        gOled.drawStr(2, kGyrBaseline, "IMU NOT RESPONDING");
-    }
+    // 위성이 몇 개나 보이는지. 밖에서 처음 잡을 때 35초쯤 걸리는데, 그동안
+    // 아무 변화가 없으면 고장인지 기다리는 중인지 알 수가 없다. 0 → 1 → 3 → 6
+    // 으로 늘어나는 게 보이면 제대로 가고 있다는 뜻이다.
+    // 잡고 나면 HDOP 로 바뀐다 — 작을수록 정확하다.
+    if (!s.sogValid)         snprintf(buf, sizeof(buf), "SAT %d", s.satellites);
+    else if (s.hdop >= 0.0f) snprintf(buf, sizeof(buf), "H%.1f", s.hdop);
+    else                     snprintf(buf, sizeof(buf), "FIX");
+    atRight(kRow5, buf);
 
     gOled.sendBuffer();
 }
