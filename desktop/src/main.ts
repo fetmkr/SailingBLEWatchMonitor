@@ -251,6 +251,7 @@ function buildSeries(s: hlog.Session) {
   const cog = new Float32Array(s.nav.length);
   const sv = new Float32Array(s.nav.length);
   const hdg = new Float32Array(s.nav.length);
+  const hdgCal = new Float32Array(s.nav.length);   // 축·기울기를 보정한 방위
   const hacc = new Float32Array(s.nav.length);
   const magX = new Float32Array(s.nav.length);
   const magY = new Float32Array(s.nav.length);
@@ -258,6 +259,7 @@ function buildSeries(s: hlog.Session) {
   const batt = new Float32Array(s.nav.length);
   fileMarks = [];
   track = [];
+  let imuAt = 0;   // 방위 계산이 쓰는 가속도 줄 짚개
   for (let i = 0; i < s.nav.length; i++) {
     const r = s.nav[i];
     navX[i] = r.ms - t0;
@@ -269,21 +271,75 @@ function buildSeries(s: hlog.Session) {
     magX[i] = r.mag[0]; magY[i] = r.mag[1]; magZ[i] = r.mag[2];
     batt[i] = r.battMv ? r.battMv / 1000 : NaN;
 
-    // 방위(HDG). **보드와 같은 식을 쓴다** — atan2(자력Y, 자력X).
-    // [확인: firmware-rak/src/main.cpp 의 headingDeg()]
+    // ── 방위(HDG) ─────────────────────────────────────────────────────
     //
-    // ★ 아직 거친 값이다. 두 가지가 빠져 있다.
-    //     1) 기울기 보정 — 배가 기울면 방위가 틀어진다
-    //     2) 자기 편각   — 자북과 진북의 차이 (한국은 약 8도 서편)
-    //   보드도 같은 상태다. 보정을 넣을 때 양쪽을 같이 고쳐야 한다.
+    // 전에는 보드와 같이 `atan2(자력Y, 자력X)` 를 썼다. **그게 틀렸다.**
     //
-    // 자력계가 죽어 세 축이 다 0 이면 방위가 아니라 "모름" 이다.
+    // MPU-9250 안의 자력계는 따로 든 칩(AK8963)이고, 라이브러리는 그 값을
+    // 축 정렬 없이 그대로 준다 (`MPU9250_WE.cpp:106`). 그래서 자력계 축이
+    // 가속도계 축과 다르다. 2026-08-30 세션 27 로 실측한 것:
+    //
+    //   가속도계   Y 에 중력이 걸려 있었다 (박스가 모로 누움)
+    //   자력계     X 가 안 돌았다 (폭 ±11)  ← 이게 세로축이라는 뜻
+    //              Y·Z 가 제대로 돌았다 (±34, ±31)
+    //
+    // 즉 자력계 X 가 가속도계 Y 자리다. 옛 식은 **세로축을 수평인 양** 썼다.
+    // 보드를 평평히 놓으면 우연히 맞는 짝이 되는데, 박스가 누우면 깨진다.
+    //
+    // 고침은 두 가지다. **둘 다 기하학이라 값을 더하거나 빼지 않는다.**
+    //   1) 축 맞추기      (자력Y, 자력X, -자력Z) 를 가속도 축에 대응
+    //   2) 기울기 보정    가속도로 그때그때 수평면을 구한다.
+    //                    박스가 어느 쪽으로 누워 있든 상관없어진다
+    //
+    // ★ COG 에 맞춰 보정하지 않는다. 요트는 leeway 때문에 뱃머리와 실제
+    //   가는 방향이 **원래 다르다.** COG 로 맞추면 그 차이를 지워버린다.
+    //   우리가 보려는 게 바로 그 차이다.
+    //
+    // 아직 안 넣은 것 둘. 둘 다 재야 나오는 값이라 COG 로 짐작하지 않는다.
+    //   - 치우침(하드아이언). 세션 27 에서 수평 자기장(32 µT)만 한 크기였다.
+    //     박스를 손에 들고 돌려서 따로 재야 한다
+    //   - 보드가 뱃머리에서 몇 도 돌아 앉았나, 그리고 자기 편각(한국 약 8도 서편)
+    //   그래서 **지금 값은 「어느 쪽을 보는가」가 아니라 「얼마나 돌았는가」다.**
+    //   돌아가는 모양은 맞고, 0 이 어디인지는 아직 모른다.
     if (r.mag[0] === 0 && r.mag[1] === 0 && r.mag[2] === 0) {
       hdg[i] = NaN;
+      hdgCal[i] = NaN;
     } else {
-      let h = Math.atan2(r.mag[1], r.mag[0]) * 180 / Math.PI;
-      if (h < 0) h += 360;
-      hdg[i] = h;
+      // ── 옛 값 (HDG). 보드가 지금 쓰는 식 그대로 둔다 ──
+      //   틀린 값이지만 **지운 게 아니라 나란히 둔다.** 보드가 화면과 BLE 로
+      //   내보내는 것이 이 값이라, 앱에서만 고치면 둘이 달라진다.
+      //   두 줄을 겹쳐 보면 얼마나 달라졌는지가 한눈에 보인다.
+      let h0 = Math.atan2(r.mag[1], r.mag[0]) * 180 / Math.PI;
+      if (h0 < 0) h0 += 360;
+      hdg[i] = h0;
+
+      // 이 줄의 시각에 제일 가까운 가속도 값을 찾는다 (IMU 는 100 Hz)
+      while (imuAt + 1 < s.imu.length && s.imu[imuAt + 1].ms <= r.ms) imuAt++;
+      const a = s.imu[imuAt];
+      const g = a ? Math.hypot(a.acc[0], a.acc[1], a.acc[2]) : 0;
+      if (!a || g < 0.5) {
+        hdgCal[i] = NaN;                    // 자세를 모르면 보정도 못 한다
+      } else {
+        const gx = a.acc[0] / g, gy = a.acc[1] / g, gz = a.acc[2] / g;
+        // 자력계 축을 가속도계 축에 맞춘다
+        const mx = r.mag[1], my = r.mag[0], mz = -r.mag[2];
+        // 중력 방향 성분을 빼서 수평면에 눕힌다
+        const dot = mx * gx + my * gy + mz * gz;
+        const hx = mx - dot * gx, hy = my - dot * gy, hz = mz - dot * gz;
+        // 보드 X 축도 같은 평면에 눕혀 기준으로 삼는다
+        let fx = 1 - gx * gx, fy = -gx * gy, fz = -gx * gz;
+        const fn = Math.hypot(fx, fy, fz);
+        if (fn < 1e-3) {
+          hdgCal[i] = NaN;                  // 보드 X 가 똑바로 서 있으면 기준이 없다
+        } else {
+          fx /= fn; fy /= fn; fz /= fn;
+          const rx = gy * fz - gz * fy, ry = gz * fx - gx * fz, rz = gx * fy - gy * fx;
+          let h = Math.atan2(hx * rx + hy * ry + hz * rz,
+                             hx * fx + hy * fy + hz * fz) * 180 / Math.PI;
+          if (h < 0) h += 360;
+          hdgCal[i] = h;
+        }
+      }
     }
 
     if (r.event & 0x01) fileMarks.push(r.ms - t0);
@@ -313,6 +369,23 @@ function buildSeries(s: hlog.Session) {
   // 짧아진다. 흔들림이 0.16 kn 이라 0.2 kn 대는 겨우 가른다 — **이 값은
   // 도플러를 대신하는 값이 아니라 도플러가 0 일 때 견주는 값이다.**
   const sogCal = new Float32Array(s.nav.length).fill(NaN);
+  // ── COG Cal — 위치로 잰 침로 ──────────────────────────────────────────
+  //
+  // 수신기는 저속에서 침로를 **얼린다.** 못 구하면 마지막 값을 그대로 계속
+  // 내보낸다 (u-blox 통합 매뉴얼 2.2.6 "Freezing the course over ground",
+  // CASIC 은 속도 표식 3 으로 알려 준다). 세션 27 에서 이렇게 갈렸다.
+  //
+  //   그때 속도            COG 가 직전 줄과 달라진 비율
+  //   1.0 ~ 1.5 kts              0%    ← 여기까지 아예 안 움직인다
+  //   2.0 ~ 2.5 kts             25%
+  //   전체 시간의 65% 가 얼어 있었다
+  //
+  // 위치로 구한 방향은 믿을 만하다 — 세션 27 에서 COG 와 치우침 0.7도,
+  // 흩어짐 10.0도였다 (2노트 위, 5,739줄).
+  //
+  // ★ 창 안에서 움직인 거리가 3 m 를 넘을 때만 값을 만든다. 그 아래는
+  //   방향이 잡음이라 지어낸 값이 된다.
+  const cogCal = new Float32Array(s.nav.length).fill(NaN);
   {
     const WIN_MS = 5000;
     const M_LAT = 111320;            // 위도 1도의 미터
@@ -327,7 +400,13 @@ function buildSeries(s: hlog.Session) {
       if (dt < 2.5) continue;        // 창이 반도 안 찼으면 값을 안 만든다
       const mLon = M_LAT * Math.cos(a.lat * Math.PI / 180);
       const dx = (b.lon - a.lon) * mLon, dy = (b.lat - a.lat) * M_LAT;
-      sogCal[i] = Math.hypot(dx, dy) / dt * 1.943844;
+      const dist = Math.hypot(dx, dy);
+      sogCal[i] = dist / dt * 1.943844;
+      if (dist > 3) {                       // 3 m 아래는 방향이 잡음이다
+        let c = Math.atan2(dx, dy) * 180 / Math.PI;
+        if (c < 0) c += 360;
+        cogCal[i] = c;
+      }
     }
   }
 
@@ -340,6 +419,8 @@ function buildSeries(s: hlog.Session) {
   const imuX = new Float64Array(s.imu.length);
   const heel = new Float32Array(s.imu.length);
   const pitch = new Float32Array(s.imu.length);
+  const heelComp = new Float32Array(s.imu.length);   // 중력 기준으로 다시 잡은 힐
+  const pitchComp = new Float32Array(s.imu.length);
   const gx = new Float32Array(s.imu.length);
   const gy = new Float32Array(s.imu.length);
   const gz = new Float32Array(s.imu.length);
@@ -357,8 +438,59 @@ function buildSeries(s: hlog.Session) {
     const mag = Math.hypot(ax, ay, az_) || 1;
     heel[i] = (Math.asin(clamp((hSign * a[hAxis]) / mag)) * 180) / Math.PI - hOff;
     pitch[i] = (Math.asin(clamp((pSign * a[pAxis]) / mag)) * 180) / Math.PI - pOff;
+    // 보정판은 아래에서 한꺼번에 만든다 (세션 전체의 중력 평균이 필요하다)
     gx[i] = r.gyr[0]; gy[i] = r.gyr[1]; gz[i] = r.gyr[2];
     ax_[i] = ax; ay_[i] = ay; az[i] = az_;
+  }
+
+  // ── 힐·트림을 하나의 기준으로 다시 잡는다 (comp) ─────────────────────
+  //
+  // 머리글의 고정 축은 **박스가 놓인 자세를 모른다.** 2026-08-30 세션 27 은
+  // 박스가 모로 누워 중력이 Y 축에 걸려 있었고, 기준각이 0 이라 배가 평평히
+  // 떠 있어도 힐이 -7.0도, 트림이 +2.1도로 읽혔다.
+  //
+  // 그래서 방위와 **같은 기준**을 쓴다. 그 세션의 중력 평균이 "아래" 다.
+  //   1) 중력 평균으로 위아래를 정한다        → 평평할 때 0 이 된다
+  //   2) 제일 많이 기우는 방향을 힐로 잡는다   → 배는 앞뒤보다 옆으로 훨씬 기운다
+  //   3) 그 직각이 트림이다
+  //
+  // 세션 27 로 재보니 힐 6.6도 · 트림 3.3도로 갈렸다 (고정 축은 6.7 / 3.8).
+  // 축은 거의 맞았고, 치우쳐 있던 것이 0 으로 잡힌다.
+  {
+    let mx = 0, my = 0, mz = 0, n = 0;
+    for (const r of s.imu) { mx += r.acc[0]; my += r.acc[1]; mz += r.acc[2]; n++; }
+    const gn = Math.hypot(mx, my, mz) || 1;
+    const ux = mx / gn, uy = my / gn, uz = mz / gn;          // "아래" 방향
+    // 그 면 위의 두 방향
+    let e1x = 1 - ux * ux, e1y = -ux * uy, e1z = -ux * uz;
+    const e1n = Math.hypot(e1x, e1y, e1z) || 1;
+    e1x /= e1n; e1y /= e1n; e1z /= e1n;
+    const e2x = uy * e1z - uz * e1y, e2y = uz * e1x - ux * e1z, e2z = ux * e1y - uy * e1x;
+    // 기울어진 만큼을 그 두 방향으로 나눈다
+    const p1 = new Float64Array(s.imu.length), p2 = new Float64Array(s.imu.length);
+    for (let i = 0; i < s.imu.length; i++) {
+      const [ax, ay, az_] = s.imu[i].acc;
+      const g = Math.hypot(ax, ay, az_);
+      if (g < 0.5) { p1[i] = NaN; p2[i] = NaN; continue; }
+      const vx = ax / g, vy = ay / g, vz = az_ / g;
+      const d = vx * ux + vy * uy + vz * uz;
+      const hx = vx - d * ux, hy = vy - d * uy, hz = vz - d * uz;
+      p1[i] = hx * e1x + hy * e1y + hz * e1z;
+      p2[i] = hx * e2x + hy * e2y + hz * e2z;
+    }
+    // 제일 많이 흔들리는 방향을 찾는다 (주축)
+    let sxx = 0, syy = 0, sxy = 0, m = 0;
+    for (let i = 0; i < p1.length; i++) {
+      if (!Number.isFinite(p1[i])) continue;
+      sxx += p1[i] * p1[i]; syy += p2[i] * p2[i]; sxy += p1[i] * p2[i]; m++;
+    }
+    const th = m ? 0.5 * Math.atan2(2 * (sxy / m), sxx / m - syy / m) : 0;
+    const ct = Math.cos(th), st = Math.sin(th);
+    for (let i = 0; i < p1.length; i++) {
+      if (!Number.isFinite(p1[i])) { heelComp[i] = NaN; pitchComp[i] = NaN; continue; }
+      heelComp[i]  = Math.asin(clamp(p1[i] * ct + p2[i] * st)) * 180 / Math.PI;
+      pitchComp[i] = Math.asin(clamp(-p1[i] * st + p2[i] * ct)) * 180 / Math.PI;
+    }
   }
 
   // 이름은 영어가 기본이다. 클래스도 대회도 영어로 돌아가고, 코치가 다른
@@ -375,19 +507,29 @@ function buildSeries(s: hlog.Session) {
   // 있을 수 없는 눈금을 만든다 — 속도 칸에 -0.3 kn, 방위 칸에 389 deg.
   // 속도는 아래만, 방위는 양쪽 다 막는다. 힐·자이로는 음수가 진짜라 안 막는다.
   const main: tl.Series[] = [
+    // ── `alt` 는 같은 자리에서 갈아 끼울 수 있는 값이다 ──
+    //
+    //   cal   위치로 계산한 값. 수신기가 저속에서 속도를 0 으로, 침로를
+    //         마지막 값으로 굳혀 버릴 때 이것만 살아 있다
+    //   comp  축과 기울기를 보정한 값. 박스가 어떻게 놓였든 같은 기준이 된다
+    //
+    // 줄을 하나 더 만드는 대신 이름 칸의 작은 단추로 바꾼다. 줄이 반으로
+    // 줄고, 두 줄을 눈으로 맞춰볼 필요가 없다.
     { code: "SOG",   name: n("SOG", "Speed Over Ground"), unit: "kn",
-      color: sc("sog", "#4ea1ff"), xs: navX, ys: sog, limit: [0] },
-    // 위치로 잰 속도. 수신기가 저속을 0 으로 뭉갤 때 이것만 살아 있다.
-    { code: "SOGC",  name: n("SOG Cal", "SOG from position (5s)"), unit: "kn",
-      color: sc("sogcal", "#7bd48f"), xs: navX, ys: sogCal, limit: [0] },
+      color: sc("sog", "#4ea1ff"), xs: navX, ys: sog, limit: [0],
+      alt: { ys: sogCal, name: n("SOG cal", "SOG from position (5s)"), tag: "cal" } },
     { code: "HDG",   name: n("HDG", "Heading"), unit: "deg",
-      color: sc("hdg", "#ffd166"), xs: navX, ys: hdg, limit: [0, 360] },
+      color: sc("hdg", "#ffd166"), xs: navX, ys: hdg, limit: [0, 360],
+      alt: { ys: hdgCal, name: n("HDG comp", "Heading (axis + tilt)"), tag: "comp" } },
     { code: "COG",   name: n("COG", "Course Over Ground"), unit: "deg",
-      color: sc("cog", "#77d4e8"), xs: navX, ys: cog, limit: [0, 360] },
+      color: sc("cog", "#77d4e8"), xs: navX, ys: cog, limit: [0, 360],
+      alt: { ys: cogCal, name: n("COG cal", "COG from position (5s)"), tag: "cal" } },
     { code: "HEEL",  name: n("HEEL", "Heel"), unit: "deg",
-      color: sc("heel", "#ff7a59"), xs: imuX, ys: heel, zeroCentered: true },
+      color: sc("heel", "#ff7a59"), xs: imuX, ys: heel, zeroCentered: true,
+      alt: { ys: heelComp, name: n("HEEL comp", "Heel (levelled)"), tag: "comp" } },
     { code: "TRIM",  name: n("TRIM", "Trim"), unit: "deg",
-      color: sc("trim", "#ffc857"), xs: imuX, ys: pitch, zeroCentered: true },
+      color: sc("trim", "#ffc857"), xs: imuX, ys: pitch, zeroCentered: true,
+      alt: { ys: pitchComp, name: n("TRIM comp", "Trim (levelled)"), tag: "comp" } },
 
     // 가속·자이로 원본도 본 화면에 둔다. 힐과 트림이 여기서 나오고, 파도와
     // 태킹이 그대로 보인다. 100 Hz 로 기록하는 이유가 이 두 줄이다.
@@ -3112,6 +3254,15 @@ function wire() {
       drag = { kind: "pill", x: e.clientX, from: view.from };
       c.setPointerCapture(e.pointerId);
       c.style.cursor = "grabbing";
+      return;
+    }
+
+    // ★ 값 갈아끼우기 단추를 **먼저** 본다. 단추가 이름 칸 안에 있어서
+    //   순서를 바꾸면 단추를 눌러도 이름 고치기가 열린다.
+    const altRow = tl.altAtY(c, e.clientX, e.clientY);
+    if (altRow >= 0) {
+      const sr = series[altRow];
+      if (sr?.alt) { sr.altOn = !sr.altOn; redraw(); }
       return;
     }
 

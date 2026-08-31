@@ -33,6 +33,18 @@ export interface Series {
   limit?: [number] | [number, number];
   /** 접어 두었나. 접힌 줄은 이름만 남기고 자리를 안 쓴다 */
   collapsed?: boolean;
+  /**
+   * 같은 자리에 갈아 끼울 수 있는 다른 값.
+   *
+   * 원본 옆에 줄을 하나 더 만드는 대신 **한 자리에서 바꿔 본다.** 줄이
+   * 반으로 줄고, 두 줄을 눈으로 맞춰볼 필요가 없다. 이름 칸의 작은 단추를
+   * 누르면 바뀐다.
+   *   SOG·COG  → 위치로 계산한 값 (cal)
+   *   HDG·힐·트림 → 축과 기울기를 보정한 값 (comp)
+   */
+  alt?: { ys: Float32Array; name: string; tag: string };
+  /** 지금 갈아 끼운 값을 보고 있나 */
+  altOn?: boolean;
 }
 
 export interface View {
@@ -63,17 +75,27 @@ function bucketize(s: Series, view: View, cols: number): Band {
     else hi = mid;
   }
 
+  const ys = ysOf(s);
   for (let i = lo; i < s.xs.length; i++) {
     const x = s.xs[i];
     if (x > view.to) break;
     const c = Math.min(cols - 1, Math.floor(((x - view.from) / span) * cols));
-    const y = s.ys[i];
+    const y = ys[i];
     if (!Number.isFinite(y)) continue;      // 값 없음은 안 그린다
     if (y < min[c]) min[c] = y;
     if (y > max[c]) max[c] = y;
     has[c] = 1;
   }
   return { min, max, has };
+}
+
+/** 지금 그려야 할 값. 단추를 눌렀으면 갈아 끼운 쪽이다. */
+export function ysOf(s: Series): Float32Array {
+  return s.altOn && s.alt ? s.alt.ys : s.ys;
+}
+/** 지금 보여줘야 할 이름. */
+function nameOf(s: Series): string {
+  return s.altOn && s.alt ? s.alt.name : s.name;
 }
 
 function niceRange(lo: number, hi: number, zeroCentered?: boolean,
@@ -225,6 +247,8 @@ const CHEV_W = 26;
 
 /** 줄마다의 자리. draw 가 채우고 hit test 가 읽는다 — 늘 같은 값이어야 한다. */
 let rowBoxes: { top: number; h: number }[] = [];
+/** 값을 갈아 끼우는 작은 단추 자리. 그 줄에 갈아 낄 값이 없으면 null */
+let altBoxes: ({ x: number; y: number; w: number; h: number } | null)[] = [];
 
 /** 이름 칸 너비. 경계를 끌어서 바꾼다 (이름이 길면 넘치기 때문이다) */
 export function labelWidth(): number { return LABEL_W; }
@@ -360,14 +384,16 @@ export function draw(o: DrawOpts): void {
   scrollTo(scrollY);                       // 줄이 줄어들면 굴린 만큼도 줄인다
 
   rowBoxes = [];
+  altBoxes = [];
   {
     let y = bodyTop - scrollY;
     for (const sx of series) {
       const h = sx.collapsed ? MINI_ROW : rowH;
       rowBoxes.push({ top: y, h });
+      altBoxes.push(null);
       y += h + GAP;
     }
-    if (!series.length) rowBoxes.push({ top: bodyTop, h: bodyH });
+    if (!series.length) { rowBoxes.push({ top: bodyTop, h: bodyH }); altBoxes.push(null); }
   }
   const cols = Math.max(1, Math.floor(plotW));
   const span = Math.max(1, view.to - view.from);
@@ -534,7 +560,7 @@ export function draw(o: DrawOpts): void {
       g.textAlign = "left";
       g.textBaseline = "middle";
       g.font = `${FSM}px ${SANS}`;
-      g.fillText(fitText(g, s.name, LABEL_W - CHEV_W - 20), CHEV_W + 15, my);
+      g.fillText(fitText(g, nameOf(s), LABEL_W - CHEV_W - 20), CHEV_W + 15, my);
       g.textBaseline = "top";
 
       g.strokeStyle = grid;
@@ -586,7 +612,7 @@ export function draw(o: DrawOpts): void {
         const x = s.xs[i];
         if (x < view.from) continue;
         if (x > view.to) break;
-        const y = s.ys[i];
+        const y = ysOf(s)[i];
         if (!Number.isFinite(y)) { first = true; continue; }
         const px = xOf(x), py = yOf(y);
         if (first) { g.moveTo(px, py); first = false; } else { g.lineTo(px, py); }
@@ -598,7 +624,7 @@ export function draw(o: DrawOpts): void {
         const x = s.xs[i];
         if (x < view.from) continue;
         if (x > view.to) break;
-        const y = s.ys[i];
+        const y = ysOf(s)[i];
         if (!Number.isFinite(y)) continue;
         g.beginPath();
         g.arc(xOf(x), yOf(y), 2, 0, Math.PI * 2);
@@ -647,7 +673,35 @@ export function draw(o: DrawOpts): void {
     g.textAlign = "left";
     g.textBaseline = "middle";
     // 칸을 넘치면 잘라 준다. 그냥 넘치면 옆 칸 숫자와 겹쳐서 둘 다 못 읽는다.
-    g.fillText(fitText(g, s.name, LABEL_W - CHEV_W - 22), CHEV_W + 17, midY);
+    g.fillText(fitText(g, nameOf(s), LABEL_W - CHEV_W - 22 - (s.alt ? 44 : 0)),
+               CHEV_W + 17, midY);
+
+    // ── 값을 갈아 끼우는 단추 ──
+    //
+    // 줄을 하나 더 만드는 대신 **같은 자리에서 바꿔 본다.** 켜져 있으면
+    // 색이 차고, 꺼져 있으면 테두리만 남는다. 지금 무엇을 보고 있는지가
+    // 글자(cal / comp)로 남아 있어야 나중에 화면만 보고도 안다.
+    if (s.alt) {
+      const bw = 38, bh = 16;
+      const bx = LABEL_W - bw - 6, by = Math.round(midY - bh / 2);
+      g.beginPath();
+      const rr = 4;
+      g.moveTo(bx + rr, by);
+      g.arcTo(bx + bw, by, bx + bw, by + bh, rr);
+      g.arcTo(bx + bw, by + bh, bx, by + bh, rr);
+      g.arcTo(bx, by + bh, bx, by, rr);
+      g.arcTo(bx, by, bx + bw, by, rr);
+      g.closePath();
+      if (s.altOn) { g.fillStyle = s.color; g.fill(); }
+      else { g.strokeStyle = dim; g.lineWidth = 1; g.stroke(); }
+      g.fillStyle = s.altOn ? "#0b0e13" : dim;
+      g.font = `10px ${SANS}`;
+      g.textAlign = "center";
+      g.fillText(s.alt.tag, bx + bw / 2, midY);
+      g.textAlign = "left";
+      g.font = `${FS}px ${SANS}`;
+      altBoxes[r] = { x: bx, y: by, w: bw, h: bh };
+    }
     g.textBaseline = "top";
 
     // 줄 나눔선
@@ -837,6 +891,25 @@ function chevron(
   }
   g.closePath();
   g.fill();
+}
+
+/**
+ * 값 갈아끼우기 단추를 눌렀나. 누른 줄 번호, 아니면 -1.
+ *
+ * ★ 이름 칸 클릭(이름 고치기)보다 **먼저** 봐야 한다. 단추가 이름 칸 안에
+ *   있어서, 순서를 바꾸면 단추를 눌러도 이름 고치기가 열린다.
+ */
+export function altAtY(
+  canvas: HTMLCanvasElement, clientX: number, clientY: number,
+): number {
+  const r = canvas.getBoundingClientRect();
+  const x = clientX - r.left, y = clientY - r.top;
+  for (let i = 0; i < altBoxes.length; i++) {
+    const b = altBoxes[i];
+    if (!b) continue;
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return i;
+  }
+  return -1;
 }
 
 export function rowAtY(
