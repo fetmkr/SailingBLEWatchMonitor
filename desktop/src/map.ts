@@ -26,10 +26,35 @@
 // MapLibre 6 은 기본 내보내기가 없다. 이름으로 가져온다.
 // [확인: node_modules/maplibre-gl/dist/maplibre-gl.d.ts 의 export { … } 목록]
 import {
-  Map as MlMap, NavigationControl, ScaleControl,
+  Map as MlMap, NavigationControl, ScaleControl, setWorkerUrl,
   type LngLatBoundsLike,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+
+// ── 워커 주소를 우리가 직접 알려 준다 ────────────────────────────────────
+//
+// ★ 이게 없으면 **항적이 아예 안 그려진다.** 지도 타일은 멀쩡히 나온다.
+//
+// MapLibre 6 은 GeoJSON(우리 항적)을 워커에서 만든다. 타일은 워커를 안 거친다.
+// 그래서 워커가 죽으면 "지도는 나오는데 선만 없는" 모양이 된다.
+//
+// 6 부터 워커가 **묶음과 따로 있는 파일**이 됐고, 그 자리를 import.meta.url
+// 옆으로 짐작한다. 묶개(Vite)를 거치면 그 짐작이 틀린다. 실측한 것:
+//
+//   묶음이 부른 주소   /assets/maplibre-gl-worker.mjs
+//   서버가 준 것       200 OK · text/html · index.html 내용
+//
+// 없는 주소라 index.html 이 대신 왔고, 워커가 그걸 자바스크립트로 읽다 죽었다.
+// **조용히 죽는다** — MapLibre 는 new Worker() 가 던질 때만 물러서는데
+// 이건 워커 안에서 나중에 실패하는 거라 안 던진다. 오류 한 줄 안 남는다.
+// 개발 서버에서는 node_modules 의 진짜 파일을 찾아 줘서 멀쩡했다.
+// 맥 앱은 화면을 tauri:// 로 띄우는데, 그때는 위 짐작이 빈 문자열이 된다.
+//
+// **`?url` 이 아니라 `?worker&url` 이어야 한다.** 워커 파일이 옆의
+// maplibre-gl-shared.mjs 를 import 하는데, `?url` 은 그 옆 파일을 안 내보낸다.
+// [확인: maplibre.org/maplibre-gl-js/docs 의 번들러별 설치 안내]
+import mlWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
+setWorkerUrl(mlWorkerUrl);
 
 /** 눈금이 1해리로 나오는 배율.
  *
