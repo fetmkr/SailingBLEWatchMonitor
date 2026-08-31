@@ -722,7 +722,24 @@ static float    gPvSpeedKn  = -1.0f; // 음수면 아직 없음
 static float    gPvCogDeg   = -1.0f;
 static float    gPvAccKn    = -1.0f; // 모듈이 밝힌 자기 속도 오차
 static float    gPvHAccM    = -1.0f; // 모듈이 밝힌 수평 위치 오차 (m)
-static bool     gPvVelValid = false;
+static float    gPvCogAccDeg= -1.0f; // 모듈이 밝힌 침로 오차 (도). 얼면 커진다
+// ── 속도 표식 (CASIC 문서 NAV-PV 의 velValid) ────────────────────────────
+//
+// 칩이 값을 줄 때마다 **이게 방금 잰 값인지, 옛날 값을 들고 있는 것인지**
+// 같이 알려준다. 그냥 있고 없고가 아니다.
+//
+//   0  속도를 아예 모름
+//   1  바깥에서 넣은 값
+//   2  대충 어림잡은 값
+//   3  마지막에 잰 값을 그대로 들고 있음   ← 지금 잰 게 아니다
+//   4~8 방금 제대로 잰 값
+//
+// 전에는 `!= 0` 으로 봤다. 그러면 3 번(옛날 값)도 잰 값 취급을 받아서
+// **없는 값을 있는 것처럼 적게 된다.** 배가 천천히 떠 있을 때가 정확히
+// 그 상황이라, 우리가 제일 알고 싶은 구간에서 거짓말을 하게 된다.
+static constexpr uint8_t kPvVelMeasured = 4;   // 이보다 작으면 잰 값이 아니다
+static uint8_t  gPvVelFlag  = 0;
+static bool     gPvVelValid = false;           // gPvVelFlag >= 4 일 때만 참
 static uint32_t gPvAtMs     = 0;
 
 static void gpsPoll() {
@@ -760,13 +777,16 @@ static void gpsPoll() {
                 case 7:
                     if (++bn >= 4) { // 체크섬까지 다 받았다
                         if (bcls == 0x01 && bid == 0x03 && bneed >= 80) {
-                            float sp, hd, ac, ha;
+                            float sp, hd, ac, ha, ca;
                             memcpy(&ha, bbody + 40, 4); // 수평 위치 정확도 (m²)
                             memcpy(&sp, bbody + 64, 4);
                             memcpy(&hd, bbody + 68, 4);
                             memcpy(&ac, bbody + 72, 4);
+                            memcpy(&ca, bbody + 76, 4); // 침로 정확도 (도²)
                             gPvHAccM    = (ha > 0.0f) ? sqrtf(ha) : -1.0f;
-                            gPvVelValid = (bbody[5] != 0);
+                            gPvCogAccDeg= (ca > 0.0f) ? sqrtf(ca) : -1.0f;
+                            gPvVelFlag  = bbody[5];
+                            gPvVelValid = (gPvVelFlag >= kPvVelMeasured);
                             gPvSpeedKn  = sp * 1.943844f;
                             gPvCogDeg   = hd;
                             gPvAccKn    = (ac > 0.0f) ? sqrtf(ac) * 1.943844f : -1.0f;
@@ -1000,6 +1020,11 @@ static void doFix() {
     Serial.printf("  본 최고 속도   RMC %.2f kn / NAV-PV %.2f kn / 위치차분 %.2f kn\n",
                   gMaxSogKn, gMaxSogPv, gMaxSogFromPos);
     if (gPvAtMs != 0) {
+        Serial.printf("  속도 표식      %u %s\n", gPvVelFlag,
+                      gPvVelFlag >= kPvVelMeasured ? "(방금 잰 값)" :
+                      gPvVelFlag == 3 ? "★ 옛날 값을 들고 있음" :
+                      gPvVelFlag == 2 ? "★ 대충 어림잡은 값" : "★ 속도를 모름");
+        if (gPvCogAccDeg >= 0) Serial.printf("  침로 오차      ±%.1f도\n", gPvCogAccDeg);
         Serial.printf("  지금 NAV-PV    %.2f kn (오차 ±%.2f)  침로 %.1f  유효 %s  %lu초 전\n",
                       gPvSpeedKn, gPvAccKn, gPvCogDeg,
                       gPvVelValid ? "예" : "아니오",
@@ -2296,8 +2321,11 @@ static void logWriteText(uint32_t nowMs) {
     t.pitchDeg = currentPitchDeg();
     t.hdgDeg   = headingDeg();
     // 1노트 아래에서 어느 길이 살아남는지 보려고 셋을 같이 남긴다 (hlog.h 참고).
+    // ★ 표식이 4 이상일 때만 값을 넣는다. 3 은 옛날 값이라 넣으면 거짓말이 된다.
     t.sogPvKn  = (gPvVelValid && gPvSpeedKn >= 0) ? gPvSpeedKn : -1.0f;
     t.sogPosKn = gSogFromPos;
+    t.pvFlag   = (gPvAtMs && millis() - gPvAtMs < 3000) ? gPvVelFlag : 255;
+    t.cogAccDeg = gPvCogAccDeg;
     hlog::writeText(buildNav(nowMs), t);
 }
 

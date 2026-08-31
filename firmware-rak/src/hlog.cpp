@@ -376,6 +376,8 @@ bool start(const Header& h) {
         gTxt.printf("# 힐·피치·헤딩은 참고값입니다 (가속도에서 뽑음).\n");
         gTxt.printf("# 속도 세 가지: 앞의 kn=도플러(RMC, 파일에 들어가는 값) "
                     "· pv=NAV-PV · pos=위치차분\n");
+        gTxt.printf("# f=칩이 밝힌 속도 표식 (4 이상이면 방금 잰 값, 3 이면 "
+                    "옛날 값을 들고 있음) · c=침로 오차(도)\n");
         gTxt.printf("# GNSS 동역학모델 %u / %u Hz,  IMU %s,  속도는 도플러 원본\n",
                     h.gnssDyn, h.gnssHz,
                     h.imuType == kImuBNO085 ? "BNO085" : "MPU-9250");
@@ -570,6 +572,11 @@ void writeText(const NavSample& s, const TextSample& t) {
     else                n += snprintf(line + n, sizeof(line) - n, "pv --- ");
     if (t.sogPosKn >= 0) n += snprintf(line + n, sizeof(line) - n, "pos%5.2f ", t.sogPosKn);
     else                 n += snprintf(line + n, sizeof(line) - n, "pos --- ");
+    // 칩이 밝힌 「방금 잰 값인가」. f4 이상이면 잰 값, f3 이면 옛날 값이다.
+    if (t.pvFlag != 255) n += snprintf(line + n, sizeof(line) - n, "f%u ", t.pvFlag);
+    else                 n += snprintf(line + n, sizeof(line) - n, "f- ");
+    if (t.cogAccDeg >= 0) n += snprintf(line + n, sizeof(line) - n, "c%4.0f ", t.cogAccDeg);
+    else                  n += snprintf(line + n, sizeof(line) - n, "c--- ");
 
     n += snprintf(line + n, sizeof(line) - n, "%umV  ", s.battMv);
 
