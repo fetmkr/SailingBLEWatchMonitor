@@ -268,7 +268,17 @@ function buildSeries(s: hlog.Session) {
     cog[i] = r.cogDeg ?? NaN;
     sv[i] = r.numSv;
     hacc[i] = r.hAccM ?? NaN;
-    magX[i] = r.mag[0]; magY[i] = r.mag[1]; magZ[i] = r.mag[2];
+    // ── 자력계를 가속도·자이로와 같은 축으로 옮긴다 ──
+    //
+    // MPU-9250 은 한 칩인데 자력계만 따로 든 칩(AK8963)이고, 라이브러리는
+    // 그 값을 축 정렬 없이 그대로 준다 (`MPU9250_WE.cpp:106`). 그래서 전에는
+    // **MAGX 와 ACCX 가 서로 다른 방향**인 채 같은 이름을 달고 있었다.
+    //
+    // 실측으로 확인한 짝 (2026-08-30 세션 27, 박스가 모로 누워 있었다):
+    //   가속도계 Y 에 중력이 걸림  ↔  자력계 X 가 안 돎  → 자력 X = 가속 Y
+    //
+    // 세 센서를 한 축으로 맞춰 둔다. 그래야 "X 축" 이 어디서나 같은 방향이다.
+    magX[i] = r.mag[1]; magY[i] = r.mag[0]; magZ[i] = -r.mag[2];
     batt[i] = r.battMv ? r.battMv / 1000 : NaN;
 
     // ── 방위(HDG) ─────────────────────────────────────────────────────
@@ -419,8 +429,6 @@ function buildSeries(s: hlog.Session) {
   const imuX = new Float64Array(s.imu.length);
   const heel = new Float32Array(s.imu.length);
   const pitch = new Float32Array(s.imu.length);
-  const heelComp = new Float32Array(s.imu.length);   // 중력 기준으로 다시 잡은 힐
-  const pitchComp = new Float32Array(s.imu.length);
   const gx = new Float32Array(s.imu.length);
   const gy = new Float32Array(s.imu.length);
   const gz = new Float32Array(s.imu.length);
@@ -438,60 +446,20 @@ function buildSeries(s: hlog.Session) {
     const mag = Math.hypot(ax, ay, az_) || 1;
     heel[i] = (Math.asin(clamp((hSign * a[hAxis]) / mag)) * 180) / Math.PI - hOff;
     pitch[i] = (Math.asin(clamp((pSign * a[pAxis]) / mag)) * 180) / Math.PI - pOff;
-    // 보정판은 아래에서 한꺼번에 만든다 (세션 전체의 중력 평균이 필요하다)
     gx[i] = r.gyr[0]; gy[i] = r.gyr[1]; gz[i] = r.gyr[2];
     ax_[i] = ax; ay_[i] = ay; az[i] = az_;
   }
 
-  // ── 힐·트림을 하나의 기준으로 다시 잡는다 (comp) ─────────────────────
+  // ※ 힐·트림의 "수평" 은 여기서 정하지 않는다.
   //
-  // 머리글의 고정 축은 **박스가 놓인 자세를 모른다.** 2026-08-30 세션 27 은
-  // 박스가 모로 누워 중력이 Y 축에 걸려 있었고, 기준각이 0 이라 배가 평평히
-  // 떠 있어도 힐이 -7.0도, 트림이 +2.1도로 읽혔다.
+  //   한때 그 세션의 중력 평균을 수평으로 삼아 봤다. **틀렸다.** 배가 한쪽
+  //   태킹으로 더 오래 갔으면 평균이 그쪽으로 치우치고, 그걸 0 으로 잡으면
+  //   기울어 있는 것을 평평하다고 말하게 된다.
   //
-  // 그래서 방위와 **같은 기준**을 쓴다. 그 세션의 중력 평균이 "아래" 다.
-  //   1) 중력 평균으로 위아래를 정한다        → 평평할 때 0 이 된다
-  //   2) 제일 많이 기우는 방향을 힐로 잡는다   → 배는 앞뒤보다 옆으로 훨씬 기운다
-  //   3) 그 직각이 트림이다
-  //
-  // 세션 27 로 재보니 힐 6.6도 · 트림 3.3도로 갈렸다 (고정 축은 6.7 / 3.8).
-  // 축은 거의 맞았고, 치우쳐 있던 것이 0 으로 잡힌다.
-  {
-    let mx = 0, my = 0, mz = 0, n = 0;
-    for (const r of s.imu) { mx += r.acc[0]; my += r.acc[1]; mz += r.acc[2]; n++; }
-    const gn = Math.hypot(mx, my, mz) || 1;
-    const ux = mx / gn, uy = my / gn, uz = mz / gn;          // "아래" 방향
-    // 그 면 위의 두 방향
-    let e1x = 1 - ux * ux, e1y = -ux * uy, e1z = -ux * uz;
-    const e1n = Math.hypot(e1x, e1y, e1z) || 1;
-    e1x /= e1n; e1y /= e1n; e1z /= e1n;
-    const e2x = uy * e1z - uz * e1y, e2y = uz * e1x - ux * e1z, e2z = ux * e1y - uy * e1x;
-    // 기울어진 만큼을 그 두 방향으로 나눈다
-    const p1 = new Float64Array(s.imu.length), p2 = new Float64Array(s.imu.length);
-    for (let i = 0; i < s.imu.length; i++) {
-      const [ax, ay, az_] = s.imu[i].acc;
-      const g = Math.hypot(ax, ay, az_);
-      if (g < 0.5) { p1[i] = NaN; p2[i] = NaN; continue; }
-      const vx = ax / g, vy = ay / g, vz = az_ / g;
-      const d = vx * ux + vy * uy + vz * uz;
-      const hx = vx - d * ux, hy = vy - d * uy, hz = vz - d * uz;
-      p1[i] = hx * e1x + hy * e1y + hz * e1z;
-      p2[i] = hx * e2x + hy * e2y + hz * e2z;
-    }
-    // 제일 많이 흔들리는 방향을 찾는다 (주축)
-    let sxx = 0, syy = 0, sxy = 0, m = 0;
-    for (let i = 0; i < p1.length; i++) {
-      if (!Number.isFinite(p1[i])) continue;
-      sxx += p1[i] * p1[i]; syy += p2[i] * p2[i]; sxy += p1[i] * p2[i]; m++;
-    }
-    const th = m ? 0.5 * Math.atan2(2 * (sxy / m), sxx / m - syy / m) : 0;
-    const ct = Math.cos(th), st = Math.sin(th);
-    for (let i = 0; i < p1.length; i++) {
-      if (!Number.isFinite(p1[i])) { heelComp[i] = NaN; pitchComp[i] = NaN; continue; }
-      heelComp[i]  = Math.asin(clamp(p1[i] * ct + p2[i] * st)) * 180 / Math.PI;
-      pitchComp[i] = Math.asin(clamp(-p1[i] * st + p2[i] * ct)) * 180 / Math.PI;
-    }
-  }
+  //   수평은 사람이 알려줘야 한다 — 잔잔할 때 "지금이 수평" 을 눌러 그 값을
+  //   머리글의 기준각(heelOff/pitchOff)에 넣는 식이다. 지금은 둘 다 0 이라
+  //   박스가 비뚤게 놓인 만큼이 그대로 값에 남는다 (세션 27 은 힐 -7.0도,
+  //   트림 +2.1도). 그건 사실이므로 지어내지 않고 그대로 둔다.
 
   // 이름은 영어가 기본이다. 클래스도 대회도 영어로 돌아가고, 코치가 다른
   // 분석 도구와 나란히 볼 때 말이 맞아야 한다. 누르면 고칠 수 있다.
@@ -525,11 +493,9 @@ function buildSeries(s: hlog.Session) {
       color: sc("cog", "#77d4e8"), xs: navX, ys: cog, limit: [0, 360],
       alt: { ys: cogCal, name: n("COG cal", "COG from position (5s)"), tag: "cal" } },
     { code: "HEEL",  name: n("HEEL", "Heel"), unit: "deg",
-      color: sc("heel", "#ff7a59"), xs: imuX, ys: heel, zeroCentered: true,
-      alt: { ys: heelComp, name: n("HEEL comp", "Heel (levelled)"), tag: "comp" } },
+      color: sc("heel", "#ff7a59"), xs: imuX, ys: heel, zeroCentered: true },
     { code: "TRIM",  name: n("TRIM", "Trim"), unit: "deg",
-      color: sc("trim", "#ffc857"), xs: imuX, ys: pitch, zeroCentered: true,
-      alt: { ys: pitchComp, name: n("TRIM comp", "Trim (levelled)"), tag: "comp" } },
+      color: sc("trim", "#ffc857"), xs: imuX, ys: pitch, zeroCentered: true },
 
     // 가속·자이로 원본도 본 화면에 둔다. 힐과 트림이 여기서 나오고, 파도와
     // 태킹이 그대로 보인다. 100 Hz 로 기록하는 이유가 이 두 줄이다.
