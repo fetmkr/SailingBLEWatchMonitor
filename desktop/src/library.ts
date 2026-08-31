@@ -88,6 +88,8 @@ export interface Entry {
 export interface Library {
   version: 1;
   entries: Entry[];
+  /** 마지막으로 보던 세션. 앱을 껐다 켜면 이걸 다시 연다. 없으면 빈 화면. */
+  lastOpen?: string;
 }
 
 const EMPTY: Library = { version: 1, entries: [] };
@@ -173,7 +175,8 @@ export async function put(
   entries.push(entry);
   entries.sort((a, b) => (b.utcStart || b.fetchedAt) - (a.utcStart || a.fetchedAt));
 
-  const next: Library = { version: 1, entries };
+  // 새로 받은 것이 곧 보고 있는 것이다. lastOpen 을 여기서 옮겨 둔다.
+  const next: Library = { version: 1, entries, lastOpen: id };
   await save(next);
   return { lib: next, entry };
 }
@@ -210,6 +213,14 @@ export async function hasFile(e: Entry): Promise<boolean> {
  *   0.3초 뒤에 한 번만 한다.
  */
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 지금 보고 있는 세션을 적어 둔다. 앱을 껐다 켜면 이걸 다시 연다. */
+export function noteOpen(lib: Library, id: string | null): Library {
+  if (lib.lastOpen === (id ?? undefined)) return lib;
+  lib.lastOpen = id ?? undefined;
+  void save(lib);
+  return lib;
+}
 
 export function update(lib: Library, id: string, patch: Partial<Entry>): Library {
   const e = lib.entries.find((x) => x.id === id);

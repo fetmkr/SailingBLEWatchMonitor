@@ -1580,6 +1580,7 @@ async function openEntry(id: string) {
   }
   setStatus("읽는 중…");
   openId = id;
+  library = lib.noteOpen(library, id);   // 앱을 껐다 켜면 이걸 다시 연다
   const s2 = loadBytes(await lib.readEntry(e), e.title || e.sailor || e.file);
   // 예전에 0 으로 적어 둔 항목이면 지금 되찾은 값으로 고쳐 준다.
   // 다시 받을 필요가 없다 — 원본은 이미 보관함에 있다.
@@ -3270,7 +3271,26 @@ setStatus("파일을 열거나 보드에서 받으세요.");
 // 답이 늦게 와도 앱은 이미 떠 있다. 오면 그때 화면만 다시 맞춘다.
 void plat.load().then(() => { syncBoardBar(); renderSide(); });
 
-lib.load().then((l) => { library = l; renderSide(); });
+lib.load().then(async (l) => {
+  library = l;
+  renderSide();
+
+  // ── 마지막에 보던 세션을 다시 연다 ──
+  //
+  // 앱을 껐다 켜면 빈 화면으로 시작했다. 보관함에 원본이 그대로 있는데도
+  // 사람이 매번 다시 골라야 했다. 코치는 같은 훈련을 하루에도 여러 번 본다.
+  //
+  // 지도까지 같이 돌아온다 — loadBytes 가 refreshMap 을 부르고, 거기서
+  // setTrack → fit 으로 항적에 맞춰 화면이 옮겨 간다.
+  //
+  // 파일이 없어졌으면(사람이 지웠거나 다른 기기) 조용히 넘어간다.
+  // 없는 걸 열려고 오류를 띄우면 켤 때마다 빨간 줄이 뜬다.
+  const id = library.lastOpen;
+  if (!id) return;
+  const e = library.entries.find((x) => x.id === id);
+  if (!e || !(await lib.hasFile(e))) { library = lib.noteOpen(library, null); return; }
+  await openEntry(id);
+});
 
 // 만드는 중에만 밖에서 들여다볼 수 있게 내놓는다. 배포판에는 없다.
 if (import.meta.env.DEV) {
@@ -3279,7 +3299,11 @@ if (import.meta.env.DEV) {
 }
 
 // 만드는 중에는 시험용 데이터를 바로 띄운다. 배포판에서는 안 그런다.
-if (import.meta.env.DEV) loadSample();
+// ★ 마지막에 보던 세션이 있으면 그쪽이 이긴다. 시험용이 덮어쓰면 "껐다 켜도
+//   그대로" 를 만드는 중에 확인할 수가 없다.
+if (import.meta.env.DEV) {
+  void lib.load().then((l) => { if (!l.lastOpen) void loadSample(); });
+}
 
 
 
