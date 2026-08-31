@@ -30,6 +30,7 @@ let fileMarks: number[] = [];
 /** 지도에 그릴 항적. 위성을 잡은 줄만 들어 있다 */
 let track: TrackPoint[] = [];
 /** 파일 요약(줄 수, Hz, IMU 종류…). 정보를 그릴 때마다 다시 넣는다 */
+let lastMagFix: MagFix | null = null;
 let metaHtml = "";
 /**
  * 디버그 값을 보여줄지.
@@ -243,6 +244,77 @@ function sc(name: string, fallback: string): string {
   return v || fallback;
 }
 
+/** 자력계 치우침 재기 결과. 화면에 그대로 보여준다. */
+interface MagFix {
+  off: [number, number, number];
+  before: number;   // 빼기 전 세기 흔들림 (µT)
+  after: number;    // 빼고 나서
+  field: number;    // 빼고 나서 세기 평균 (µT). 한국은 약 50
+  use: boolean;     // 좋아졌을 때만 쓴다
+}
+
+/**
+ * 자력계 값들에 **구를 맞춰** 치우침을 구한다.
+ *
+ * 자세도 COG 도 안 쓴다. 자력계 값만 쓴다. 배가 이리저리 흔들릴수록 잘
+ * 구해진다 — 한 자세로만 있으면 못 구한다.
+ */
+function fitHardIron(nav: hlog.NavRecord[]): MagFix {
+  // 자력계 축을 가속도 축에 맞춘 값으로 본다 (MPU-9250 은 둘이 다르다)
+  const m: [number, number, number][] = [];
+  for (const r of nav) {
+    if (r.mag[0] === 0 && r.mag[1] === 0 && r.mag[2] === 0) continue;
+    m.push([r.mag[1], r.mag[0], -r.mag[2]]);
+  }
+  const none: MagFix = { off: [0, 0, 0], before: 0, after: 0, field: 0, use: false };
+  if (m.length < 200) return none;
+
+  const spread = (c: [number, number, number]) => {
+    let s1 = 0, s2 = 0;
+    for (const v of m) {
+      const d = Math.hypot(v[0] - c[0], v[1] - c[1], v[2] - c[2]);
+      s1 += d; s2 += d * d;
+    }
+    const mean = s1 / m.length;
+    return { mean, sd: Math.sqrt(Math.max(0, s2 / m.length - mean * mean)) };
+  };
+
+  // 가운데를 옮겨 가며 |m - c| 가 제일 고르게 되는 자리를 찾는다 (최소제곱 구)
+  const n = m.length;
+  const mx = m.reduce((a, v) => a + v[0], 0) / n;
+  const my = m.reduce((a, v) => a + v[1], 0) / n;
+  const mz = m.reduce((a, v) => a + v[2], 0) / n;
+  const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const b = [0, 0, 0];
+  for (const v of m) {
+    const x = v[0] - mx, y = v[1] - my, z = v[2] - mz;
+    const q = x * x + y * y + z * z;
+    A[0][0] += x * x; A[0][1] += x * y; A[0][2] += x * z;
+    A[1][1] += y * y; A[1][2] += y * z; A[2][2] += z * z;
+    b[0] += q * x; b[1] += q * y; b[2] += q * z;
+  }
+  A[1][0] = A[0][1]; A[2][0] = A[0][2]; A[2][1] = A[1][2];
+  const M = A.map((row, k) => [...row, b[k]]);
+  for (let col = 0; col < 3; col++) {
+    let piv = col;
+    for (let r = col; r < 3; r++) if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+    [M[col], M[piv]] = [M[piv], M[col]];
+    if (Math.abs(M[col][col]) < 1e-9) return none;   // 못 푼다 (한 자세로만 있었다)
+    for (let r = 0; r < 3; r++) {
+      if (r === col) continue;
+      const f = M[r][col] / M[col][col];
+      for (let c2 = col; c2 < 4; c2++) M[r][c2] -= f * M[col][c2];
+    }
+  }
+  const off: [number, number, number] = [
+    M[0][3] / M[0][0] / 2 + mx, M[1][3] / M[1][1] / 2 + my, M[2][3] / M[2][2] / 2 + mz,
+  ];
+  const b0 = spread([0, 0, 0]), b1 = spread(off);
+  // 좋아졌고, 세기가 지구 자기장 근처(25~75 µT)일 때만 쓴다
+  const use = b1.sd < b0.sd * 0.7 && b1.mean > 25 && b1.mean < 75;
+  return { off, before: b0.sd, after: b1.sd, field: b1.mean, use };
+}
+
 function buildSeries(s: hlog.Session) {
   const t0 = s.imu.length ? s.imu[0].ms : s.nav.length ? s.nav[0].ms : 0;
 
@@ -260,6 +332,27 @@ function buildSeries(s: hlog.Session) {
   fileMarks = [];
   track = [];
   let imuAt = 0;   // 방위 계산이 쓰는 가속도 줄 짚개
+
+  // ── 자력계 치우침(하드아이언)을 구한다 ─────────────────────────────
+  //
+  // 자력계 옆에 쇠붙이나 전류가 있으면 **늘 같은 크기의 자기장이 얹힌다.**
+  // 지구 자기장 위에 상수가 더해진 것이다. 자세와는 아무 상관 없다.
+  //
+  // 짐작으로 빼면 안 되지만, **검사할 수 있다.** 지구 자기장 세기는 자세와
+  // 무관하게 일정하다 (한국 약 50 µT). 그러니 어떻게 돌리든 자력계가 재는
+  // 크기가 일정해야 한다. 안 일정하면 상수가 얹혀 있다는 뜻이고, 어떤 상수를
+  // 빼서 일정해지면 그게 그 상수다.
+  //
+  // 세션 27 실측:
+  //   빼기 전   세기 평균 58.2 µT · 흔들림 5.5 µT   ← 너무 크고 들쭉날쭉
+  //   빼고 나서 세기 평균 46.0 µT · 흔들림 1.0 µT   ← 50 에 가깝고 일정해졌다
+  //
+  // ★ 좋아졌을 때만 쓴다. 나빠지면 안 뺀다. 그리고 그 숫자를 화면에 남겨서
+  //   사람이 믿을지 말지 볼 수 있게 한다.
+  const magFix = fitHardIron(s.nav);
+  lastMagFix = magFix;
+
+  
   for (let i = 0; i < s.nav.length; i++) {
     const r = s.nav[i];
     navX[i] = r.ms - t0;
@@ -332,7 +425,9 @@ function buildSeries(s: hlog.Session) {
       } else {
         const gx = a.acc[0] / g, gy = a.acc[1] / g, gz = a.acc[2] / g;
         // 자력계 축을 가속도계 축에 맞춘다
-        const mx = r.mag[1], my = r.mag[0], mz = -r.mag[2];
+        const mx = r.mag[1] - (magFix.use ? magFix.off[0] : 0);
+        const my = r.mag[0] - (magFix.use ? magFix.off[1] : 0);
+        const mz = -r.mag[2] - (magFix.use ? magFix.off[2] : 0);
         // 중력 방향 성분을 빼서 수평면에 눕힌다
         const dot = mx * gx + my * gy + mz * gz;
         const hx = mx - dot * gx, hy = my - dot * gy, hz = mz - dot * gz;
@@ -429,6 +524,29 @@ function buildSeries(s: hlog.Session) {
   const imuX = new Float64Array(s.imu.length);
   const heel = new Float32Array(s.imu.length);
   const pitch = new Float32Array(s.imu.length);
+  const heelComp = new Float32Array(s.imu.length);
+  const pitchComp = new Float32Array(s.imu.length);
+
+  // ── 힐·트림 comp — 세로축을 데이터가 고르게 한다 ──────────────────────
+  //
+  // 머리글은 힐·트림 축을 **박아 둔다.** 박스가 다르게 놓이면 그 축이 세로가
+  // 되어 버리는데, 세로축으로는 기울기를 못 잰다 (늘 ±90도 근처다).
+  //
+  // 그래서 중력이 제일 많이 걸린 축을 세로로 보고, **나머지 두 축**으로 기울기를
+  // 잰다. 방위에서 가속도로 수평면을 구한 것과 같은 생각이다.
+  //
+  // ★ "수평이 어디냐" 는 정하지 않는다. 요트는 한쪽으로 기울어 있는 때가
+  //   많아서 평균을 0 으로 잡으면 기울어 있는 것을 평평하다고 말하게 된다.
+  //   기준각은 사람이 잔잔할 때 "지금이 수평" 을 눌러 정해야 한다.
+  //   지금은 박스가 비뚤게 놓인 만큼이 그대로 값에 남는다. 그건 사실이다.
+  let upAxis = 2;
+  {
+    const sum = [0, 0, 0];
+    for (const r of s.imu) { sum[0] += r.acc[0]; sum[1] += r.acc[1]; sum[2] += r.acc[2]; }
+    upAxis = sum.map(Math.abs).indexOf(Math.max(...sum.map(Math.abs)));
+  }
+  // 세로축을 뺀 나머지 둘. 앞의 것을 힐, 뒤의 것을 트림으로 본다.
+  const tiltAx = [0, 1, 2].filter((k) => k !== upAxis);
   const gx = new Float32Array(s.imu.length);
   const gy = new Float32Array(s.imu.length);
   const gz = new Float32Array(s.imu.length);
@@ -446,6 +564,8 @@ function buildSeries(s: hlog.Session) {
     const mag = Math.hypot(ax, ay, az_) || 1;
     heel[i] = (Math.asin(clamp((hSign * a[hAxis]) / mag)) * 180) / Math.PI - hOff;
     pitch[i] = (Math.asin(clamp((pSign * a[pAxis]) / mag)) * 180) / Math.PI - pOff;
+    heelComp[i] = (Math.asin(clamp(a[tiltAx[0]] / mag)) * 180) / Math.PI;
+    pitchComp[i] = (Math.asin(clamp(a[tiltAx[1]] / mag)) * 180) / Math.PI;
     gx[i] = r.gyr[0]; gy[i] = r.gyr[1]; gz[i] = r.gyr[2];
     ax_[i] = ax; ay_[i] = ay; az[i] = az_;
   }
@@ -493,9 +613,11 @@ function buildSeries(s: hlog.Session) {
       color: sc("cog", "#77d4e8"), xs: navX, ys: cog, limit: [0, 360],
       alt: { ys: cogCal, name: n("COG cal", "COG from position (5s)"), tag: "cal" } },
     { code: "HEEL",  name: n("HEEL", "Heel"), unit: "deg",
-      color: sc("heel", "#ff7a59"), xs: imuX, ys: heel, zeroCentered: true },
+      color: sc("heel", "#ff7a59"), xs: imuX, ys: heel, zeroCentered: true,
+      alt: { ys: heelComp, name: n("HEEL comp", "Heel (axis picked)"), tag: "comp" } },
     { code: "TRIM",  name: n("TRIM", "Trim"), unit: "deg",
-      color: sc("trim", "#ffc857"), xs: imuX, ys: pitch, zeroCentered: true },
+      color: sc("trim", "#ffc857"), xs: imuX, ys: pitch, zeroCentered: true,
+      alt: { ys: pitchComp, name: n("TRIM comp", "Trim (axis picked)"), tag: "comp" } },
 
     // 가속·자이로 원본도 본 화면에 둔다. 힐과 트림이 여기서 나오고, 파도와
     // 태킹이 그대로 보인다. 100 Hz 로 기록하는 이유가 이 두 줄이다.
@@ -690,6 +812,11 @@ function renderHeader(s: hlog.Session, name: string, parseMs: number, bytes: num
   metaHtml = `
     <div class="row"><b>${name}</b> <span class="dim">${(bytes / 1048576).toFixed(2)} MB · ${parseMs.toFixed(0)} ms 만에 읽음</span></div>
     <div class="row">세션 ${h.session} · 모듈 ${h.module} · ${when}</div>
+    ${lastMagFix ? `<div class="row dim">
+      자력계 치우침 ${lastMagFix.use ? "뺐음" : "안 뺌"} ·
+      세기 흔들림 ${lastMagFix.before.toFixed(1)} → ${lastMagFix.after.toFixed(1)} µT ·
+      세기 ${lastMagFix.field.toFixed(0)} µT (한국 약 50)
+    </div>` : ""}
     <div class="row dim">
       NAV ${s.nav.length.toLocaleString()}줄 (${c.navHz?.toFixed(2) ?? "?"} Hz) ·
       IMU ${s.imu.length.toLocaleString()}줄 (${c.imuHz?.toFixed(2) ?? "?"} Hz) ·
