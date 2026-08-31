@@ -180,6 +180,9 @@ function loadBytes(buf: Uint8Array, name: string): hlog.Session | null {
     setStatus(`읽을 수 없습니다 — ${e}`, "bad");
     return null;
   }
+  // 못 닫힌 파일이면 세션 길이·줄 수·첫 fix 시각이 전부 0 이다. 줄에서 되찾는다.
+  // 안 하면 목록에 "NAV 0줄 · 시각 없음" 으로 떠서 빈 세션처럼 보인다.
+  hlog.recoverHeader(s);
   const ms = performance.now() - t0;
 
   session = s;
@@ -1577,7 +1580,15 @@ async function openEntry(id: string) {
   }
   setStatus("읽는 중…");
   openId = id;
-  loadBytes(await lib.readEntry(e), e.title || e.sailor || e.file);
+  const s2 = loadBytes(await lib.readEntry(e), e.title || e.sailor || e.file);
+  // 예전에 0 으로 적어 둔 항목이면 지금 되찾은 값으로 고쳐 준다.
+  // 다시 받을 필요가 없다 — 원본은 이미 보관함에 있다.
+  if (s2 && (e.navRows !== s2.header.navRows || e.utcStart !== s2.header.utcStart)) {
+    library = lib.update(library, id, {
+      navRows: s2.header.navRows, imuRows: s2.header.imuRows,
+      durationS: s2.header.durationS, utcStart: s2.header.utcStart,
+    });
+  }
   rebuildMarks();
   renderSide();
   renderDetails();

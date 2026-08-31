@@ -88,6 +88,52 @@ export interface NavRecord {
   mag: [number, number, number];   // µT
 }
 
+/**
+ * 못 닫힌 파일의 머리글을 **줄에서 되찾는다.**
+ *
+ * 세션 길이·줄 수·첫 fix 시각은 `stop()` 이 세션을 닫으면서 채운다. 전원이
+ * 갑자기 끊기면 그 자리까지 못 가서 전부 0 으로 남는다. 그러면 보관함 목록에
+ * "NAV 0줄 · 시각 없음" 으로 뜨고 빈 세션처럼 보인다.
+ *
+ * 그런데 **값은 파일 안에 다 있다.** 2026-08-30 세션 27 이 그랬다 —
+ * 머리글은 0 인데 안에는 NAV 17,441줄이 fix 까지 붙어 들어 있었다.
+ *
+ * 그래서 비어 있는 칸만 줄에서 채운다. 채워져 있는 칸은 안 건드린다.
+ * `closed` 는 그대로 false 로 둔다 — 정말로 못 닫힌 파일이고, 그건 사실이다.
+ *
+ * 시각은 보드의 `rec check` 와 같은 규칙이다. **fix 가 선 줄만 믿는다** —
+ * 위성을 못 잡아도 수신기가 시각 칸을 채워 보내는 때가 있고, 그 값을 쓰면
+ * 1999년 같은 지어낸 날짜가 나온다.
+ */
+export function recoverHeader(s: Session): boolean {
+  const h = s.header;
+  let did = false;
+
+  if (!h.navRows && s.nav.length) { h.navRows = s.nav.length; did = true; }
+  if (!h.imuRows && s.imu.length) { h.imuRows = s.imu.length; did = true; }
+
+  if (!h.durationS) {
+    const first = s.imu[0]?.ms ?? s.nav[0]?.ms;
+    const last = s.imu[s.imu.length - 1]?.ms ?? s.nav[s.nav.length - 1]?.ms;
+    if (first !== undefined && last !== undefined && last > first) {
+      h.durationS = Math.round((last - first) / 1000);
+      did = true;
+    }
+  }
+
+  if (!h.utcStart) {
+    for (const r of s.nav) {
+      if (!r.fix || r.week === null || r.itow === null) continue;
+      // GPS 원점 1980-01-06 = UNIX 315964800. 윤초는 안 뺀다 (time_ref=1 과 같은 규칙).
+      h.utcStart = 315964800 + r.week * 604800 + Math.floor(r.itow / 1000);
+      h.utcStartMs = r.itow % 1000;
+      did = true;
+      break;
+    }
+  }
+  return did;
+}
+
 export interface ImuRecord {
   ms: number;
   acc: [number, number, number];   // g
