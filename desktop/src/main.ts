@@ -294,6 +294,43 @@ function buildSeries(s: hlog.Session) {
     }
   }
 
+  // ── SOG Cal — 위치로 잰 속도 ────────────────────────────────────────
+  //
+  // 왜 필요한가. 수신기가 **저속에서 속도를 0 으로 뭉갠다.** 2026-08-30
+  // 세션 27 에서 1노트 아래가 통째로 0 이었다 (1노트 위는 하나도 안 틀렸다).
+  // 그때도 배는 0.24~0.62 kts 로 움직이고 있었다. 위치는 멀쩡히 들어온다.
+  //
+  // 창을 5초로 잡은 근거 — 세션 27 로 재봤다.
+  //
+  //   창     정박 때 흔들림   도플러와 차이 (1.5kn 위, 중앙값)
+  //    2초      0.15 kn            0.19 kn
+  //    5초      0.16 kn            0.13 kn     ← 제일 잘 맞는다
+  //   10초      0.17 kn            0.15 kn
+  //   30초      0.22 kn            0.27 kn
+  //   60초      0.29 kn            0.51 kn
+  //
+  // 길게 잡을수록 나빠진다. 배가 돌면 두 점을 잇는 직선이 실제로 간 거리보다
+  // 짧아진다. 흔들림이 0.16 kn 이라 0.2 kn 대는 겨우 가른다 — **이 값은
+  // 도플러를 대신하는 값이 아니라 도플러가 0 일 때 견주는 값이다.**
+  const sogCal = new Float32Array(s.nav.length).fill(NaN);
+  {
+    const WIN_MS = 5000;
+    const M_LAT = 111320;            // 위도 1도의 미터
+    let j = 0;
+    for (let i = 0; i < s.nav.length; i++) {
+      const b = s.nav[i];
+      if (b.lat === null || b.lon === null) continue;
+      while (j < i && b.ms - s.nav[j].ms > WIN_MS) j++;
+      const a = s.nav[j];
+      if (a.lat === null || a.lon === null) continue;
+      const dt = (b.ms - a.ms) / 1000;
+      if (dt < 2.5) continue;        // 창이 반도 안 찼으면 값을 안 만든다
+      const mLon = M_LAT * Math.cos(a.lat * Math.PI / 180);
+      const dx = (b.lon - a.lon) * mLon, dy = (b.lat - a.lat) * M_LAT;
+      sogCal[i] = Math.hypot(dx, dy) / dt * 1.943844;
+    }
+  }
+
   // 힐·피치를 어느 축에서 봤나. 머리글에 적혀 있다 (hlog.h 의 표).
   const hAxis = s.header.heelAxis, pAxis = s.header.pitchAxis;
   const hSign = s.header.heelSign ? -1 : 1;
@@ -337,6 +374,9 @@ function buildSeries(s: hlog.Session) {
   const main: tl.Series[] = [
     { code: "SOG",   name: n("SOG", "Speed Over Ground"), unit: "kn",
       color: sc("sog", "#4ea1ff"), xs: navX, ys: sog },
+    // 위치로 잰 속도. 수신기가 저속을 0 으로 뭉갤 때 이것만 살아 있다.
+    { code: "SOGC",  name: n("SOG Cal", "SOG from position (5s)"), unit: "kn",
+      color: sc("sogcal", "#7bd48f"), xs: navX, ys: sogCal },
     { code: "HDG",   name: n("HDG", "Heading"), unit: "deg",
       color: sc("hdg", "#ffd166"), xs: navX, ys: hdg },
     { code: "COG",   name: n("COG", "Course Over Ground"), unit: "deg",

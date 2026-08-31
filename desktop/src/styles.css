@@ -37,6 +37,7 @@
      세 축은 "계기판" 판과 같은 규칙이다 — X 빨강, Y 초록, Z 파랑.
      3차원 축을 그릴 때 세상이 쓰는 규칙이라 따로 외울 게 없다. */
   --s-sog: #00c853;  --s-hdg: #ffab00;  --s-cog: #00b8d4;
+  --s-sogcal: #7bd48f;   /* SOG 와 한 짝. 같은 계열로 흐리게 */
   --s-heel: #ff1744; --s-trim: #d500f9;
   --s-accx: #ff1744; --s-accy: #00c853; --s-accz: #2979ff;
   --s-gyrx: #ff1744; --s-gyry: #00c853; --s-gyrz: #2979ff;
@@ -73,6 +74,7 @@
      세 축은 늘 같은 규칙이다 — X 빨강, Y 초록, Z 청록. 가속·자이로·자력계가
      같은 색을 쓰지만 줄이 따로라 헷갈리지 않고, 규칙이 하나라 외우기 쉽다. */
   --s-sog: #00ff00;  --s-hdg: #ffff00;  --s-cog: #00ffff;
+  --s-sogcal: #88ff88;
   --s-heel: #ff0000; --s-trim: #ff00ff;
   --s-accx: #ff0000; --s-accy: #00ff00; --s-accz: #00ffff;
   --s-gyrx: #ff0000; --s-gyry: #00ff00; --s-gyrz: #00ffff;
