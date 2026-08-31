@@ -75,6 +75,10 @@ uint32_t gUtcStart = 0;     // 첫 fix 의 UNIX 시각 (초). 0 이면 아직 �
 uint16_t gUtcStartMs = 0;
 
 TaskHandle_t gWriter = nullptr;
+const char* gBootWhy = "?";
+// 쓰기 실패로 저절로 멈췄다. 메인 루프(healthCheck)가 보고 NVS 표시를 지운다.
+// 코어 0 에서 NVS 를 만지지 않으려고 표식만 세운다.
+volatile bool gFailedStop = false;
 
 bool cardPresent() {
     pinMode(rak::kSdCardDetect, INPUT_PULLUP);
@@ -150,7 +154,7 @@ void writerTask(void*) {
 
         if (w != n) {
             gLastError = "카드 쓰기 실패";
-            gRecording = false; gStopWanted = true;
+            gRecording = false; gStopWanted = true; gFailedStop = true;
             continue;
         }
         gTail = (t + n) % kBufSize;
@@ -181,6 +185,27 @@ uint16_t crc16(const uint8_t* p, size_t n) {
 }
 
 // ── 바깥에서 부르는 것들 ─────────────────────────────────────────────────
+
+namespace {
+void setCutFlag(uint8_t v) {
+    Preferences p;
+    p.begin("sail", false);
+    p.putUChar("rec_on", v);
+    p.end();
+}
+} // namespace
+
+bool cutShort() {
+    Preferences p;
+    p.begin("sail", true);
+    const uint8_t v = p.getUChar("rec_on", 0);
+    p.end();
+    return v == 1;
+}
+
+void clearCutFlag() { setCutFlag(0); }
+
+void noteBootReason(const char* why) { if (why) gBootWhy = why; }
 
 void begin() {
     if (gBuf) return;
@@ -338,6 +363,7 @@ bool start(const Header& h) {
     hdr[kOffPitchSign] = h.pitchSign;
     memcpy(hdr + kOffHeelOff,  &h.heelOff,  4);
     memcpy(hdr + kOffPitchOff, &h.pitchOff, 4);
+    memcpy(hdr + kOffPrevSession, &h.prevSession, 4);
     const uint16_t hcrc = crc16(hdr, 126);
     hdr[126] = (uint8_t)hcrc; hdr[127] = (uint8_t)(hcrc >> 8);
     gBin.write(hdr, sizeof(hdr));
@@ -351,6 +377,7 @@ bool start(const Header& h) {
         gTxt.printf("# GNSS 동역학모델 %u / %u Hz,  IMU %s,  속도는 도플러 원본\n",
                     h.gnssDyn, h.gnssHz,
                     h.imuType == kImuBNO085 ? "BNO085" : "MPU-9250");
+        gTxt.printf("# 이 보드가 지난번에 꺼진 이유: %s\n", gBootWhy);
         gTxt.printf("#\n");
         gTxt.flush();
     }
@@ -365,9 +392,16 @@ bool start(const Header& h) {
     gUtcStart = 0; gUtcStartMs = 0;
     gHead = gTail = 0;
     gStartedMs = millis();
+    gFailedStop = false;
     gRecording = true;
 
+    // ★ 여기서 표시를 세운다. 전원이 끊기면 이게 남아서 다음에 이어 시작한다.
+    setCutFlag(1);
+
     Serial.printf("[LOG] 기록 시작 — %s  (+ %s)\n", gPath, gTxtPath);
+    if (h.prevSession) {
+        Serial.printf("[LOG] 세션 %u 가 끊겨서 이어받았습니다\n", (unsigned)h.prevSession);
+    }
     return true;
 }
 
@@ -390,6 +424,8 @@ void stop() {
 
     gRecording  = false;
     gStopWanted = true;
+    // 사람이 끝낸 것이다. 다음에 켜질 때 이어 시작하면 안 된다.
+    setCutFlag(0);
     const uint32_t t0 = millis();
     while (gStopWanted && millis() - t0 < 15000) delay(10);
 
@@ -664,6 +700,9 @@ void verify(uint32_t session) {
                       (unsigned)nr, (unsigned)ir, (unsigned)dr);
         if (utc) Serial.printf("  첫 fix UTC     %lu\n", (unsigned long)utc);
         else     Serial.println("  첫 fix UTC     없음 (위성을 못 잡은 세션)");
+        uint32_t prev; memcpy(&prev, hdr + kOffPrevSession, 4);
+        if (prev) Serial.printf("  이어받음       세션 %u 가 끊겨서 이어서 찍은 파일입니다\n",
+                                (unsigned)prev);
     }
     Serial.printf("  세션 %u  IMU %s  움직임종류 %u  %u/%u Hz\n",
                   (unsigned)(hdr[18] | (hdr[19] << 8) | (hdr[20] << 16) | ((uint32_t)hdr[21] << 24)),
@@ -673,6 +712,14 @@ void verify(uint32_t session) {
     // 레코드를 훑는다. 한 번에 조금씩 읽어서 램을 아낀다.
     uint32_t nav = 0, imu = 0, bad = 0;
     uint32_t navFirst = 0, navLast = 0, imuFirst = 0, imuLast = 0;
+    // ★ 끊긴 파일에서 시각을 되찾는다.
+    //
+    // 머리글의 첫 fix UTC 는 세션을 닫을 때만 박힌다. 끊기면 0 으로 남고
+    // 이름도 _nosat 인 채로 굳는다. 그런데 **시각은 파일 안에 이미 있다** —
+    // NAV 줄마다 GPS 주차(week)와 주중시각(itow)이 들어 있다.
+    // 실제로 세션 27 이 위성 29개를 잡고도 _nosat 으로 남았다 (2026-08-30).
+    uint32_t firstFixUtc = 0, lastFixUtc = 0;
+    uint32_t fixRows = 0;
     uint32_t prevImuMs = 0;
     uint32_t gap10 = 0, gapOther = 0, gapMax = 0;
     uint8_t  rec[64];
@@ -699,6 +746,24 @@ void verify(uint32_t session) {
         if (t == kTypeNav) {
             if (!nav) navFirst = ms;
             navLast = ms; ++nav;
+            // ★ fix 가 있는 줄만 믿는다.
+            //
+            // 위성을 못 잡았는데도 수신기가 시각 칸을 채워 보내는 때가 있다.
+            // 실측: 실내에서 찍은 세션이 16줄 전부 시각이 있다고 나왔고,
+            // 풀어 보니 1999년이었다 (2026-08-31). 그 값을 쓰면 지어낸 시각을
+            // 보여주게 된다. fix 가 선 줄의 시각만 쓴다.
+            //   NAV 레코드에서 fix 는 오프셋 24 다 (hlog.h 의 표 순서 그대로).
+            uint32_t itow; uint16_t week;
+            memcpy(&itow, rec + 5, 4);
+            memcpy(&week, rec + 9, 2);
+            if (rec[24] != 0 && itow != kItowInvalid && week != kWeekInvalid) {
+                // GPS 시각 → UNIX. 315964800 은 1980-01-06 (GPS 원점).
+                // 윤초는 안 뺀다 — 머리글에 넣는 값과 같은 규칙이다 (time_ref=1).
+                const uint32_t u = 315964800UL + (uint32_t)week * 604800UL + itow / 1000UL;
+                if (!firstFixUtc) firstFixUtc = u;
+                lastFixUtc = u;
+                ++fixRows;
+            }
         } else {
             if (!imu) imuFirst = ms;
             else {
@@ -734,9 +799,147 @@ void verify(uint32_t session) {
                       (unsigned)gap10, (unsigned)gaps,
                       gaps ? 100.0f * gap10 / gaps : 0.0f, (unsigned)gapMax);
     }
+    // 머리글이 비어 있어도 줄 안의 GPS 시각으로 언제 찍은 파일인지 알 수 있다.
+    if (fixRows) {
+        Preferences pz;
+        pz.begin("sail", true);
+        const int32_t tzMin = (int32_t)pz.getInt("tz_min", 540);
+        pz.end();
+        struct tm a, b;
+        const time_t la = (time_t)((int64_t)firstFixUtc + (int64_t)tzMin * 60);
+        const time_t lb = (time_t)((int64_t)lastFixUtc  + (int64_t)tzMin * 60);
+        gmtime_r(&la, &a); gmtime_r(&lb, &b);
+        Serial.printf("  줄에서 찾은 시각 %04d-%02d-%02d %02d:%02d:%02d ~ %02d:%02d:%02d (그 고장 시각)\n",
+                      a.tm_year + 1900, a.tm_mon + 1, a.tm_mday,
+                      a.tm_hour, a.tm_min, a.tm_sec, b.tm_hour, b.tm_min, b.tm_sec);
+        Serial.printf("  위성 잡은 줄   %u / %u\n", (unsigned)fixRows, (unsigned)nav);
+        uint32_t hu; memcpy(&hu, hdr + 24, 4);
+        if (!hu) {
+            Serial.println("  ※ 머리글은 비었는데 줄에는 시각이 있습니다.");
+            Serial.println("     끊긴 파일이라 이름이 _nosat 으로 굳은 것뿐입니다. 값은 멀쩡합니다.");
+        }
+    }
     Serial.printf("  카드 남은 자리 %llu MB\n", (unsigned long long)(freeB / 1048576ULL));
     Serial.println("──────────────────────────────────────────");
     Serial.println(((total == used) && bad == 0 && hok) ? "  ✅ 깨끗합니다" : "  ❌ 문제가 있습니다");
+}
+
+/**
+ * TXT 사본의 끝(또는 앞) 몇 줄을 시리얼로 찍는다.
+ *
+ * 카드를 뽑아 컴퓨터에 꽂을 수 없을 때, **세션이 끊기기 직전에 무슨 일이
+ * 있었는지** 를 볼 수 있는 유일한 길이다. 한 줄에 전압(mV), 그때까지의
+ * 최대 멈춤(ms), 버퍼 최고 사용률(%) 이 다 들어 있다.
+ *
+ * 파일 전체를 램에 올리지 않는다. 끝에서 필요한 만큼만 되짚어 읽는다.
+ */
+void tail(uint32_t session, uint16_t lines, bool head) {
+    if (gRecording) { Serial.println("[꼬리] 기록 중에는 못 합니다. rec off 먼저."); return; }
+    if (!cardPresent()) { Serial.println("[꼬리] 카드가 없습니다."); return; }
+    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
+    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+        Serial.println("[꼬리] 마운트 실패."); return;
+    }
+
+    if (session == 0) {
+        Preferences prefs;
+        prefs.begin("sail", true);
+        session = prefs.getUInt("sess_n", 0);
+        prefs.end();
+    }
+    // 이름 뒤 시각은 닫을 때 바뀔 수 있으니 번호로 찾는다. 옛 파일은 S00001.TXT
+    // 처럼 밑줄이 없다. 둘 다 받는다.
+    char want[16];
+    snprintf(want, sizeof(want), "S%05u", (unsigned)session);
+    char path[80];
+    path[0] = '\0';
+    {
+        File dir = SD.open("/LOGS");
+        while (File e = dir.openNextFile()) {
+            const String nm = e.name();
+            e.close();
+            if (nm.startsWith(want) && nm.endsWith(".TXT")) {
+                snprintf(path, sizeof(path), "/LOGS/%s", nm.c_str());
+                break;
+            }
+        }
+        dir.close();
+    }
+    if (!path[0]) {
+        Serial.printf("[꼬리] 세션 %u 의 TXT 를 못 찾았습니다.\n", (unsigned)session);
+        SD.end(); return;
+    }
+
+    File f = SD.open(path, FILE_READ);
+    if (!f) { Serial.printf("[꼬리] %s 를 못 열었습니다.\n", path); SD.end(); return; }
+
+    const uint32_t total = f.size();
+    Serial.println("──────────────────────────────────────────");
+    Serial.printf("  %s   %u 바이트\n", path, (unsigned)total);
+
+    uint32_t from = 0;
+    if (!head) {
+        // 한 줄이 100바이트를 넘는 일은 없다. 넉넉히 160 으로 잡고 되짚는다.
+        const uint32_t back = (uint32_t)lines * 160;
+        from = (total > back) ? (total - back) : 0;
+        f.seek(from);
+        if (from) f.readStringUntil('\n');   // 잘린 첫 줄은 버린다
+        Serial.printf("  ── 마지막 %u줄 ──\n", (unsigned)lines);
+    } else {
+        Serial.printf("  ── 처음 %u줄 ──\n", (unsigned)lines);
+    }
+
+    uint16_t shown = 0;
+    while (f.available() && shown < (head ? lines : (uint16_t)(lines * 2))) {
+        const String ln = f.readStringUntil('\n');
+        if (!ln.length()) continue;
+        Serial.print("  "); Serial.println(ln);
+        ++shown;
+        if ((shown & 0x0F) == 0) esp_task_wdt_reset();
+    }
+    f.close();
+    SD.end();
+    Serial.println("──────────────────────────────────────────");
+}
+
+bool removeSession(uint32_t session) {
+    if (gRecording) { Serial.println("[지움] 기록 중에는 못 합니다. rec off 먼저."); return false; }
+    if (!session)   { Serial.println("[지움] 번호를 적으세요."); return false; }
+    if (!cardPresent()) { Serial.println("[지움] 카드가 없습니다."); return false; }
+    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
+    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+        Serial.println("[지움] 마운트 실패."); return false;
+    }
+    char want[16];
+    snprintf(want, sizeof(want), "S%05u", (unsigned)session);
+    // 이름 뒤 시각은 세션마다 다르므로 번호로 찾는다. 한 번에 다 모아 놓고
+    // 지운다 — 훑는 도중에 지우면 다음 항목을 건너뛴다.
+    char hit[4][80];
+    int n = 0;
+    {
+        File dir = SD.open("/LOGS");
+        while (File e = dir.openNextFile()) {
+            const String nm = e.name();
+            e.close();
+            if (n < 4 && nm.startsWith(want) &&
+                (nm.endsWith(".HLG") || nm.endsWith(".TXT"))) {
+                snprintf(hit[n], sizeof(hit[n]), "/LOGS/%s", nm.c_str());
+                ++n;
+            }
+        }
+        dir.close();
+    }
+    if (!n) {
+        Serial.printf("[지움] 세션 %u 파일이 없습니다.\n", (unsigned)session);
+        SD.end(); return false;
+    }
+    int ok = 0;
+    for (int i = 0; i < n; ++i) {
+        if (SD.remove(hit[i])) { Serial.printf("  지웠습니다  %s\n", hit[i]); ++ok; }
+        else                   { Serial.printf("  못 지웠습니다 %s\n", hit[i]); }
+    }
+    SD.end();
+    return ok == n;
 }
 
 void listFiles() {
@@ -766,6 +969,13 @@ void listFiles() {
 }
 
 void healthCheck() {
+    // 쓰기가 실패해서 코어 0 이 저절로 멈춘 경우. 카드가 죽은 것이니
+    // 다시 켜서 또 걸어봐야 똑같이 실패한다. 이어시작 표시를 지운다.
+    if (gFailedStop) {
+        gFailedStop = false;
+        setCutFlag(0);
+        Serial.println("[LOG] ★ 카드 쓰기가 실패해 멈췄습니다 — 이어시작은 안 합니다");
+    }
     if (!gRecording) return;
     if (!cardPresent()) {
         Serial.println("[LOG] ★ 기록 중에 카드가 빠졌습니다 — 멈춥니다");

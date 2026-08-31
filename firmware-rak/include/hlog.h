@@ -118,7 +118,18 @@ constexpr size_t kOffHeelSign   = 66;  // U1  0=+ 1=-
 constexpr size_t kOffPitchAxis  = 67;
 constexpr size_t kOffPitchSign  = 68;
 constexpr size_t kOffHeelOff    = 69;  // R4  기준각 (도)
-constexpr size_t kOffPitchOff   = 73;  // R4
+constexpr size_t kOffPitchOff   = 73;
+
+// ── 끊긴 세션을 이어 붙일 실마리 ─────────────────────────────────────────
+//
+// 전원이 갑자기 끊기면 세션이 거기서 끝난다. 다시 켜지면 **새 파일**로
+// 이어서 기록한다 (같은 파일에 붙이면 안 된다 — 레코드의 local_ms 가
+// millis() 라서 다시 켜면 0 부터 시작한다. 한 파일 안에서 시간이 거꾸로 간다).
+//
+// 그래서 새 파일 머리글에 앞 세션 번호를 적는다. 읽는 쪽은 이걸 보고
+// 두 파일이 한 번의 훈련이었다는 걸 안다.
+//   0 이면 사람이 시작한 세션이다.
+constexpr size_t kOffPrevSession = 77;  // U4  이어받은 앞 세션 번호. 0 = 아님  // R4
 
 constexpr uint8_t kImuBNO085  = 0;
 constexpr uint8_t kImuMPU9250 = 1;
@@ -174,6 +185,7 @@ struct Header {
     uint8_t  pitchSign  = 0;
     float    heelOff    = 0.0f;
     float    pitchOff   = 0.0f;
+    uint32_t prevSession = 0;   // 끊긴 세션을 이어받은 경우 그 번호. 0 = 아님
 };
 
 // 한 시점을 눈으로 볼 값 (10초에 한 줄 나가는 텍스트용).
@@ -204,7 +216,20 @@ struct Status {
     const char* lastError = nullptr;
 };
 
+// ── 끊겼는지 표시 ────────────────────────────────────────────────────────
+//
+// start() 가 NVS 에 1 을 적고 stop() 이 0 으로 지운다. 전원이 갑자기 끊기면
+// 지울 틈이 없으므로 1 이 남는다. 다음에 켜질 때 이걸 보고 이어서 시작한다.
+//
+// 카드 쓰기가 실패해서 저절로 멈춘 경우도 stop() 을 안 거치므로, 그때는
+// healthCheck() 가 대신 지운다 (카드가 죽었는데 다시 걸어봐야 또 실패한다).
+bool cutShort();       // 지난번에 기록 중이었는데 못 닫고 끊겼나
+void clearCutFlag();   // 이어시작을 포기할 때 지운다
+
 void begin();                        // setup() 에서 한 번. 쓰기 작업을 띄운다
+// 지난번에 왜 꺼졌는지. 새 세션의 TXT 머리에 적는다. 세션이 끊기면 이유가
+// 램과 함께 날아가므로, **다음 세션 파일에 남겨서** 나중에 찾을 수 있게 한다.
+void noteBootReason(const char* why);
 bool start(const Header& h);
 void stop();
 void writeNav(const NavSample& s);   // 10 Hz
@@ -222,7 +247,14 @@ void healthCheck();                  // 1 Hz. 카드가 빠졌는지 본다
 // 카드를 뽑아 컴퓨터로 옮길 수 없을 때 쓴다. 파이썬 파서와 같은 것을 본다.
 //   session 0 이면 마지막 세션
 void verify(uint32_t session);
+// 세션의 TXT 사본 끝부분을 시리얼로 찍는다. 카드를 못 뽑을 때
+// 마지막 순간의 전압·멈춤·버퍼를 보는 유일한 길이다.
+//   session 0 이면 마지막 세션.  head 를 켜면 앞부분을 본다
+void tail(uint32_t session, uint16_t lines = 20, bool head = false);
 void listFiles();
+// 한 세션의 파일 두 벌(.HLG/.TXT)을 지운다. **되돌릴 수 없다.**
+// 번호를 하나만 받는다 — 한 번에 여러 개를 지우는 길은 일부러 안 만들었다.
+bool removeSession(uint32_t session);
 uint32_t sinceTextMs();
 uint32_t recStartedMs();       // 기록 시작 시각 (화면이 지난 시간을 뽑는다)              // 마지막 텍스트 줄로부터 지난 시간
 

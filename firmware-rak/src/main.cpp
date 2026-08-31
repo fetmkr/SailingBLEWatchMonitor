@@ -216,13 +216,12 @@ static void feedWatchdog();
 //
 // 지금 어느 핀을 전원 스위치로 쓰고 있는지. 0 이면 끈 상태.
 // 문서끼리 값이 어긋나므로(board_rak.h 참고) 실기기에서 판정하고 NVS 에 남긴다.
-// ── 움직임 종류 번갈아 재기 (`ab` 명령) ─────────────────────────────────
+// 우리가 걸어 두기로 정한 GPS 움직임 종류 (NVS 의 gps_dyn). 255 = 정한 적 없음.
 //
-// 두 모드를 따로 나가서 재면 바람도 위성도 달라서 견줄 수가 없다.
-// 같은 자리에서 몇 초씩 번갈아 걸면 조건이 거의 같아진다.
-// 0 이면 꺼져 있다.
-static uint16_t gAbSec  = 0;
-static uint32_t gAbNext = 0;
+// 모듈에 실제로 걸린 값(gGpsDyModel)이 이것과 다르면 화면에 띄운다.
+// 2026-08-30 세션 27 이 이 값을 정해 두지 않아 모듈 기본값 0(휴대)으로 돌아갔고,
+// 29분 내내 속도가 0.00 kn 으로 찍혔다. 물 위에서는 화면 말고 볼 것이 없다.
+static uint8_t gGpsDynWant = 255;
 
 static int gSensorPowerPin = rak::kSensorPowerA;
 
@@ -297,7 +296,7 @@ static void loadSettings() {
     gHdgSignA       = gPrefs.getChar("hdg_sa", 1) < 0 ? -1.0f : 1.0f;
     gHdgSignB       = gPrefs.getChar("hdg_sb", 1) < 0 ? -1.0f : 1.0f;
     gHdgOffsetDeg   = gPrefs.getFloat("hdg_off", 0.0f);
-    gAbSec          = gPrefs.getUShort("ab_sec", 0);
+    gGpsDynWant     = gPrefs.getUChar("gps_dyn", 255);
     gDampLevel      = gPrefs.getUChar("damp", 2);
     gDeadbandKn     = gPrefs.getFloat("dead_kn", 0.10f);
     gGyrOffX        = gPrefs.getFloat("gyr_x", 0.0f);
@@ -1332,30 +1331,6 @@ static void gpsNavPv(int samples) {
 //   B13 staticHoldTh   정지로 볼 속도
 //
 // ★ ACK 가 왔다고 믿지 않는다. 반드시 되읽어서 값이 바뀌었는지 확인한다.
-/**
- * 조용히 움직임 종류만 바꾼다. 번갈아 재기(`ab`)가 10초마다 부른다.
- *
- * 시끄러운 판(gpsCfgSetNavx)을 그대로 쓰면 화면이 열 줄씩 덮여서 정작 봐야 할
- * 속도가 안 보인다. 바꾼 결과는 심장박동 줄의 b/p 한 글자로 알린다.
- *
- * NVS 에도 안 적는다. 시험이 끝나면 마지막에 걸린 값이 남을 뿐, 그걸 다음
- * 부팅까지 끌고 갈 이유가 없다.
- */
-static bool gpsSetModelQuiet(uint8_t model) {
-    uint8_t  p[44];
-    uint16_t len = 0;
-    if (!casicQuery(0x06, 0x07, p, sizeof(p), &len) || len < 44) return false;
-    const uint32_t mask = (1UL << 0);
-    memcpy(p + 0, &mask, 4);
-    p[4] = model;
-    casicSend(0x06, 0x07, p, 44);
-    delay(120);
-    if (casicQuery(0x06, 0x07, p, sizeof(p), &len) && len >= 44) {
-        gGpsDyModel = p[4];
-        return p[4] == model;
-    }
-    return false;
-}
 
 static void gpsCfgSetNavx(bool setModel, uint8_t model,
                           bool setStatic, float staticTh) {
@@ -1394,9 +1369,28 @@ static void gpsCfgSetNavx(bool setModel, uint8_t model,
             // 밖에서 노트북 없이 쓰려면 껐다 켜도 유지돼야 한다.
             // 보드에 적어 두고 부팅할 때마다 다시 건다.
             if (setModel) {
+                // ★ 여닫지 않으면 안 적힌다.
+                //
+                // 여기만 begin/end 가 빠져 있었다. Preferences 는 닫힌 손잡이에
+                // 써도 아무 말 없이 실패한다. 그래서 "적어 뒀습니다" 라고
+                // 말해 놓고 실제로는 안 적혔다. 2026-08-28 에 4(선박)로 걸어
+                // 뒀다고 적었는데, 8/30 세션 27·28 이 모듈 기본값 0(휴대)으로
+                // 돌아가 29분치 속도를 통째로 0 으로 잃었다.
+                gPrefs.begin("sail", false);
                 gPrefs.putUChar("gps_dyn", model);
+                gPrefs.end();
                 gGpsDyModel = model;
-                Serial.println("  보드에 적어 뒀습니다. 껐다 켜도 이 모드로 다시 겁니다.");
+                gGpsDynWant = model;   // 화면 경고의 기준도 같이 옮긴다
+                // 말만 하지 않는다. 되읽어서 진짜 적혔는지 보고 말한다.
+                gPrefs.begin("sail", true);
+                const uint8_t back = gPrefs.getUChar("gps_dyn", 255);
+                gPrefs.end();
+                if (back == model) {
+                    Serial.println("  보드에 적어 뒀습니다. 껐다 켜도 이 모드로 다시 겁니다.");
+                } else {
+                    Serial.printf("  ★ 보드에 못 적었습니다 (되읽으니 %u). 껐다 켜면 돌아갑니다.\n",
+                                  back);
+                }
             }
         } else {
             Serial.println("  ★ ACK 는 왔는데 값이 안 바뀌었습니다 — 이 칩은 이 항목을 안 받습니다");
@@ -2120,7 +2114,7 @@ static bool     gBtnDown     = false;  // 튐을 걷어낸 값
 static uint32_t gBtnDownAt   = 0;
 static bool     gBtnLongDone = false;  // 길게가 이미 먹었나 (떼면서 또 먹지 않게)
 
-static bool logStartNow();             // 아래 "기록 (hlog)" 항목
+static bool logStartNow(uint32_t prevSession = 0);  // 아래 "기록 (hlog)" 항목
 
 static void buttonBegin() {
     pinMode(kButtonPin, INPUT_PULLUP);
@@ -2304,8 +2298,9 @@ static void logWriteText(uint32_t nowMs) {
     hlog::writeText(buildNav(nowMs), t);
 }
 
-bool logStartNow() {
+bool logStartNow(uint32_t prevSession) {
     hlog::Header h;
+    h.prevSession = prevSession;
     esp_read_mac(h.mac, ESP_MAC_WIFI_STA);
     h.fwVersion = 0x0100;
     h.hwRev     = 1;
@@ -2398,6 +2393,38 @@ static bool gWatchdogOn = false;
 
 static void feedWatchdog() {
     if (gWatchdogOn) esp_task_wdt_reset();
+}
+
+// ── 지난번에 왜 다시 켜졌나 ──────────────────────────────────────────────
+//
+// 2026-08-30 세션 27 이 29분 만에 그 자리에서 끊겼다. 전압 3.96V 평평,
+// 버퍼 3%, 버린 줄 0, 마지막까지 10 ms 등간격 — 전원도 카드도 워치독도
+// 아니었다. 그런데 **왜 끊겼는지를 알 방법이 없었다.** 이유가 램에 있다가
+// 같이 날아갔기 때문이다.
+//
+// 칩은 그 이유를 RTC 영역에 남겨 둔다. 켤 때 읽어서 찍어 둔다.
+//   POWERON   전원이 실제로 끊겼다 (배터리 커넥터·USB 접촉)
+//   BROWNOUT  전압이 순간 내려앉았다
+//   PANIC     코드가 죽었다 (Guru Meditation)
+//   TASK_WDT / INT_WDT  워치독이 물었다
+//   SW / SW_CPU  다시 굽거나 reset 명령
+static const char* gResetWhy = "?";
+
+static void reportResetReason() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:  gResetWhy = "POWERON 전원이 새로 들어왔다"; break;
+        case ESP_RST_BROWNOUT: gResetWhy = "BROWNOUT ★ 전압이 내려앉았다"; break;
+        case ESP_RST_PANIC:    gResetWhy = "PANIC ★ 코드가 죽었다"; break;
+        case ESP_RST_TASK_WDT: gResetWhy = "TASK_WDT ★ 워치독이 물었다"; break;
+        case ESP_RST_INT_WDT:  gResetWhy = "INT_WDT ★ 인터럽트 워치독"; break;
+        case ESP_RST_WDT:      gResetWhy = "WDT ★ 워치독"; break;
+        case ESP_RST_SW:       gResetWhy = "SW 소프트웨어가 다시 켰다"; break;
+        case ESP_RST_DEEPSLEEP:gResetWhy = "DEEPSLEEP 깊은잠에서 깼다"; break;
+        case ESP_RST_EXT:      gResetWhy = "EXT 바깥에서 리셋"; break;
+        default:               gResetWhy = "UNKNOWN 알 수 없음"; break;
+    }
+    Serial.printf("[BOOT] 지난번 꺼진 이유 — %s\n", gResetWhy);
+    hlog::noteBootReason(gResetWhy);
 }
 
 static void watchdogBegin() {
@@ -2832,6 +2859,8 @@ static void printHelp() {
     Serial.println("  sdbench [줄수] SD 쓰기 속도·최대 멈춤 실측 (기본 3600줄)");
     Serial.println("  rec           ★ 기록 상태. rec on / rec off / rec mark");
     Serial.println("  rec ls / rec check [번호]   파일 목록 / 되읽어 검사");
+    Serial.println("  rec tail [번호] [줄수]      TXT 사본 끝줄 (전압·멈춤·버퍼)");
+    Serial.println("  rec rm <번호>               그 세션 파일을 지운다 (못 되돌린다)");
     Serial.println("  pin <번호>    그 GPIO 를 5초 지켜본다 (버튼 달 자리 찾기)");
     Serial.println("  wifi          ★ 기록 파일을 WiFi 로 내보내기. wifi ap / join / off");
     Serial.println("  oled          화면을 나중에 꽂았을 때 다시 붙이기");
@@ -2843,7 +2872,6 @@ static void printHelp() {
     Serial.println("  dead <kn>     잡음 바닥. 이보다 작은 속도는 0 (기본 0.10)");
     Serial.println("  navpv         NMEA 거치기 전 속도를 RMC 와 나란히 (navpv l 은 길게)");
     Serial.println("  gpscfg mode <0~7>  움직임 종류 (0휴대 1정지 2보행 3자동차 4선박)");
-    Serial.println("  ab [초]       선박↔보행을 번갈아 걸며 견준다 (기본 10초, ab off)");
     Serial.println("  gpscfg static <m/s> 정지로 볼 속도 문턱값");
     Serial.println("  nmea <본문>   NMEA 명령을 보내고 응답을 봅니다 (체크섬 자동)");
     Serial.println("  batt          배터리 전압 실측");
@@ -3104,6 +3132,29 @@ static void handleCommand(String line) {
         if (arg == "off" || arg == "stop") { hlog::stop(); return; }
         if (arg == "mark")                 { hlog::mark(); return; }
         if (arg == "ls" || arg == "list")  { hlog::listFiles(); return; }
+        if (arg.startsWith("rm ")) {
+            const long n = arg.substring(3).toInt();
+            hlog::removeSession((uint32_t)(n < 0 ? 0 : n));
+            return;
+        }
+        if (arg.startsWith("tail") || arg.startsWith("head")) {
+            const bool head = arg.startsWith("head");
+            // rec tail            마지막 세션 20줄
+            // rec tail 27         27번 세션 20줄
+            // rec tail 27 60      27번 세션 60줄
+            long sess = 0, n = 20;
+            const int sp = arg.indexOf(' ');
+            if (sp > 0) {
+                const String rest = arg.substring(sp + 1);
+                const int sp2 = rest.indexOf(' ');
+                sess = (sp2 > 0 ? rest.substring(0, sp2) : rest).toInt();
+                if (sp2 > 0) n = rest.substring(sp2 + 1).toInt();
+            }
+            if (n < 1) n = 1;
+            if (n > 400) n = 400;
+            hlog::tail((uint32_t)(sess < 0 ? 0 : sess), (uint16_t)n, head);
+            return;
+        }
         if (arg == "check" || arg.startsWith("check ")) {
             const long n = (arg.length() > 6) ? arg.substring(6).toInt() : 0;
             hlog::verify((uint32_t)(n < 0 ? 0 : n));
@@ -3146,6 +3197,8 @@ static void handleCommand(String line) {
         Serial.println("  rec on / rec off / rec mark");
         Serial.println("  rec ls          카드에 있는 파일 목록");
         Serial.println("  rec check [번호]  보드가 직접 되읽어 검사 (기본: 마지막 세션)");
+        Serial.println("  rec tail [번호] [줄수]  TXT 사본 끝 몇 줄 (rec head 는 앞부분)");
+        Serial.println("  rec rm <번호>     그 세션의 HLG·TXT 를 지운다 (못 되돌린다)");
         return;
     }
 
@@ -3395,35 +3448,6 @@ static void handleCommand(String line) {
     if (line == "navpv")   { gpsNavPv(8);  return; }
     if (line == "navpv l") { gpsNavPv(40); return; }
 
-    // ab [초]  움직임 종류를 번갈아 걸며 속도를 나란히 본다
-    //
-    // 왜 번갈아 하냐면 — 두 모드를 따로 나가서 재면 바람도 위성도 다르다.
-    // 같은 물, 같은 바람에서 10초씩 번갈아 걸면 조건이 거의 같다.
-    // 화면 SOG 옆에 지금 어느 모드인지 한 글자로 찍는다.
-    //
-    //   b  선박(4)   Nautical
-    //   p  보행(2)   Walking
-    if (line == "ab" || line.startsWith("ab ")) {
-        String arg = line.substring(2); arg.trim();
-        if (arg == "off") {
-            gAbSec = 0;
-            gPrefs.begin("sail", false); gPrefs.putUShort("ab_sec", 0); gPrefs.end();
-            Serial.println("[AB] 번갈아 재기 껐습니다. 지금 모드로 그대로 둡니다.");
-            return;
-        }
-        int sec = arg.length() ? arg.toInt() : 10;
-        if (sec < 3)  sec = 3;      // 모드를 걸고 잡히는 데 시간이 든다
-        if (sec > 120) sec = 120;
-        gAbSec  = (uint16_t)sec;
-        gAbNext = millis();          // 다음 loop 에서 바로 첫 전환
-        // 밖에서 USB 를 뺐다 꽂으면 보드가 다시 켜진다. 그때 시험이 꺼지면
-        // 사람은 이유를 모른 채 글자가 사라진 것만 본다. 적어 둔다.
-        gPrefs.begin("sail", false); gPrefs.putUShort("ab_sec", gAbSec); gPrefs.end();
-        Serial.printf("[AB] %d초마다 선박(4) ↔ 보행(2) 를 번갈아 겁니다.\n", sec);
-        Serial.println("     화면 SOG 옆의 b/p 가 지금 걸린 모드입니다. 끄려면 ab off");
-        return;
-    }
-
     // gpscfg mode <0~7>   움직임 종류를 바꾼다 (4=선박, 2=보행, 0=휴대)
     if (line.startsWith("gpscfg mode ")) {
         const int m = line.substring(12).toInt();
@@ -3671,6 +3695,62 @@ static void pollSerial() {
 }
 
 
+// ── 끊긴 기록을 이어서 시작한다 ──────────────────────────────────────────
+//
+// 2026-08-30 세션 27 이 29분 만에 그 자리에서 끊겼다. 카드도 배터리도
+// 멀쩡했고 코어덤프도 안 남았다 — 전원 쪽이 순간 끊긴 것이다. 그때 기록이
+// 통째로 끝나 버렸고, 배 위에서는 아무도 그걸 모른다.
+//
+// 그래서 켜질 때 표시를 보고 스스로 다시 건다. 재는 데 걸리는 시간은
+// 실측으로 켜짐 3.9초 + 기록 시작 0.6초 = **약 4.5초**. 29분 세션의 0.26% 다.
+//
+// ★ 같은 파일에 이어 붙이지 않는다. 레코드의 local_ms 가 millis() 라
+//   다시 켜면 0 부터 시작해서 한 파일 안에서 시간이 거꾸로 간다.
+//   새 파일을 만들고 머리글에 앞 세션 번호를 적어 둔다 (hlog.h kOffPrevSession).
+//
+// ── 되풀이 막이 ──
+// 사람이 전원을 끊은 것과 접점이 튄 것을 보드는 구분하지 못한다. 그래서
+// 무조건 이어 시작하되, 이어 시작한 횟수를 세어 둔다. 연속으로 이만큼
+// 넘으면 뭔가 계속 잘못되고 있는 것이니 멈추고 알린다.
+// 1분 넘게 잘 돌면 세던 것을 0 으로 되돌린다 (아래 loop 안).
+static constexpr uint8_t  kResumeMax   = 5;
+static constexpr uint32_t kResumeOkMs  = 60000;
+
+static uint8_t gResumeTries = 0;   // 0 이면 이어 시작한 게 아니다
+
+static void resumeRecordingIfCut() {
+    if (!hlog::cutShort()) {
+        // 지난번에 제대로 닫혔다. 세던 것도 지운다.
+        gPrefs.begin("sail", false);
+        if (gPrefs.getUChar("rec_try", 0)) gPrefs.putUChar("rec_try", 0);
+        gPrefs.end();
+        return;
+    }
+
+    gPrefs.begin("sail", false);
+    const uint8_t tries = (uint8_t)(gPrefs.getUChar("rec_try", 0) + 1);
+    gPrefs.putUChar("rec_try", tries);
+    const uint32_t prev = gPrefs.getUInt("sess_n", 0);
+    gPrefs.end();
+
+    if (tries > kResumeMax) {
+        Serial.printf("[REC] ★ 이어 시작을 %u번 했는데 계속 끊깁니다 — 멈춥니다.\n", tries - 1);
+        Serial.println("      전원선·배터리 접점을 보세요. rec on 으로 직접 걸 수 있습니다.");
+        hlog::clearCutFlag();
+        gPrefs.begin("sail", false); gPrefs.putUChar("rec_try", 0); gPrefs.end();
+        return;
+    }
+
+    Serial.printf("[REC] 지난 세션 %u 가 못 닫히고 끊겼습니다 — 이어서 시작합니다 (%u번째)\n",
+                  (unsigned)prev, tries);
+    if (logStartNow(prev)) {
+        gResumeTries = tries;
+    } else {
+        hlog::Status st; hlog::getStatus(&st);
+        Serial.printf("[REC] 이어 시작 못 함 — %s\n", st.lastError ? st.lastError : "알 수 없음");
+    }
+}
+
 // ── setup / loop ─────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
@@ -3678,6 +3758,7 @@ void setup() {
 
     // 초기화 도중에 멈추는 경우까지 잡으려면 여기서 먼저 켜야 한다.
     // 실제로 화면 초기화에서 멈춰 아무 로그도 없이 죽은 적이 있다.
+    reportResetReason();
     watchdogBegin();
 
     pinMode(rak::kLedGreen, OUTPUT);
@@ -3756,6 +3837,10 @@ void setup() {
     sailBleStart();
 
     digitalWrite(rak::kLedGreen, HIGH); // 초록 = 살아서 광고 중
+
+    // ★ 제일 마지막에 본다. 지난번에 기록 중 전원이 끊겼으면 스스로 다시 건다.
+    //   센서·카드가 다 올라온 뒤여야 한다.
+    resumeRecordingIfCut();
 }
 
 void loop() {
@@ -3797,6 +3882,14 @@ void loop() {
 
     // 2) 1 Hz — 배터리. ADC 를 16번 재느라 30 ms 쯤 걸려서 자주 하면 손해다.
     //    2.5 MΩ 분압이라 값이 몇 % 씩 흔들린다. 천천히 따라가게 눌러 준다.
+    // 이어 시작한 뒤 1분 넘게 멀쩡히 돌면 「계속 끊긴다」가 아니다. 세던 것을 지운다.
+    if (gResumeTries && hlog::recording() &&
+        now - hlog::recStartedMs() >= kResumeOkMs) {
+        gResumeTries = 0;
+        gPrefs.begin("sail", false); gPrefs.putUChar("rec_try", 0); gPrefs.end();
+        Serial.println("[REC] 이어 시작한 기록이 1분 넘게 멀쩡합니다 — 되풀이 세기를 지웠습니다");
+    }
+
     if (now - lastBatt >= 1000) {
         lastBatt = now;
         const float freshV = readBatteryVolts(nullptr);
@@ -3807,21 +3900,6 @@ void loop() {
         // 사라졌으면 끄고 나머지로 계속 간다. 돌아오면 다시 붙는다.
         checkSensors();
         hlog::healthCheck();
-    }
-
-    // 1d-2) 움직임 종류 번갈아 걸기 (`ab` 명령이 켜 뒀을 때만)
-    //
-    // ★ 기록 중에는 안 바꾼다. 한 파일 안에 두 모드가 섞이면 나중에 그 파일을
-    //   읽을 때 어느 줄이 어느 모드였는지 알 수가 없다. 머리글에는 한 값만
-    //   들어간다. 번갈아 재기는 **화면으로 보는 시험**이다.
-    if (gAbSec && !hlog::recording() && (int32_t)(now - gAbNext) >= 0) {
-        gAbNext = now + (uint32_t)gAbSec * 1000UL;
-        const uint8_t want = (gGpsDyModel == 4) ? 2 : 4;
-        if (!gpsSetModelQuiet(want)) {
-            Serial.printf("[AB] %u 로 못 바꿨습니다. 번갈아 재기를 멈춥니다.\n", want);
-            gAbSec = 0;
-            gPrefs.begin("sail", false); gPrefs.putUShort("ab_sec", 0); gPrefs.end();
-        }
     }
 
     // 1e) 저장 버튼. 사람 손가락이라 자주 볼 필요 없다.
@@ -3917,8 +3995,11 @@ void loop() {
         ds.recSeconds   = ds.recording ? (now - hlog::recStartedMs()) / 1000 : 0;
 
         ds.sogKn      = gLatest.sogKn; // 다듬고 잡음 바닥까지 적용된 값
-        // 번갈아 재기가 켜져 있을 때만 화면에 띄운다. 0 이면 안 그린다.
-        ds.gnssMode   = gAbSec == 0 ? 0 :
+        // ★ 정해 둔 모드와 다를 때만 화면에 띄운다. 같으면 자리를 안 뺏는다.
+        //   모듈은 전원이 오르내리면 기본값 0(휴대)으로 돌아가는데, 그 모드는
+        //   저속을 통째로 0 으로 뭉갠다 (세션 24·25·27 실측). 그때 이 낱말이
+        //   보이면 물 위에서도 알아챈다.
+        ds.gnssMode   = (gGpsDyModel == gGpsDynWant) ? 0 :
             gGpsDyModel == 0 ? 'h' : gGpsDyModel == 1 ? 's' :
             gGpsDyModel == 2 ? 'p' : gGpsDyModel == 3 ? 'c' :
             gGpsDyModel == 4 ? 'b' : '?';
