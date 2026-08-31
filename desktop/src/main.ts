@@ -371,16 +371,19 @@ function buildSeries(s: hlog.Session) {
   //
   // HDG 와 COG 를 붙여 둔다 — 뱃머리가 향한 쪽과 배가 실제로 간 쪽이
   // 다르면 그 차이가 조류나 옆미끄러짐이다.
+  // `limit` 은 그 값이 물리적으로 가질 수 있는 범위다. 없으면 축 여백이
+  // 있을 수 없는 눈금을 만든다 — 속도 칸에 -0.3 kn, 방위 칸에 389 deg.
+  // 속도는 아래만, 방위는 양쪽 다 막는다. 힐·자이로는 음수가 진짜라 안 막는다.
   const main: tl.Series[] = [
     { code: "SOG",   name: n("SOG", "Speed Over Ground"), unit: "kn",
-      color: sc("sog", "#4ea1ff"), xs: navX, ys: sog },
+      color: sc("sog", "#4ea1ff"), xs: navX, ys: sog, limit: [0] },
     // 위치로 잰 속도. 수신기가 저속을 0 으로 뭉갤 때 이것만 살아 있다.
     { code: "SOGC",  name: n("SOG Cal", "SOG from position (5s)"), unit: "kn",
-      color: sc("sogcal", "#7bd48f"), xs: navX, ys: sogCal },
+      color: sc("sogcal", "#7bd48f"), xs: navX, ys: sogCal, limit: [0] },
     { code: "HDG",   name: n("HDG", "Heading"), unit: "deg",
-      color: sc("hdg", "#ffd166"), xs: navX, ys: hdg },
+      color: sc("hdg", "#ffd166"), xs: navX, ys: hdg, limit: [0, 360] },
     { code: "COG",   name: n("COG", "Course Over Ground"), unit: "deg",
-      color: sc("cog", "#77d4e8"), xs: navX, ys: cog },
+      color: sc("cog", "#77d4e8"), xs: navX, ys: cog, limit: [0, 360] },
     { code: "HEEL",  name: n("HEEL", "Heel"), unit: "deg",
       color: sc("heel", "#ff7a59"), xs: imuX, ys: heel, zeroCentered: true },
     { code: "TRIM",  name: n("TRIM", "Trim"), unit: "deg",

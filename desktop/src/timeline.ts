@@ -21,6 +21,16 @@ export interface Series {
   ys: Float32Array;
   /** 세로축을 0 을 가운데 두고 그릴지 (힐·자이로처럼 부호가 있는 값) */
   zeroCentered?: boolean;
+  /**
+   * 이 값이 물리적으로 가질 수 있는 범위. 축이 여기를 넘지 않는다.
+   *
+   * ★ 없으면 **있을 수 없는 눈금**이 찍힌다. 속도 칸에 `-0.3 kn`,
+   *   방위 칸에 `389 deg` 와 `-28.8 deg` 가 나왔다 (2026-08-31).
+   *   축에 위아래로 8% 여백을 주는데, 0~360 이면 그 여백이 28.8 이다.
+   *
+   * 속도는 `[0]` (아래만 막는다), 방위는 `[0, 360]` (양쪽 다 막는다).
+   */
+  limit?: [number] | [number, number];
   /** 접어 두었나. 접힌 줄은 이름만 남기고 자리를 안 쓴다 */
   collapsed?: boolean;
 }
@@ -66,15 +76,31 @@ function bucketize(s: Series, view: View, cols: number): Band {
   return { min, max, has };
 }
 
-function niceRange(lo: number, hi: number, zeroCentered?: boolean): [number, number] {
+function niceRange(lo: number, hi: number, zeroCentered?: boolean,
+                   limit?: [number] | [number, number]): [number, number] {
   if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1];
+
+  // 방위처럼 양쪽이 다 막힌 값은 **늘 그 범위를 통째로** 보여준다.
+  // 데이터에 맞춰 좁히면 세션마다 축이 달라져서 두 세션을 눈으로 못 견준다.
+  if (limit && limit.length === 2) return [limit[0], limit[1]];
+
+  let out: [number, number];
   if (zeroCentered) {
     const m = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
-    return [-m * 1.1, m * 1.1];
+    out = [-m * 1.1, m * 1.1];
+  } else if (hi - lo < 1e-9) {
+    out = [lo - 0.5, hi + 0.5];
+  } else {
+    const pad = (hi - lo) * 0.08;
+    out = [lo - pad, hi + pad];
   }
-  if (hi - lo < 1e-9) return [lo - 0.5, hi + 0.5];
-  const pad = (hi - lo) * 0.08;
-  return [lo - pad, hi + pad];
+
+  // 아래만 막힌 값(속도처럼 음수가 없는 것). 여백이 0 밑으로 못 내려간다.
+  if (limit && limit.length === 1 && out[0] < limit[0]) {
+    out[0] = limit[0];
+    if (out[1] - out[0] < 1e-9) out[1] = out[0] + 1;
+  }
+  return out;
 }
 
 export function formatDuration(ms: number): string {
@@ -528,7 +554,7 @@ export function draw(o: DrawOpts): void {
       if (band.min[c] < lo) lo = band.min[c];
       if (band.max[c] > hi) hi = band.max[c];
     }
-    const [rlo, rhi] = niceRange(lo, hi, s.zeroCentered);
+    const [rlo, rhi] = niceRange(lo, hi, s.zeroCentered, s.limit);
     const yOf = (v: number) => bot - ((v - rlo) / (rhi - rlo)) * rh;
 
     // 0 선
