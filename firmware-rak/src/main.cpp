@@ -2295,6 +2295,9 @@ static void logWriteText(uint32_t nowMs) {
     t.heelDeg  = currentHeelDeg();
     t.pitchDeg = currentPitchDeg();
     t.hdgDeg   = headingDeg();
+    // 1노트 아래에서 어느 길이 살아남는지 보려고 셋을 같이 남긴다 (hlog.h 참고).
+    t.sogPvKn  = (gPvVelValid && gPvSpeedKn >= 0) ? gPvSpeedKn : -1.0f;
+    t.sogPosKn = gSogFromPos;
     hlog::writeText(buildNav(nowMs), t);
 }
 

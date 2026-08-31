@@ -374,6 +374,8 @@ bool start(const Header& h) {
         gTxt.printf("# 바이너리 원본: %s\n", gPath);
         gTxt.printf("# 이 파일은 10초에 한 줄짜리 사본입니다. 눈으로 보는 용입니다.\n");
         gTxt.printf("# 힐·피치·헤딩은 참고값입니다 (가속도에서 뽑음).\n");
+        gTxt.printf("# 속도 세 가지: 앞의 kn=도플러(RMC, 파일에 들어가는 값) "
+                    "· pv=NAV-PV · pos=위치차분\n");
         gTxt.printf("# GNSS 동역학모델 %u / %u Hz,  IMU %s,  속도는 도플러 원본\n",
                     h.gnssDyn, h.gnssHz,
                     h.imuType == kImuBNO085 ? "BNO085" : "MPU-9250");
@@ -561,6 +563,13 @@ void writeText(const NavSample& s, const TextSample& t) {
     else         n += snprintf(line + n, sizeof(line) - n, "힐  ---  피치  ---  ");
     if (t.hdgDeg >= 0) n += snprintf(line + n, sizeof(line) - n, "방위%3.0f  ", t.hdgDeg);
     else               n += snprintf(line + n, sizeof(line) - n, "방위---  ");
+
+    // 속도 세 가지를 나란히. 1노트 아래에서 어느 길이 살아남는지 보려는 것이다.
+    //   dop = 도플러(RMC, 바이너리에 들어가는 값) · pv = NAV-PV · pos = 위치차분
+    if (t.sogPvKn >= 0) n += snprintf(line + n, sizeof(line) - n, "pv%5.2f ", t.sogPvKn);
+    else                n += snprintf(line + n, sizeof(line) - n, "pv --- ");
+    if (t.sogPosKn >= 0) n += snprintf(line + n, sizeof(line) - n, "pos%5.2f ", t.sogPosKn);
+    else                 n += snprintf(line + n, sizeof(line) - n, "pos --- ");
 
     n += snprintf(line + n, sizeof(line) - n, "%umV  ", s.battMv);
 

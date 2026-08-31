@@ -366,16 +366,31 @@ export class TrackMap {
       if (p.lat < s) s = p.lat;
       if (p.lat > n) n = p.lat;
     }
-    // 한 자리에 서 있었으면 넓이가 0 이다. 조금 벌려 준다.
-    if (e - w < 1e-4) { w -= 5e-5; e += 5e-5; }
-    if (n - s < 1e-4) { s -= 5e-5; n += 5e-5; }
-    // 항적에 맞춰 당기되 1해리보다 더 당기지는 않는다.
+    // ── 짧은 항적도 보이게 벌린다 ──
     //
-    // 배가 좁은 자리에서만 돌았거나 시험용 항적처럼 짧으면, 맞추기만 하면
-    // 0.2해리까지 당겨져 주변이 하나도 안 보인다. 어디서 탄 건지 알아볼 수
-    // 없다. 1해리가 훈련 한 판이 들어오는 넓이다. 더 보고 싶으면 손으로 당긴다.
+    // 전에는 `maxZoom: NM1_ZOOM` 으로 1해리보다 더 당기지 못하게 막았다.
+    // 이유는 "너무 당기면 주변이 안 보여 어디서 탄 건지 모른다" 였는데,
+    // 반대쪽으로 너무 갔다. **실측**:
+    //
+    //   2026-08-30 세션 27 의 항적   488 m x 449 m
+    //   1해리 배율에서 지도 칸이 덮는 거리   약 15,000 m
+    //   항적이 차지하는 넓이            가로의 3%     ← 점으로 보인다
+    //
+    // 그래서 배율을 막는 대신 **넓이의 아래쪽만 잡는다.** 항적이 이보다
+    // 작아도 이만큼은 담는다. 항적이 이보다 크면 항적에 그대로 맞춘다.
+    // 한 자리에 떠 있던 세션도 300 m 짜리 그림이 되지 0.2해리로 안 당겨진다.
+    const MIN_SPAN_M = 300;
+    const midLat = (s + n) / 2;
+    const minLatSpan = MIN_SPAN_M / 111320;
+    const minLonSpan = MIN_SPAN_M / (111320 * Math.cos(midLat * Math.PI / 180));
+    if (n - s < minLatSpan) {
+      const pad = (minLatSpan - (n - s)) / 2; s -= pad; n += pad;
+    }
+    if (e - w < minLonSpan) {
+      const pad = (minLonSpan - (e - w)) / 2; w -= pad; e += pad;
+    }
     this.map.fitBounds([[w, s], [e, n]] as LngLatBoundsLike,
-                       { padding: 40, duration: 400, maxZoom: NM1_ZOOM });
+                       { padding: 40, duration: 400 });
   }
 
   resize() { this.map?.resize(); }
