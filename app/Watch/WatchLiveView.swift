@@ -30,7 +30,7 @@ struct WatchLiveView: View {
     /// 지금 보고 있는 페이지. 물 잠금을 걸기 전에 1페이지로 옮기려고 붙잡아 둔다.
     ///
     /// 물 잠금은 화면 터치를 **전부** 막는다. 그래서 3페이지에서 그냥 걸면
-    /// 설정 화면에 갇힌다. 옆으로 못 넘기고, 크라운을 돌리면 잠금이 풀려서
+    /// 설정 화면에 갇힌다. 옆으로 못 넘기고, 크라운을 길게 누르면 잠금이 풀려서
     /// 그것도 길이 아니다. 걸기 직전에 항해 화면으로 옮겨 놓아야 한다.
     @State private var page = 0
 
@@ -165,6 +165,7 @@ private struct DebugPage: View {
 
 private struct MainPage: View {
     @EnvironmentObject private var ble: BLEManager
+    @EnvironmentObject private var session: SessionManager
     /// 손목을 내려 화면이 어두워진 상태 (Always On)
     @Environment(\.isLuminanceReduced) private var isDim
 
@@ -180,6 +181,18 @@ private struct MainPage: View {
         VStack(spacing: 0) {
 
             statusLine
+
+            // 잠겨 있으면 푸는 법을 적어 둔다. 워치는 물방울 아이콘만 그려 주고
+            // 화면을 눌러도 아무 안내가 안 뜬다. 눌러도 안 먹는 이유를 여기서 말해 준다.
+            if session.waterLocked {
+                HStack(spacing: 3) {
+                    Image(systemName: "drop.fill")
+                    Text("크라운 길게 눌러 풀기")
+                }
+                .font(.system(size: isDim ? 11 : 10, weight: .medium))
+                .foregroundStyle(.tint)
+                .padding(.vertical, 1)
+            }
 
             if !ble.hasPinnedModule {
                 Spacer()
@@ -408,13 +421,15 @@ private struct SettingsPage: View {
             } label: {
                 VStack(spacing: 1) {
                     Label("물 잠금", systemImage: "drop.fill").font(.caption2)
-                    Text("항해 화면으로 옮기고 잠급니다")
+                    Text(session.isRunning ? "항해 화면으로 옮기고 잠급니다"
+                                           : "세션이 돌아야 걸립니다")
                         .font(.system(size: 8))
                         .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
+            .disabled(!session.isRunning)
 
             if session.isRunning {
                 Button(role: .destructive) {

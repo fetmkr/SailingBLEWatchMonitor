@@ -45,6 +45,14 @@ final class SessionManager: NSObject, ObservableObject {
     @Published private(set) var startedAt: Date?
     @Published var errorMessage: String?
 
+    /// 물 잠금이 걸려 있나. 워치는 위쪽에 파란 물방울 하나만 그려 주고
+    /// **터치해도 아무 안내가 안 뜬다.** 푸는 법을 알려 주는 건 앱 몫이다.
+    /// 상태가 바뀌었다고 알려 주는 알림도 없어서(WKInterfaceDevice.h 에는
+    /// 읽기 전용 속성 하나뿐이다) 1초마다 되물어본다.
+    @Published private(set) var waterLocked = false
+
+    private var waterTimer: Timer?
+
     /// 무슨 일이 언제 있었는지 남긴다. 앱이 죽었다 살아나도 남아 있어야
     /// "언제 끊겼나" 를 볼 수 있으므로 UserDefaults 에 적는다.
     @Published private(set) var trail: [String] = SessionManager.loadTrail()
@@ -59,6 +67,11 @@ final class SessionManager: NSObject, ObservableObject {
     private static let kRestartMax = 3
 
     var isRunning: Bool { state == .running }
+
+    override init() {
+        super.init()
+        startWaterWatch()
+    }
 
     var elapsedText: String {
         guard let startedAt else { return "--:--" }
@@ -140,14 +153,43 @@ final class SessionManager: NSObject, ObservableObject {
 
     // MARK: 물 잠금 — 세일링용
 
-    /// 켜면 화면 터치가 막히고, 디지털 크라운을 돌려야 풀린다.
-    /// 해제 시 스피커로 물을 빼낸다.
+    /// 켜면 이 셋이 막힌다 — 화면 터치, 손목 튕기기(Wrist Flick), 더블 탭.
+    /// [확인: support.apple.com/en-us/108352]
+    /// 젖은 소매가 화면을 쓸어도, 팔을 뒤집어도 시계로 안 넘어간다.
+    ///
+    /// 푸는 법은 watchOS 9 부터 바뀌었다. **크라운을 길게 누른다** (돌리는 게 아니다).
+    /// 풀 때 스피커로 물을 빼낸다.
+    ///
+    /// 수영·서핑·스쿠버는 워치가 알아서 켜준다. **세일링은 안 켜준다.**
+    /// 그래서 이 단추가 필요하다.
+    ///
+    /// ★ 세션이 돌고 앱이 앞에 있어야만 걸린다. WKInterfaceDevice.h 에 그렇게 적혀 있다.
+    ///   "Only an application which is in an active workout or location session
+    ///    and is foreground is allowed to enable water lock"
+    ///   세션이 없으면 눌러도 조용히 아무 일도 안 일어난다. 그래서 단추를 잠가 둔다.
     func enableWaterLock() {
         WKInterfaceDevice.current().enableWaterLock()
+        note("물 잠금 요청")
     }
 
     var isWaterLocked: Bool {
         WKInterfaceDevice.current().isWaterLockEnabled
+    }
+
+    private func startWaterWatch() {
+        waterTimer?.invalidate()
+        let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let now = WKInterfaceDevice.current().isWaterLockEnabled
+                if now != self.waterLocked {
+                    self.waterLocked = now
+                    self.note(now ? "물 잠금 켜짐" : "물 잠금 풀림")
+                }
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        waterTimer = t
     }
 
     private func cleanup() {
