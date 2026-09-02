@@ -26,11 +26,19 @@
 import SwiftUI
 
 struct WatchLiveView: View {
+
+    /// 지금 보고 있는 페이지. 물 잠금을 걸기 전에 1페이지로 옮기려고 붙잡아 둔다.
+    ///
+    /// 물 잠금은 화면 터치를 **전부** 막는다. 그래서 3페이지에서 그냥 걸면
+    /// 설정 화면에 갇힌다. 옆으로 못 넘기고, 크라운을 돌리면 잠금이 풀려서
+    /// 그것도 길이 아니다. 걸기 직전에 항해 화면으로 옮겨 놓아야 한다.
+    @State private var page = 0
+
     var body: some View {
-        TabView {
-            MainPage()
-            DebugPage()
-            SettingsPage()
+        TabView(selection: $page) {
+            MainPage().tag(0)
+            DebugPage().tag(1)
+            SettingsPage(page: $page).tag(2)
         }
         .tabViewStyle(.page)
     }
@@ -219,6 +227,8 @@ private struct MainPage: View {
         .padding(.horizontal, 2)
         .onChange(of: isDim) { _, nowDim in
             if nowDim { dimCount += 1 }
+            let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+            print("[DIM] \(f.string(from: Date())) \(nowDim ? "어두워짐" : "밝아짐") (\(dimCount)회)")
         }
     }
 
@@ -276,6 +286,7 @@ private struct MainPage: View {
 // MARK: - 2페이지 · 설정
 
 private struct SettingsPage: View {
+    @Binding var page: Int
     @EnvironmentObject private var ble: BLEManager
     @EnvironmentObject private var session: SessionManager
     @AppStorage("dimCount") private var dimCount = 0
@@ -386,12 +397,22 @@ private struct SettingsPage: View {
                 .buttonStyle(.bordered)
             }
 
+            // 항해 화면으로 옮긴 다음 잠근다. 여기서 잠그면 갇힌다.
             Button {
-                session.enableWaterLock()
+                page = 0
+                Task { @MainActor in
+                    // 페이지가 실제로 넘어간 뒤에 잠근다.
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    session.enableWaterLock()
+                }
             } label: {
-                Label("물 잠금", systemImage: "drop.fill")
-                    .font(.caption2)
-                    .frame(maxWidth: .infinity)
+                VStack(spacing: 1) {
+                    Label("물 잠금", systemImage: "drop.fill").font(.caption2)
+                    Text("항해 화면으로 옮기고 잠급니다")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
 

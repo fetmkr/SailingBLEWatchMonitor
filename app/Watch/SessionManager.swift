@@ -84,6 +84,7 @@ final class SessionManager: NSObject, ObservableObject {
     /// 앱 진입 시 한 번 호출. 이미 돌고 있으면 아무것도 하지 않는다.
     func startIfNeeded() async {
         guard session == nil else { return }
+        print("[SESSION] startIfNeeded — 권한 \(authText), HealthKit \(HKHealthStore.isHealthDataAvailable())")
         guard HKHealthStore.isHealthDataAvailable() else {
             errorMessage = "이 기기에서 HealthKit 을 쓸 수 없습니다."
             note("HealthKit 없음")
@@ -97,8 +98,10 @@ final class SessionManager: NSObject, ObservableObject {
         } catch {
             errorMessage = "건강 권한 요청 실패: \(error.localizedDescription)"
             note("권한 요청 실패")
+            print("[SESSION] requestAuthorization 던짐 — \(error)")
             return
         }
+        print("[SESSION] requestAuthorization 돌아옴 — 권한 \(authText)")
 
         // 권한을 물어본 뒤 실제로 열렸는지 확인한다. 막혀 있으면 세션이
         // 조용히 안 돌기 때문에 여기서 미리 말해 준다.
@@ -118,6 +121,7 @@ final class SessionManager: NSObject, ObservableObject {
             session = s
             stoppedByUser = false
             note("시작 요청")
+            print("[SESSION] startActivity 부름 — 지금 state \(Self.word(s.state))")
         } catch {
             errorMessage = "세션 시작 실패: \(error.localizedDescription)"
             note("시작 실패")
@@ -169,6 +173,9 @@ final class SessionManager: NSObject, ObservableObject {
         if t.count > Self.kTrailMax { t.removeFirst(t.count - Self.kTrailMax) }
         trail = t
         UserDefaults.standard.set(t, forKey: Self.kTrailKey)
+        // 콘솔로도 뱉는다. 워치는 화면을 못 보므로 이 줄이 유일한 창이다.
+        //   xcrun devicectl device process launch --console <bundle id>
+        print("[SESSION] \(t.last ?? text)")
     }
 
     func clearTrail() {
