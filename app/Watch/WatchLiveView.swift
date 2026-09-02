@@ -306,47 +306,6 @@ private struct SettingsPage: View {
                         Button("해제", role: .destructive) { ble.unpinModule() }
                         Button("취소", role: .cancel) {}
                     }
-
-                    Divider()
-
-                    // ── 세션 (앱 켜면 자동 시작)
-                    HStack(spacing: 5) {
-                        Image(systemName: session.isRunning ? "figure.sailing" : "moon.zzz")
-                            .foregroundStyle(session.isRunning ? .green : .secondary)
-                        Text(session.isRunning ? "항해 중 \(session.elapsedText)" : "세션 없음")
-                            .font(.caption)
-                        Spacer()
-                    }
-                    Text(session.isRunning
-                         ? "손목을 내려도 화면과 연결이 유지됩니다"
-                         : "손목을 내리면 화면이 꺼지고 연결이 끊깁니다")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-
-                    if let err = session.errorMessage {
-                        Text(err).font(.system(size: 9)).foregroundStyle(.red).lineLimit(3)
-                    }
-
-                    Button {
-                        session.enableWaterLock()
-                    } label: {
-                        Label("물 잠금", systemImage: "drop.fill")
-                            .font(.caption2)
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-
-                    if session.isRunning {
-                        Button(role: .destructive) {
-                            session.stop()
-                        } label: {
-                            Text("세션 종료").font(.caption2).frame(maxWidth: .infinity)
-                        }
-                    }
-
-                    Divider()
-                    diagnostics
-
                 } else {
                     Text("모듈 고르기").font(.headline)
 
@@ -376,10 +335,74 @@ private struct SettingsPage: View {
                         }
                     }
                 }
+
+                Divider()
+                sessionSection
+                Divider()
+                diagnostics
             }
             .padding(.horizontal, 4)
         }
         .onAppear { ble.refreshDiscovery() }
+    }
+
+    // ── 세션 (앱 켜면 자동 시작)
+    //
+    // 모듈을 아직 안 고른 상태에서도 보여야 한다. 세션이 도는지 여부는
+    // 모듈과 아무 상관이 없고, "왜 시계로 돌아가나" 를 여기서만 볼 수 있다.
+    private var sessionSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                Image(systemName: session.isRunning ? "figure.sailing" : "moon.zzz")
+                    .foregroundStyle(session.isRunning ? .green : .secondary)
+                Text(session.isRunning ? "항해 중 \(session.elapsedText)" : "세션 \(session.stateText)")
+                    .font(.caption)
+                Spacer()
+            }
+            Text(session.isRunning
+                 ? "손목을 내려도 화면과 연결이 유지됩니다"
+                 : "2분 뒤 시계 화면으로 돌아갑니다")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+
+            row("운동 권한", session.authText)
+
+            if let err = session.errorMessage {
+                Text(err).font(.system(size: 9)).foregroundStyle(.red).lineLimit(4)
+            }
+
+            // 언제 끊겼는지 눈으로 본다. 앱이 죽었다 살아나도 남는다.
+            if !session.trail.isEmpty {
+                ForEach(session.trail.reversed(), id: \.self) { line in
+                    Text(line)
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    session.clearTrail()
+                } label: {
+                    Text("기록 지우기").font(.system(size: 9)).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Button {
+                session.enableWaterLock()
+            } label: {
+                Label("물 잠금", systemImage: "drop.fill")
+                    .font(.caption2)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+
+            if session.isRunning {
+                Button(role: .destructive) {
+                    session.stop()
+                } label: {
+                    Text("세션 종료").font(.caption2).frame(maxWidth: .infinity)
+                }
+            }
+        }
     }
 
     private var diagnostics: some View {
