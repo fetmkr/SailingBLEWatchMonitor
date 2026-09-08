@@ -134,7 +134,58 @@ sd     카드를 찾고 글씨까지 써지면 VDD 다
 
 ---
 
-## 5. 아직 안 잰 것
+## 5. 남은 새는 곳 — SD 카드로 의심된다
+
+고친 뒤 10.5시간 재우고 나온 값이다.
+
+    잔 시간 37691초(10.47시간)   헛깸 0
+    3511 mV → 3479 mV           시간당 3.1 mV/h
+
+배터리 1950 mAh 기준으로 10.47시간에 0.7%, 즉 **약 1.3 mA** 다.
+목표 10 µA 와 두 자릿수 차이가 난다. 아직 뭔가 새고 있다.
+
+**SD 카드가 제일 의심스럽다.** 카드는 VDD 라 전원을 못 끊고, 대기 전류가
+카드마다 0.2~1 mA 다. 자릿수가 맞는다.
+
+### 소프트웨어로 카드를 끄는 방법은 없다
+
+  · SPI 모드에는 카드를 재우는 명령이 없다. CMD15(GO_INACTIVE_STATE)가
+    SPI 에서 "No" 다 [확인: docs/sd/SD_Physical_Layer_...txt §7 명령표]
+  · SD.end() 가 CMD0(GO_IDLE_STATE)를 보내는 것이 닿을 수 있는 제일 깊은 자리다
+    [확인: framework-arduinoespressif32 SD/src/sd_diskio.cpp 의 sdcard_uninit]
+  · RAK15002 데이터시트의 공급 전류는 "TBD" 로 비어 있다
+
+### 그래서 한 것 — SPI 선을 눕히고 잔다 (2026-09-08)
+
+SD.end() 는 **핀을 안 놓아준다.** 깊은잠에 들면 패드가 놓여서 뜬다.
+뜬 칩셀렉트가 LOW 로 읽히면 카드는 선택된 채로 남아 계속 깨어 있는다.
+
+칩셀렉트에 바깥 풀업이 없는 것을 쟀다.
+
+    pin 12  →  풀업 HIGH · 풀다운 LOW  → 비어 있음
+
+규격서도 같은 취지를 말한다. §6.4.2 —
+"DAT, CMD, and CLK should be disconnected or driven to logical 0 by the host
+ to avoid a situation that the operating current is drawn through the signal lines."
+
+그래서 자는 동안 이렇게 붙든다.
+
+    칩셀렉트 GPIO12   HIGH   카드를 확실히 떼어 놓는다. 이게 핵심
+    클럭     GPIO13   LOW
+    MOSI     GPIO11   LOW
+    MISO     GPIO10   건드리지 않는다 (카드가 모는 선이다)
+
+GPIO12 는 S3 의 strapping 핀이 아니라 붙들어도 부팅에 지장이 없다.
+깰 때는 wakeGate 가 같이 풀어준다.
+
+**카드가 그대로 되는지 확인했다.** 45초 재우고 깨운 뒤
+  · `sd` — 카드 찾음, 122112 MB, 쓰기 OK
+  · 실제 세션 — NAV 70줄 / IMU 694줄, 버린 줄 0, 최대 멈춤 7 ms
+
+**아직 전류가 줄었는지는 안 쟀다.** 같은 10시간 시험을 다시 돌려야 안다.
+그래도 안 줄면 카드를 빼고 재서 카드가 범인인지 가른다.
+
+## 6. 아직 안 잰 것
 
 **실제로 몇 µA 로 자는지는 모른다.** 60초 시험에서 3583 → 3581 mV 였는데
 2 mV 는 ADC 잡음 수준이라 µA 를 가릴 수 없다.
@@ -149,7 +200,7 @@ sd     카드를 찾고 글씨까지 써지면 VDD 다
 
 ---
 
-## 6. 재보는 법
+## 7. 재보는 법
 
 ```
 off              끈다

@@ -2602,6 +2602,42 @@ static void goToSleep(uint32_t testWakeSec) {
     rtc_gpio_set_level(pwr, 0);
     rtc_gpio_hold_en(pwr);
 
+    // ── SD 카드 SPI 선을 정해진 자리에 두고 잔다 ────────────────────────
+    //
+    // 카드는 VDD 라 전원을 못 끊는다. 그리고 SPI 모드에는 카드를 재우는 명령이
+    // 없다 — CMD15(GO_INACTIVE_STATE)가 SPI 에서는 "No" 다
+    // [확인: docs/sd/SD_Physical_Layer_Simplified_Spec_v3.01.txt §7 명령표].
+    // SD.end() 가 CMD0 를 보내는 것이 소프트웨어로 닿는 제일 깊은 자리다
+    // [확인: framework-arduinoespressif32 SD/src/sd_diskio.cpp sdcard_uninit].
+    //
+    // ★ 그런데 SD.end() 는 **핀을 안 놓아준다.** 깊은잠에 들면 패드가 놓여서
+    //   뜬다. 뜬 칩셀렉트가 LOW 로 읽히면 카드는 선택된 채로 남아 계속 깨어
+    //   있는다. 칩셀렉트에 바깥 풀업이 없는 것을 쟀다.
+    //     [확인: 2026-09-08 `pin 12` — 풀업 HIGH · 풀다운 LOW → 비어 있음]
+    //
+    // 규격서도 같은 취지를 말한다. §6.4.2 —
+    //   "DAT, CMD, and CLK should be disconnected or driven to logical 0 by the
+    //    host to avoid a situation that the operating current is drawn through
+    //    the signal lines."
+    //
+    // 그래서 칩셀렉트는 HIGH 로 붙들어 카드를 확실히 떼어 놓고, 클럭과 MOSI 는
+    // LOW 로 눕힌다. MISO 는 카드가 모는 선이라 건드리지 않는다.
+    //
+    // GPIO12 는 ESP32-S3 의 strapping 핀이 아니라 붙들어도 부팅에 지장이 없다
+    // (S3 의 strapping 은 GPIO0·3·45·46).
+    struct { int pin; int level; } spiRest[] = {
+        { rak::kSPI_CS,   1 },   // 카드를 떼어 놓는다. 이게 핵심이다
+        { rak::kSPI_CLK,  0 },
+        { rak::kSPI_MOSI, 0 },
+    };
+    for (auto& r : spiRest) {
+        const gpio_num_t g = (gpio_num_t)r.pin;
+        rtc_gpio_init(g);
+        rtc_gpio_set_direction(g, RTC_GPIO_MODE_OUTPUT_ONLY);
+        rtc_gpio_set_level(g, r.level);
+        rtc_gpio_hold_en(g);
+    }
+
     armButtonWake();
     gRtcTestSec = testWakeSec;
     if (testWakeSec) {
@@ -2655,7 +2691,8 @@ static void wakeGate() {
         //   보통 부팅에서는 첫 번째부터 제 값이 나온다. 깼을 때만 그렇다.
         rtc_gpio_force_hold_dis_all();
         for (int pin : {rak::kSensorPowerA, rak::kSensorPowerB, kButtonPin,
-                        rak::kBattAdcPin}) {
+                        rak::kBattAdcPin,
+                        rak::kSPI_CS, rak::kSPI_CLK, rak::kSPI_MOSI}) {
             const gpio_num_t g = (gpio_num_t)pin;
             rtc_gpio_hold_dis(g);
             rtc_gpio_deinit(g);      // 다시 보통 GPIO 로 돌려 놓는다
