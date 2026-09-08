@@ -142,6 +142,91 @@ void displayBootMessage(const char* line1, const char* line2) {
     gOled.sendBuffer();
 }
 
+// ── 버튼을 오래 누를 때 나오는 막대 ──────────────────────────────────────
+//
+// 켤 때와 끌 때 둘 다 이 화면 하나를 쓴다. 막대는 5초를 가득 찬 것으로 본다.
+//
+//        0                                      127
+//        ┌──────────────────────────────────────┐
+//   26   │            끄는 중                    │  한글 16px, 가운데
+//   32   │  ┌────────────────────────────────┐   │
+//   44   │  │▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░│   │  테두리 + 채움
+//   60   │           기록 저장 중                │  한글 16px, 가운데
+//        └──────────────────────────────────────┘
+//
+// **한글을 쓴다.** 이 화면은 급할 때 읽는 화면이라 영어 약어면 안 된다.
+// 평소 계기 화면은 6x10 영문인데 거기는 SOG·COG 같은 항해 용어라 그대로 둔다.
+//
+// 글꼴은 u8g2_font_unifont_t_korean2 (77 KB). korean1 은 574자뿐이라 필요한
+// 글자가 빠질 수 있어서 넓은 쪽을 골랐다. 플래시가 16 MB 라 부담이 없다.
+// ESP32 에서는 U8G2_USE_LARGE_FONTS 가 저절로 켜진다 [확인: u8g2.h:193 의
+// `#if defined(...) || defined(ESP_PLATFORM)`].
+//
+// 한글 한 글자는 16px, 빈칸과 숫자는 8px 다. 한 줄에 한글 8자가 최대다.
+// 자리는 눈대중으로 잡지 않고 getUTF8Width() 로 재서 가운데 놓는다.
+void displayHoldBar(int pct, const char* title, const char* hint) {
+    if (!gOk) return;
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+
+    gOled.clearBuffer();
+    gOled.setFont(u8g2_font_unifont_t_korean2);
+
+    if (title) {
+        const int w = gOled.getUTF8Width(title);
+        gOled.drawUTF8((kW - w) / 2, 26, title);
+    }
+
+    // 막대. 테두리를 먼저 그리고 안을 채운다. 0% 여도 테두리는 보인다.
+    // 테두리가 있어야 "얼마나 남았나" 가 눈에 들어온다.
+    constexpr int kBarX = 10, kBarY = 32, kBarW = 108, kBarH = 12;
+    gOled.drawFrame(kBarX, kBarY, kBarW, kBarH);
+    const int fill = (kBarW - 4) * pct / 100;
+    if (fill > 0) gOled.drawBox(kBarX + 2, kBarY + 2, fill, kBarH - 4);
+
+    if (hint) {
+        const int w = gOled.getUTF8Width(hint);
+        gOled.drawUTF8((kW - w) / 2, 60, hint);
+    }
+
+    gOled.sendBuffer();
+}
+
+// 큰 글자 두 줄. 끄고 켤 때의 안내에 쓴다.
+// displayBootMessage 와 달리 한글이고 가운데 정렬이다.
+void displayNotice(const char* line1, const char* line2) {
+    if (!gOk) return;
+    gOled.clearBuffer();
+    gOled.setFont(u8g2_font_unifont_t_korean2);
+    if (line1) {
+        const int w = gOled.getUTF8Width(line1);
+        gOled.drawUTF8((kW - w) / 2, 28, line1);
+    }
+    if (line2) {
+        const int w = gOled.getUTF8Width(line2);
+        gOled.drawUTF8((kW - w) / 2, 52, line2);
+    }
+    gOled.sendBuffer();
+}
+
+// 한글 한 줄이 화면에 들어가나 재본다. `oledw` 명령이 쓴다.
+// 글꼴에 없는 글자는 폭 0 으로 나온다. 그래서 폭을 재면 빠진 글자를 잡아낸다.
+int displayTextWidth(const char* utf8) {
+    if (!gOk) return -1;
+    gOled.setFont(u8g2_font_unifont_t_korean2);
+    return gOled.getUTF8Width(utf8);
+}
+
+void displayOff() {
+    if (!gOk) return;
+    gOled.setPowerSave(1);
+}
+
+void displayOn() {
+    if (!gOk) return;
+    gOled.setPowerSave(0);
+}
+
 void displayUpdate(const DisplayState& s) {
     if (!gOk) return;
 

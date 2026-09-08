@@ -80,6 +80,31 @@ void displayBootMessage(const char* line1, const char* line2);
 // 화면이 없거나 응답이 끊기면 아무 일도 하지 않고 바로 돌아온다.
 void displayUpdate(const DisplayState& s);
 
+// 버튼을 오래 누르는 동안 진행 막대를 보여준다.
+//   pct    0~100. 5초를 가득 찬 것으로 본다
+//   title  큰 글자 한 줄 ("끄는 중")
+//   hint   작은 글자 한 줄 ("놓으면 기록 시작"). nullptr 이면 안 그린다
+void displayHoldBar(int pct, const char* title, const char* hint);
+
+// 큰 글자 두 줄, 가운데 정렬. 끄고 켤 때의 안내에 쓴다.
+void displayNotice(const char* line1, const char* line2);
+
+// 한글 한 줄이 화면(128px)에 들어가나 재본다. `oledw` 명령이 쓴다.
+// 글꼴에 없는 글자는 폭 0 이라, 폭을 재면 빠진 글자를 잡아낼 수 있다.
+// 화면이 없으면 -1.
+int displayTextWidth(const char* utf8);
+
+// 화면을 끈다. 깊은잠에 들기 직전에 반드시 부른다.
+//
+// ★ 화면은 센서 전원 스위치(3V3_S) 밖에 있다. VDD 에 물려 있어서 GPS·SD 를
+//   꺼도 혼자 켜져 있는다 [확인: `power off` 뒤에 GPS 는 한 바이트도 안 오는데
+//   I2C 스캔에는 0x3C 가 그대로 보였다, 2026-09-04].
+//   이걸 안 부르고 자면 마지막 그림이 켜진 채로 남아 배터리를 먹는다.
+void displayOff();
+
+// 다시 켠다. 끄려다 그만두고 돌아올 때 쓴다.
+void displayOn();
+
 // 화면이 아직 붙어 있는지 확인한다. 1 Hz 로 부른다.
 // 사라졌으면 그리기를 멈추고, 다시 꽂히면 알아서 붙는다.
 // 화면 하나 때문에 배가 계기를 통째로 잃으면 안 된다.

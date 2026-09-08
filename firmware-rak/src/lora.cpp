@@ -141,6 +141,12 @@ bool begin() {
 
 bool up() { return gUp; }
 
+void sleep() {
+    if (!gUp) return;
+    const int16_t st = gRadio.sleep();
+    Serial.printf("[LORA] 재웁니다 (st=%d)\n", (int)st);
+}
+
 bool pop(Rx& out) {
     if (gTail == gHead) return false;
     out = gRing[gTail];

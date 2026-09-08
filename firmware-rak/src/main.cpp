@@ -29,8 +29,11 @@
 #include <SPI.h>
 #include <TinyGPS++.h>
 #include <Wire.h>
+#include <driver/rtc_io.h>
 #include <esp_mac.h>
+#include <esp_sleep.h>
 #include <esp_task_wdt.h>
+#include <sys/time.h>
 
 #include "board_rak.h"
 #include "display_rak.h"
@@ -2116,12 +2119,32 @@ static void doSdBench(uint32_t rows) {
 //
 // 누르는 법
 //   짧게(0.05~1초)  이벤트 표식 (마킹)
-//   길게(2초 이상)  기록 시작 / 종료
+//   2초 이상        기록 시작 / 종료
+//   5초 이상        보드 끄기 (깊은잠)
 //
 // 시작·종료를 길게로 둔 이유는 실수로 세션이 끊기면 안 되기 때문이다.
 // 훈련 중에 자주 쓰는 건 마킹 쪽이다.
+//
+// ── 2초와 5초가 부딪히는 곳 ─────────────────────────────────────────────
+//
+// 5초를 누르면 도중에 2초를 반드시 밟는다. 그래서 두 경우를 갈라 놓았다.
+//
+//   기록 중이면    2초에 그 자리에서 멈춘다. 어차피 끄면서 멈출 것이라
+//                  순서만 앞당긴 셈이다. **여기는 예전 코드 그대로다.**
+//                  덤으로 5초에 도달했을 때는 이미 다 닫혀 있어서 빨리 꺼진다.
+//
+//   기록 중 아니면 2초에 시작하지 **않는다.** 화면에만 "놓으면 기록시작"
+//                  이라고 띄우고, 손을 뗄 때 시작한다. 5초를 넘기면 그 예약을
+//                  버리고 끈다. 안 그러면 끄려고 누를 때마다 쓸모없는 파일이
+//                  하나씩 열렸다 닫힌다.
+//
+// 시작 문턱을 2.5초로 미루는 방법도 있었는데 안 했다. 5초보다 작아서 어차피
+// 밟고 지나간다. 문제는 안 풀리고, "2초쯤" 누르고 2.4초에 떼는 사람만 손해다.
 static constexpr int      kButtonPin   = rak::kAin1;   // GPIO2, J11 1번
-static constexpr uint32_t kBtnLongMs   = 2000;
+static constexpr uint32_t kBtnLongMs   = 2000;         // 기록 시작 / 종료
+static constexpr uint32_t kBtnOffMs    = 5000;         // 끄기
+static constexpr uint32_t kBtnHintMs   = 800;          // 뗀 뒤 결과를 보여주는 시간
+static constexpr uint32_t kBtnStuckMs  = 10000;        // 이만큼 안 떨어지면 안 끈다
 
 // ── 채터링(접점 튐) 걷어내기 ─────────────────────────────────────────────
 //
@@ -2139,7 +2162,67 @@ static bool     gBtnDown     = false;  // 튐을 걷어낸 값
 static uint32_t gBtnDownAt   = 0;
 static bool     gBtnLongDone = false;  // 길게가 이미 먹었나 (떼면서 또 먹지 않게)
 
+// 켜자마자 손을 안 뗐으면 뗄 때까지 버튼을 아예 안 본다.
+//
+// ★ 이게 없으면 5초 눌러 켠 보드가 그대로 다시 꺼진다. 부팅이 끝나도 손은
+//   여전히 눌린 채라 buttonPoll 이 처음부터 세기 시작하고, 2초에 기록이 켜지고
+//   5초에 도로 꺼진다. **켜지지 않는 보드가 된다.**
+static bool     gBtnIgnoreUntilUp = false;
+
+// 뗄 때 기록을 시작할까. 2초에 예약해 두고 뗄 때 실행한다.
+static bool     gBtnStartOnUp = false;
+
+// 화면을 버튼이 쓰고 있는 동안은 평소 계기 화면을 안 그린다.
+// 안 그러면 4 Hz 로 막대를 지워 버린다.
+static bool     gBtnOwnsScreen = false;
+static uint32_t gBtnScreenTill = 0;   // 뗀 뒤 결과 글자를 언제까지 보여주나
+static uint32_t gBtnDrawnAt    = 0;   // 막대를 마지막으로 그린 시각
+
+// ── 잠자기 기록 (RTC 메모리) ─────────────────────────────────────────────
+//
+// 깊은잠은 램을 다 날리지만 RTC 영역은 남긴다. 여기에 적어 두면 깨어난 뒤에
+// "정말 잤는지" 를 물어볼 수 있다.
+//
+// ★ 이게 왜 필요한가. 2026-09-07, 하루 조금 넘게 재워 뒀더니 배터리가 바닥까지
+//   닳았다. 자는 게 10 µA 라면 몇 달이 가야 한다. 그러니 뭔가 안 잔 것이다.
+//   그런데 **잠든 보드는 아무 말도 못 한다.** 깨어나면 램이 비어 있어서 무슨
+//   일이 있었는지 알 방법이 없었다. 그래서 잠들기 직전에 여기 적어 둔다.
+//
+//   깬 횟수    자꾸 깼다 잤다 했으면 여기 쌓인다
+//   잠든 시각  RTC 시계는 자는 동안에도 돈다. 뺄셈하면 진짜 잔 시간이 나온다
+//   그때 전압  깨어나서 다시 재면 시간당 몇 볼트가 빠졌는지 나온다
+//
+// 시각은 gettimeofday 로 읽는다. millis() 는 깨어날 때 0 으로 돌아가서 못 쓴다.
+// gettimeofday 는 RTC 시계 위에 얹혀 있어서 자는 동안에도 계속 간다
+// [확인: `nm libnewlib.a` 에 `U esp_rtc_get_time_us` — RTC 시계를 참조한다].
+// 시각을 맞춘 적이 없어도 상관없다. 두 값의 **차이**만 쓴다.
+static uint64_t nowUs() {
+    timeval tv;
+    gettimeofday(&tv, nullptr);
+    return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
+}
+static RTC_DATA_ATTR uint32_t gRtcMagic;
+static RTC_DATA_ATTR uint32_t gRtcSleeps;      // 잠든 횟수
+static RTC_DATA_ATTR uint32_t gRtcFalse;       // 5초 못 채우고 도로 잔 횟수
+static RTC_DATA_ATTR uint32_t gRtcFull;        // 5초 채워 켜진 횟수
+static RTC_DATA_ATTR uint64_t gRtcSleepUs;     // 마지막으로 잠든 RTC 시각
+static RTC_DATA_ATTR uint32_t gRtcSleepMv;     // 그때 배터리 mV
+static RTC_DATA_ATTR uint32_t gRtcWakeMv;      // 마지막으로 깼을 때 배터리 mV
+static RTC_DATA_ATTR uint64_t gRtcSleptUs;     // 마지막으로 잔 시간
+static RTC_DATA_ATTR uint32_t gRtcGpsBytes;    // 깨자마자 GPS 가 뱉은 바이트 수
+static RTC_DATA_ATTR uint32_t gRtcTestSec;     // 시험용 타이머 (0 이면 안 씀)
+static bool gWokeFromSleep = false;            // 이번 부팅이 깊은잠에서 깬 것인가
+
+// 켤 때 배터리 ADC 가 몇 번째부터 제 값을 내는지 담아 둔다. `battboot` 가 꺼낸다.
+static constexpr int kBattBootN = 20;
+static uint32_t gBattBoot[kBattBootN];
+static constexpr uint32_t kRtcMagic = 0x5A5AC0DE;
+
+static void armButtonWake();                       // 아래 "끄기 (깊은잠)" 항목
+static void doSleepStat();                         // 아래 "잠자기 기록" 항목
+static void sleepLogToCard();
 static bool logStartNow(uint32_t prevSession = 0);  // 아래 "기록 (hlog)" 항목
+static void feedWatchdog();                        // 아래 "워치독" 항목
 
 static void buttonBegin() {
     pinMode(kButtonPin, INPUT_PULLUP);
@@ -2148,12 +2231,23 @@ static void buttonBegin() {
     gBtnRawAt = millis();
     gBtnDown = gBtnRaw;
     if (gBtnRaw) {
-        Serial.printf("[BTN] GPIO%d 이 LOW 입니다 — 버튼이 눌려 있거나 잘못 달렸습니다.\n",
+        // 5초 눌러 켠 직후가 거의 다다. 아직 손을 안 뗀 것이다.
+        // 뗄 때까지 버튼을 안 본다 — 안 그러면 5초에 도로 꺼진다.
+        gBtnIgnoreUntilUp = true;
+        Serial.printf("[BTN] GPIO%d 이 LOW 입니다 — 손을 뗄 때까지 버튼을 안 봅니다.\n",
                       kButtonPin);
     } else {
         Serial.printf("[BTN] 저장 버튼 GPIO%d (J11 헤더 1번 AIN1 - GND). "
-                      "짧게=마킹, 2초=시작/종료\n", kButtonPin);
+                      "짧게=마킹, 2초=시작/종료, 5초=끄기\n", kButtonPin);
     }
+}
+
+static void goToSleep(uint32_t testWakeSec = 0);   // 아래 "끄기 (깊은잠)" 항목
+
+// 누른 시간을 막대 퍼센트로. 5초를 가득 찬 것으로 본다.
+static int btnPct(uint32_t heldMs) {
+    if (heldMs >= kBtnOffMs) return 100;
+    return (int)(heldMs * 100 / kBtnOffMs);
 }
 
 static void buttonPoll(uint32_t nowMs) {
@@ -2163,25 +2257,74 @@ static void buttonPoll(uint32_t nowMs) {
     if (raw != gBtnRaw) { gBtnRaw = raw; gBtnRawAt = nowMs; }
     const bool settled = (nowMs - gBtnRawAt >= kBtnStableMs);
 
+    // 켤 때 눌린 손을 아직 안 뗐으면 아무것도 안 한다.
+    if (gBtnIgnoreUntilUp) {
+        if (settled && !gBtnRaw) {
+            gBtnIgnoreUntilUp = false;
+            Serial.println("[BTN] 손을 뗐습니다 — 이제부터 버튼을 봅니다");
+        }
+        return;
+    }
+
+    // 뗀 뒤 결과 글자를 보여주는 시간이 끝났으면 화면을 돌려준다.
+    if (gBtnOwnsScreen && !gBtnDown && nowMs >= gBtnScreenTill) {
+        gBtnOwnsScreen = false;
+    }
+
     if (settled && gBtnRaw && !gBtnDown) {
         gBtnDown = true;
         // 눌리기 시작한 시각은 **처음 바뀐 그 순간**으로 잡는다. 30ms 뒤로
         // 잡으면 "2초 길게" 가 매번 30ms 씩 늦어진다.
         gBtnDownAt = gBtnRawAt;
         gBtnLongDone = false;
+        gBtnStartOnUp = false;
         return;
     }
 
     // 누르고 있는 동안 2초가 지나면 그 자리에서 먹는다.
-    // 떼야 반응하면 "먹었나?" 를 알 수가 없다. 지금은 LED 로 바로 알려준다.
+    // 떼야 반응하면 "먹었나?" 를 알 수가 없다. 지금은 화면과 LED 로 바로 알려준다.
     if (gBtnDown && !gBtnLongDone && nowMs - gBtnDownAt >= kBtnLongMs) {
         gBtnLongDone = true;
         if (hlog::recording()) {
+            // ★ stop() 은 다 쓸 때까지 최대 15초 루프를 붙잡는다 (hlog.cpp).
+            //   그 동안 막대가 얼어붙는다. 그래서 **부르기 전에** 화면을 먼저
+            //   그려서, 멈춘 그 한 장이 무슨 일이 벌어지는지 말하게 한다.
+            gBtnOwnsScreen = true;
+            sail::displayHoldBar(btnPct(nowMs - gBtnDownAt), "기록 종료", "저장 중");
             Serial.println("[BTN] 길게 — 기록 종료");
             hlog::stop();
         } else {
-            Serial.println("[BTN] 길게 — 기록 시작");
-            logStartNow();
+            // 아직 시작하지 않는다. 5초를 넘기면 끄기로 갈 사람일 수 있다.
+            gBtnStartOnUp = true;
+            Serial.println("[BTN] 길게 — 놓으면 기록 시작 (더 누르면 끄기)");
+        }
+        return;
+    }
+
+    // 누르고 있는 동안 화면에 막대를 그린다. 2초부터다.
+    //
+    // 2초 전에는 안 그린다. 마킹하려고 톡 누를 때마다 계기 화면이 번쩍이면
+    // 안 된다. 마킹은 경고할 것도 없다 — 이미 벌어졌고 되돌릴 것도 없다.
+    if (gBtnDown && nowMs - gBtnDownAt >= kBtnLongMs) {
+        const uint32_t held = nowMs - gBtnDownAt;
+
+        if (held >= kBtnOffMs) {
+            gBtnStartOnUp = false;      // 예약해 둔 기록 시작을 버린다
+            gBtnOwnsScreen = true;
+            sail::displayHoldBar(100, "끄는 중", nullptr);
+            goToSleep();                // 여기서 안 돌아오는 게 정상이다
+            // 버튼이 안 떨어져서 못 끄고 돌아온 경우다.
+            gBtnOwnsScreen = false;
+            gBtnLongDone = true;
+            gBtnIgnoreUntilUp = true;
+            return;
+        }
+
+        if (nowMs - gBtnDrawnAt >= 100) {   // 10 Hz
+            gBtnDrawnAt = nowMs;
+            gBtnOwnsScreen = true;
+            sail::displayHoldBar(btnPct(held), "누르면 꺼짐",
+                                 gBtnStartOnUp ? "놓으면 기록시작" : "기록 멈춤");
         }
         return;
     }
@@ -2189,7 +2332,22 @@ static void buttonPoll(uint32_t nowMs) {
     if (settled && !gBtnRaw && gBtnDown) {
         const uint32_t held = gBtnRawAt - gBtnDownAt;
         gBtnDown = false;
-        if (gBtnLongDone) return;                 // 이미 길게로 먹었다
+
+        if (gBtnStartOnUp) {
+            gBtnStartOnUp = false;
+            Serial.printf("[BTN] 놓음(%ums) — 기록 시작\n", (unsigned)held);
+            logStartNow();
+            gBtnOwnsScreen = true;
+            gBtnScreenTill = nowMs + kBtnHintMs;
+            sail::displayNotice("기록 시작", nullptr);
+            return;
+        }
+        if (gBtnLongDone) {                       // 2초에 이미 멈췄다
+            gBtnOwnsScreen = true;
+            gBtnScreenTill = nowMs + kBtnHintMs;
+            sail::displayNotice("기록 종료", nullptr);
+            return;
+        }
         if (hlog::recording()) {
             Serial.printf("[BTN] 짧게(%ums) — 마킹\n", (unsigned)held);
             hlog::mark();
@@ -2197,6 +2355,387 @@ static void buttonPoll(uint32_t nowMs) {
             Serial.println("[BTN] 짧게 — 기록 중이 아닙니다 (2초 누르면 시작)");
         }
     }
+}
+
+// 잠자기 기록을 SD 카드에도 남긴다.
+//
+// ★ RTC 메모리는 깊은잠은 견디지만 리셋은 못 견딘다. 실제로 시리얼을 잘못 열어
+//   보드가 리셋되는 바람에 애써 잰 값을 통째로 날렸다 (2026-09-08).
+//   카드에 적어 두면 그런 일과 무관하게 남는다. 배 위에서 하룻밤 재워 두고
+//   나중에 카드를 뽑아 읽을 수도 있다.
+static void sleepLogToCard() {
+    if (gRtcMagic != kRtcMagic || gRtcSleptUs == 0) return;
+    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) return;
+    File f = SD.open("/SLEEP.TXT", FILE_APPEND);
+    if (!f) return;
+    const double sec = (double)gRtcSleptUs / 1e6;
+    const double drop = (double)gRtcSleepMv - (double)gRtcWakeMv;
+    f.printf("잔시간 %.1fs  %umV->%umV  낙차 %.1f mV/h  GPS바이트 %u  "
+             "잠든횟수 %u  헛깸 %u  켜짐 %u\n",
+             sec, (unsigned)gRtcSleepMv, (unsigned)gRtcWakeMv,
+             sec > 30.0 ? drop * 3600.0 / sec : 0.0,
+             (unsigned)gRtcGpsBytes, (unsigned)gRtcSleeps,
+             (unsigned)gRtcFalse, (unsigned)gRtcFull);
+    f.close();
+}
+
+// `sleepstat` — 지난번에 정말 잤나.
+//
+// 자는 보드는 아무 말도 못 한다. 그래서 잠들기 직전에 RTC 메모리에 적어 둔 것을
+// 깨어난 뒤에 읽는다. 여기서 갈리는 것은 두 가지다.
+//
+//   헛깬 횟수가 많다  → 자다 깨다를 반복한 것이다. 버튼 핀이 뜨고 있다
+//   시간당 낙차가 크다 → 자는 동안 뭔가가 켜져 있다
+//
+// 낙차는 배터리 용량을 몰라도 쓸 수 있다. 리튬폴리머는 3.7~3.9 V 구간이
+// 제일 평평해서, 거기서 시간당 10 mV 넘게 빠지면 µA 급이 아니다.
+static void doSleepStat() {
+    Serial.println("──────────────────────────────────────────");
+    if (gRtcMagic != kRtcMagic) {
+        Serial.println("  아직 한 번도 안 잤습니다 (off 명령이나 버튼 5초)");
+        Serial.println("──────────────────────────────────────────");
+        return;
+    }
+    Serial.printf("  잠든 횟수         %u\n", (unsigned)gRtcSleeps);
+    Serial.printf("  헛깸(5초 못 채움) %u   ← 크면 버튼 핀이 뜨는 것이다\n",
+                  (unsigned)gRtcFalse);
+    Serial.printf("  5초 채워 켜짐     %u\n", (unsigned)gRtcFull);
+
+    if (gRtcSleptUs == 0) {
+        Serial.println("  아직 깨어난 적이 없습니다.");
+        Serial.println("──────────────────────────────────────────");
+        return;
+    }
+    const double sec = (double)gRtcSleptUs / 1e6;
+    Serial.printf("  마지막으로 잔 시간 %.1f 초 (%.2f 시간)\n", sec, sec / 3600.0);
+    Serial.printf("  잘 때 %u mV  →  깰 때 %u mV\n",
+                  (unsigned)gRtcSleepMv, (unsigned)gRtcWakeMv);
+    Serial.printf("  깨자마자 GPS 가 뱉은 바이트  %u\n", (unsigned)gRtcGpsBytes);
+    Serial.println(gRtcGpsBytes > 0
+        ? "  ★ 0 이 아닙니다 — 자는 동안 3V3_S 가 안 꺼졌습니다. GPS 가 계속 돌았습니다."
+        : "  0 입니다 — 3V3_S 는 제대로 꺼져 있었습니다.");
+
+    const double dropMv = (double)gRtcSleepMv - (double)gRtcWakeMv;
+    if (sec > 30.0) {
+        const double perHour = dropMv * 3600.0 / sec;
+        Serial.printf("  시간당 낙차       %.1f mV/h\n", perHour);
+        Serial.println(perHour > 10.0
+            ? "  ★ 10 mV/h 를 넘습니다 — 자는 동안 뭔가가 켜져 있습니다."
+            : "  낙차가 작습니다 — 자는 쪽은 괜찮아 보입니다.");
+    } else {
+        Serial.println("  ※ 30초 넘게 재워야 낙차가 뜻이 있습니다.");
+    }
+    Serial.println("  ※ ADC 소스 임피던스가 2.5 MΩ 라 mV 단위는 흔들립니다.");
+    Serial.println("  ※ USB 를 꽂은 채로 재면 충전 때문에 값이 무의미합니다.");
+    Serial.println("──────────────────────────────────────────");
+}
+
+// `oledw` — 화면에 쓸 한글 줄이 실제로 들어가나 재본다.
+//
+// 눈대중으로 자리를 잡지 않는다. 그리고 **글꼴에 없는 글자는 폭 0 으로 나온다.**
+// 그래서 폭을 재면 빠진 글자까지 같이 잡아낸다. 한글 한 자는 16px, 빈칸과
+// 숫자는 8px 여야 맞다.
+static void doOledWidth() {
+    static const char* kLines[] = {
+        "켜는 중", "놓으면 취소", "켜집니다",
+        "누르면 꺼짐", "놓으면 기록시작", "기록 멈춤",
+        "끄는 중", "기록 저장 중", "기록 종료", "저장 중",
+        "기록 시작", "꺼졌습니다", "5초 눌러 켜기",
+        "버튼이 눌린 채", "끄지 않습니다", "손을 떼세요",
+    };
+    Serial.println("──────────────────────────────────────────");
+    Serial.println("  화면 글자 폭 (128px 안에 들어가야 한다)");
+    Serial.println("  한글 16px · 빈칸/숫자 8px. 0 이 섞이면 글꼴에 없는 글자다.");
+    for (const char* t : kLines) {
+        const int w = sail::displayTextWidth(t);
+        Serial.printf("  %-20s %4d px  %s\n", t, w,
+                      w < 0 ? "화면 없음" : (w <= 128 ? "OK" : "★ 넘침"));
+    }
+    Serial.println("──────────────────────────────────────────");
+}
+
+// 자는 동안 버튼이 보드를 깨울 수 있게 걸어 둔다.
+//
+// ★ 이 함수는 잠드는 **모든** 길에서 불러야 한다. 헛깨서 도로 자는 길도 포함이다.
+//   그 길에서 빠뜨렸다가 하루치 배터리를 날렸다.
+//
+// ── 570초에 445번 깼던 일 (2026-09-08) ──────────────────────────────────
+//
+// 처음에는 이렇게만 했다.
+//     rtc_gpio_pullup_en(GPIO2);
+//     esp_sleep_enable_ext1_wakeup(BIT(2), ANY_LOW);
+//
+// 잠들기는 잘 잤다. 그런데 1.3초에 한 번씩 스스로 깼다. 깰 때마다 부팅에
+// 1초 남짓 걸리니 보드는 자는 게 아니라 거의 계속 켜져 있었다. 배터리가
+// 하루 만에 비었다.
+//
+//   [확인: `off 100` 뒤 `sleepstat` — 잔 시간 570초, 헛깸 445회]
+//
+// 이유는 헤더에 적혀 있었다.
+//   "Internal pullups and pulldowns don't work when RTC peripherals are
+//    shut down. ... Alternatively, RTC peripherals (and pullups/pulldowns)
+//    may be kept enabled using esp_sleep_pd_config function."
+//   [확인: esp_sleep.h:298-301]
+//
+// 풀업을 걸어 놔도 잠드는 순간 RTC 주변장치가 꺼지면서 같이 사라진다.
+// 풀업이 없어진 GPIO2 는 떠 있고, 뜬 핀은 LOW 로 읽힌다. ANY_LOW 조건이
+// 그 자리에서 참이 되어 다시 깬다. 그게 445번이었다.
+//
+// 그래서 RTC 주변장치를 켜 둔 채로 잔다. 그만큼 전류를 더 쓰지만, 1.3초마다
+// 보드가 통째로 켜지는 것에 비하면 아무것도 아니다.
+static void armButtonWake() {
+    const gpio_num_t btn = (gpio_num_t)kButtonPin;
+
+    rtc_gpio_init(btn);
+    rtc_gpio_set_direction(btn, RTC_GPIO_MODE_INPUT_ONLY);
+    rtc_gpio_pulldown_dis(btn);
+    rtc_gpio_pullup_en(btn);
+
+    // ★ 이 줄이 빠지면 위의 풀업이 잠드는 순간 사라진다.
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+
+    esp_sleep_enable_ext1_wakeup(1ULL << kButtonPin, ESP_EXT1_WAKEUP_ANY_LOW);
+}
+
+// ── 끄기 (깊은잠) ────────────────────────────────────────────────────────
+//
+// 버튼을 5초 누르면 여기로 온다. 정상이면 이 함수는 **안 돌아온다.**
+// 돌아오는 경우는 버튼이 안 떨어질 때 하나뿐이다.
+//
+// 깨우는 것은 같은 버튼이다. GPIO2 는 ESP32-S3 의 RTC 핀이라 (0~21번이 RTC)
+// 깊은잠에서 깨우는 데 쓸 수 있다 [확인: soc/esp32s3/include/soc/rtc_io_channel.h
+// 의 `RTCIO_GPIO2_CHANNEL 2`, soc_caps.h 의 `SOC_RTCIO_PIN_COUNT 22`].
+//
+// ★ ext0 가 아니라 ext1 을 쓴다.
+//   ext0 는 RTC 주변장치를 켜 둬야만 돌아간다. ext1 은 꺼도 돌아간다
+//   [확인: esp_sleep.h "It will work even if RTC peripherals are shut down"].
+//   전류가 갈리는 자리다. 내부 풀업은 RTC 주변장치를 끄면 안 먹지만, 잠들기
+//   직전에 HOLD 가 걸려서 유지된다 [확인: 같은 헤더의 ext1 설명]. 그래서 바깥에
+//   저항을 달 필요가 없다.
+//
+// ── 끄는 순서가 있다 ────────────────────────────────────────────────────
+//
+//  1) 기록을 먼저 닫는다. **카드 전원을 내리기 전에 끝나야 한다.**
+//     쓰는 도중에 3V3_S 가 끊기면 파일이 깨진다.
+//  2) 무전기를 재운다 (모듈 안이라 3V3_S 밖이다)
+//  3) IMU 를 재운다 (VDD 라 3V3_S 밖이다)
+//  4) 화면에 안내를 띄우고 끈다 (VDD 라 3V3_S 밖이다)
+//  5) 손을 뗄 때까지 기다린다
+//  6) 3V3_S 를 내리고 붙든다 (GPS·SD 가 여기서 꺼진다)
+//
+// 5번을 빼먹으면 안 된다. 버튼이 눌린 채로 자면 ANY_LOW 조건이 이미 참이라
+// 잠들자마자 다시 깬다. 부팅을 무한히 반복하고 배터리가 몇 시간에 죽는다.
+//
+// 목표는 10 µA 미만이다 [확인: docs/board/RAK19007_datasheet.txt "With WisBlock
+// Core and WisBlock Sensor on it, the sleep current is lower than 10 µA"].
+// testWakeSec 이 0 이 아니면 그 초 뒤에 **스스로** 깬다. 재보려고 만든 길이다.
+// 사람이 버튼을 눌러 줄 때까지 기다리면 한 번 재는 데 사람이 붙어 있어야 한다.
+static void goToSleep(uint32_t testWakeSec) {
+    Serial.println("[SLEEP] 끕니다");
+
+    // 1) 기록부터 닫는다. 최대 15초 걸린다.
+    if (hlog::recording()) {
+        sail::displayHoldBar(100, "끄는 중", "기록 저장 중");
+        hlog::stop();
+        feedWatchdog();
+    }
+
+    // 1b) SD 카드를 놓아준다.
+    //
+    // ★ 카드는 3V3_S 가 아니라 VDD 에 물려 있다. 3V3_S 를 내려도 안 꺼진다.
+    //   [확인: 2026-09-08, `power off` 뒤에도 `sd` 가 카드를 찾고 글씨까지 썼다]
+    //   SPI 를 안 놓아주면 칩셀렉트가 눌린 채로 남아 카드가 계속 깨어 있다.
+    SD.end();
+
+    // 2) 무전기. 안 재우면 자는 동안 혼자 듣느라 수 mA 를 먹는다.
+    lora::sleep();
+
+    // 3) IMU. 항상 켜진 VDD 를 쓰므로 3V3_S 를 내려도 안 꺼진다.
+    if (gImuOk) gImu.sleep(true);
+
+    // 4) 화면. 이것도 VDD 다 [확인: `power off` 뒤에도 I2C 에 0x3C 가 그대로
+    //    보였다, 2026-09-04]. 안 끄면 마지막 그림을 켠 채로 남는다.
+    //    끄기 전에 켜는 법을 적어 둔다. 아무것도 안 남기고 까매지면 방법을 모른다.
+    sail::displayNotice("꺼졌습니다", "5초 눌러 켜기");
+
+    // 5) 손을 뗄 때까지 기다린다.
+    const uint32_t t0 = millis();
+    bool shownFor = false;
+    while (true) {
+        feedWatchdog();
+        if (digitalRead(kButtonPin) != LOW) {
+            // 30ms 안 흔들려야 진짜 뗀 것이다. 여기서도 튐을 걷어낸다.
+            delay(kBtnStableMs);
+            if (digitalRead(kButtonPin) != LOW) break;
+        }
+        if (millis() - t0 > kBtnStuckMs) {
+            // 물이 접점을 붙들고 있는 것이다. 이대로 자면 잠들자마자 깨서
+            // 무한히 반복한다. **켜져 있는 쪽이 안전하다.**
+            Serial.println("[SLEEP] 버튼이 안 떨어집니다 — 끄지 않고 그대로 돕니다");
+            sail::displayNotice("버튼이 눌린 채", "끄지 않습니다");
+            if (gImuOk) gImu.sleep(false);
+            delay(1500);
+            return;
+        }
+        if (!shownFor && millis() - t0 > 1500) {
+            shownFor = true;
+            sail::displayNotice("손을 떼세요", nullptr);
+        }
+        delay(20);
+    }
+    if (!shownFor) delay(1200);   // "꺼졌습니다" 를 읽을 시간
+    sail::displayOff();
+
+    digitalWrite(rak::kLedGreen, LOW);
+    digitalWrite(rak::kLedBlue, LOW);
+
+    // 6) 센서 전원 3V3_S 를 내리고 잠자는 동안 붙든다.
+    //
+    //    ★ RTC 쪽 API 를 쓴다. gpio_hold_en 은 S3 에서 깊은잠 중 디지털 GPIO 를
+    //      못 붙든다 [확인: driver/gpio.h "For ESP32/S2/C3/S3/C2, this function
+    //      cannot be used to hold the state of a digital GPIO during Deep-sleep"].
+    //      헷갈려서 그걸 쓰면 조용히 안 걸리고 자는 동안 센서만 계속 켜져 있다.
+    //      GPIO14 는 RTC 핀이라 rtc_gpio_hold_en 이 맞다.
+    const gpio_num_t pwr = (gpio_num_t)gSensorPowerPin;
+    rtc_gpio_init(pwr);
+    rtc_gpio_set_direction(pwr, RTC_GPIO_MODE_OUTPUT_ONLY);
+    rtc_gpio_set_level(pwr, 0);
+    rtc_gpio_hold_en(pwr);
+
+    armButtonWake();
+    gRtcTestSec = testWakeSec;
+    if (testWakeSec) {
+        esp_sleep_enable_timer_wakeup((uint64_t)testWakeSec * 1000000ull);
+        Serial.printf("[SLEEP] 시험 모드 — %u초 뒤에 스스로 깹니다\n",
+                      (unsigned)testWakeSec);
+    }
+
+    // RTC 메모리에 적어 둔다. 깨어난 뒤에 진짜로 잤는지 물어볼 유일한 방법이다.
+    gRtcMagic   = kRtcMagic;
+    gRtcSleeps += 1;
+    gRtcSleepMv = (uint32_t)(readBatteryVolts(nullptr) * 1000.0f);
+    gRtcSleepUs = nowUs();
+
+    Serial.printf("[SLEEP] 잘 자라. 5초 누르면 깬다. (%u번째, %u mV)\n",
+                  (unsigned)gRtcSleeps, (unsigned)gRtcSleepMv);
+    Serial.flush();
+    esp_deep_sleep_start();
+}
+
+// ── 깨어난 직후 — 5초를 채웠나 ───────────────────────────────────────────
+//
+// setup() 의 **맨 앞**에서 부른다. 순서가 중요하다.
+//
+//   · 플래시(NVS)에 쓰기 전에 와야 한다. 주머니에서 눌릴 때마다 부팅 횟수를
+//     올리면 플래시가 그만큼 닳는다.
+//   · 워치독을 걸기 전에 와야 한다. 5초를 세는 동안 물어뜯긴다.
+//
+// ★ ext1 은 누르는 순간 깨운다. 얼마나 눌렸는지는 못 센다. 그래서 여기서
+//   직접 센다. 5초를 못 채우고 떼면 도로 잠든다.
+//
+// 세는 동안 화면으로 알려준다. 안 보여주면 사람이 5초를 못 기다리고 손을 뗀다.
+// 화면은 3V3_S 밖(VDD)이라 센서를 하나도 안 붙인 이 자리에서도 그릴 수 있다.
+static void wakeGate() {
+    const bool fromSleep = (esp_reset_reason() == ESP_RST_DEEPSLEEP);
+
+    // 붙들어 둔 핀부터 푼다. **이게 없으면 깨어나도 센서가 영영 안 켜진다.**
+    // RTC 홀드는 깨어난 뒤에도 계속 걸려 있어서, applySensorPower 가 HIGH 를
+    // 써도 패드가 안 움직인다. 로그에는 "센서 전원 ON" 이 찍히는데 GPS 와 SD 는
+    // 죽어 있는, 보드가 거짓말하는 상태가 된다.
+    if (fromSleep) {
+        // 깊은잠에 들 때 칩이 RTC 핀을 붙들어 놓는다. 그걸 통째로 푼다.
+        //   "Force hold signal is enabled before going into deep sleep for pins
+        //    which are used for EXT1 wakeup." [확인: driver/rtc_io.h:250]
+        //
+        // ★ 배터리 핀(GPIO1)까지 같이 풀어야 한다. 안 풀면 깨어난 직후 배터리가
+        //   3.55 V 인데 2.00 V 로 읽힌다. 여덟 번을 재도 여덟 번 다 1200 mV 다
+        //   (제 값은 2133 mV). 천천히 차오르는 게 아니라 핀에 뭔가 매달려서
+        //   분압비가 0.6 에서 0.34 로 바뀐 것이다
+        //   [확인: 2026-09-08, `off 30` 뒤 `battboot`].
+        //   보통 부팅에서는 첫 번째부터 제 값이 나온다. 깼을 때만 그렇다.
+        rtc_gpio_force_hold_dis_all();
+        for (int pin : {rak::kSensorPowerA, rak::kSensorPowerB, kButtonPin,
+                        rak::kBattAdcPin}) {
+            const gpio_num_t g = (gpio_num_t)pin;
+            rtc_gpio_hold_dis(g);
+            rtc_gpio_deinit(g);      // 다시 보통 GPIO 로 돌려 놓는다
+        }
+    }
+
+    // 잔 시간과 전압 낙차를 여기서 잰다. 아래로 내려가면 늦다.
+    if (fromSleep && gRtcMagic == kRtcMagic) {
+        gRtcSleptUs = nowUs() - gRtcSleepUs;
+        gWokeFromSleep = true;
+        // ★ 전압은 여기서 안 잰다. 이 자리에서 재면 3504 mV 로 잠든 보드가
+        //   2091 mV 로 깨어난 것처럼 나온다. USB 로 충전 중인데 그럴 리가 없다.
+        //   ADC 가 아직 준비되기 전이라 눈금이 다른 값이 나온 것이다
+        //   [확인: 2026-09-08, off 180 두 번 모두 같은 식으로 어긋났다].
+        //   setup() 에서 analogSetPinAttenuation 을 거친 뒤에 잰다.
+
+        // ── 자는 동안 3V3_S 가 정말 꺼져 있었나 ──────────────────────────
+        //
+        // 이게 제일 굵은 의심이다. GPS 는 위성을 찾는 동안 30 mA 쯤 먹는다.
+        // 3V3_S 를 못 내렸으면 자는 내내 그게 돌아간 것이고, 하루 만에 배터리가
+        // 비는 것도 설명이 된다.
+        //
+        // 재는 법. **깨자마자, 전원을 다시 넣기 전에** GPS 선을 들어본다.
+        //   말이 바로 나온다   → 자는 동안 계속 켜져 있었다. 홀드가 안 먹은 것이다
+        //   조용하다           → 꺼져 있었다. 전원을 넣어야 몇 초 뒤에 말을 시작한다
+        //
+        // 여기서만 할 수 있는 측정이다. 아래로 내려가면 applySensorPower 가
+        // 전원을 다시 넣어 버려서 둘을 구분할 수 없다.
+        gRtcGpsBytes = 0;
+        Serial1.begin(kGpsBaud, SERIAL_8N1, rak::kUART1_RX, rak::kUART1_TX);
+        const uint32_t g0 = millis();
+        while (millis() - g0 < 400) {
+            while (Serial1.available()) { Serial1.read(); gRtcGpsBytes++; }
+            delay(5);
+        }
+        Serial1.end();
+    }
+
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT1) return;
+
+    // 화면만 먼저 켠다. I2C 는 3V3_S 와 무관하다.
+    // (main 이 Wire.begin 을 한 뒤여야 U8g2 가 핀을 안 건드린다 — display_rak.cpp)
+    Wire.begin(rak::kI2C1_SDA, rak::kI2C1_SCL, 400000);
+    sail::displayBegin();
+
+    pinMode(kButtonPin, INPUT_PULLUP);
+    delay(20);
+
+    const uint32_t t0 = millis();
+    uint32_t upSince = 0;          // HIGH 가 된 시각. 0 이면 계속 눌려 있다
+    while (true) {
+        const uint32_t held = millis() - t0;
+        if (held >= kBtnOffMs) break;               // 5초 채웠다. 켠다
+
+        if (digitalRead(kButtonPin) == LOW) {
+            upSince = 0;                            // 튐이었다. 계속 센다
+        } else {
+            if (upSince == 0) upSince = millis();
+            // 30ms 이어져야 진짜 뗀 것이다. 여기서 튐을 안 걷어내면 손가락이
+            // 1ms 튈 때마다 취소된다. 5초를 꾹 눌렀는데 안 켜지고, 왜 안 켜지는지
+            // 알 방법도 없다.
+            if (millis() - upSince >= kBtnStableMs) {
+                gRtcFalse += 1;      // 5초 못 채웠다. 도로 잔다
+                sail::displayOff();
+                armButtonWake();
+                // ★ 시험 타이머도 다시 건다. 안 그러면 한 번 헛깨는 순간
+                //   타이머가 사라져서 보드가 영영 안 깨어난다. 실제로 그랬다.
+                if (gRtcTestSec) {
+                    esp_sleep_enable_timer_wakeup((uint64_t)gRtcTestSec * 1000000ull);
+                }
+                esp_deep_sleep_start();
+            }
+        }
+
+        sail::displayHoldBar(btnPct(held), "켜는 중", "놓으면 취소");
+        delay(50);
+    }
+
+    gRtcFull += 1;
+    sail::displayNotice("켜집니다", nullptr);
 }
 
 // ── 기록 (hlog) ──────────────────────────────────────────────────────────
@@ -2886,6 +3425,9 @@ static void printHelp() {
     Serial.println("  fix           GPS 파싱 상태 (위성 수, 위치, 속도, 침로)");
     Serial.println("  imu           9축 값 5초 출력 — 기울여 보세요");
     Serial.println("  scan          I2C — 화면 RAK1921(0x3C) / IMU RAK1905(0x68)");
+    Serial.println("  oledw         화면에 쓸 한글 줄의 폭을 잰다 (128px 안에 드나)");
+    Serial.println("  off           보드를 끈다 (깊은잠). 버튼 5초 누르면 켜진다");
+    Serial.println("  sleepstat     지난번에 정말 잤나 — 헛깬 횟수와 전압 낙차");
     Serial.println("  sd            SD카드 마운트 + 쓰기 시험");
     Serial.println("  sdbench [줄수] SD 쓰기 속도·최대 멈춤 실측 (기본 3600줄)");
     Serial.println("  rec           ★ 기록 상태. rec on / rec off / rec mark");
@@ -2931,6 +3473,27 @@ static void handleCommand(String line) {
     if (line == "info")                { printIdentity(); return; }
     if (line == "scan")                { doScan();     return; }
     if (line == "batt")                { printBattery(); return; }
+    if (line == "oledw")               { doOledWidth(); return; }
+    if (line == "sleepstat")           { doSleepStat(); return; }
+    if (line == "battboot") {
+        Serial.println("──────────────────────────────────────────");
+        Serial.println("  켠 뒤 1초마다 담은 배터리 ADC 값");
+        for (int i = 0; i < kBattBootN; i++) {
+            if (!gBattBoot[i]) continue;
+            Serial.printf("  %2d초  핀 %4u mV  →  배터리 %.3f V\n", i + 1,
+                          (unsigned)gBattBoot[i],
+                          (gBattBoot[i] / 1000.0f) / rak::kBattDivider);
+        }
+        Serial.printf("  지금     핀 %4u mV  →  배터리 %.3f V\n",
+                      (unsigned)(gBattVolts * rak::kBattDivider * 1000.0f), gBattVolts);
+        Serial.println("──────────────────────────────────────────");
+        return;
+    }
+    if (line == "off")                 { goToSleep();   return; }
+    if (line.startsWith("off ")) {       // `off 120` — 120초 뒤 스스로 깬다 (시험용)
+        goToSleep((uint32_t)line.substring(4).toInt());
+        return;
+    }
 
     // sess — 세션 번호를 보거나 고친다.
     //
@@ -3787,6 +4350,11 @@ void setup() {
     Serial.begin(115200);
     delay(300);
 
+    // ★ 제일 먼저 한다. 깊은잠에서 깼으면 5초를 채웠는지 여기서 가른다.
+    //   못 채웠으면 이 안에서 도로 잠들고 아래로 안 내려온다.
+    //   플래시에 쓰기 전, 워치독을 걸기 전이어야 한다 (wakeGate 주석 참고).
+    wakeGate();
+
     // 초기화 도중에 멈추는 경우까지 잡으려면 여기서 먼저 켜야 한다.
     // 실제로 화면 초기화에서 멈춰 아무 로그도 없이 죽은 적이 있다.
     reportResetReason();
@@ -3816,8 +4384,40 @@ void setup() {
 
     // 배터리 ADC. 분압 뒤 최대 2.52 V 라 12 dB 감쇠 범위 안에 들어온다.
     analogSetPinAttenuation(rak::kBattAdcPin, ADC_11db);
+    // ── 켤 때 전압이 낮게 시작해 올라가는 것 ────────────────────────────
+    //
+    // 깨자마자 재면 2193 mV 인데 몇 분 뒤에는 3550 mV 다. 1.3 V 나 차이 난다
+    // [확인: 2026-09-08, off 300 뒤 sleepstat 과 상태줄 비교].
+    //
+    // 분압 저항이 1 MΩ + 1.5 MΩ 이라 ADC 가 보는 저항이 2.5 MΩ 이다. ADC 안에는
+    // 값을 잡아 두는 작은 콘덴서가 있는데 그걸 2.5 MΩ 을 통해 채우려니 느리다.
+    // 덜 채워진 상태로 읽으면 낮게 나온다.
+    //
+    // ── 깬 뒤에는 배터리 값이 낮게 나온다 ───────────────────────────────
+    //
+    // **짐작하지 않고 쟀다.**
+    //
+    //   보통 부팅       1회차부터 2133 mV. 처음부터 맞다
+    //   깊은잠에서 깸   0.25초에 1178 mV. 몇 초에 걸쳐 2138 mV 로 올라간다
+    //
+    // 분압 마디에 콘덴서가 있고, 자는 동안 비었다가 메가옴을 통해 다시 차는
+    // 것으로 보인다. 저항이 2.5 MΩ 이라 느리다.
+    // [확인: 2026-09-08, `off 30` 뒤 `battboot`]
+    //
+    // 그냥 두면 3.55 V 짜리 배터리가 1.96 V 로 잡힌다. 방전 곡선으로는 0% 다.
+    // 바다에서 멀쩡한 배터리를 다 됐다고 판단하게 된다.
+    //
+    // 얼마나 기다려야 하나. loop 가 1초마다 담은 곡선을 봤다.
+    //   1초째 2145 mV,  2초째 2144,  20초째 2143 — 처음부터 평평하다
+    //   [확인: 2026-09-08, `off 40` 뒤 `battboot`]
+    // 즉 1초면 다 찬다. 그래서 깬 경우에만 1초를 기다린다.
+    // 보통 부팅은 처음부터 맞으므로 기다리지 않는다.
+    if (gWokeFromSleep) { delay(1000); feedWatchdog(); }
     gBattVolts = readBatteryVolts(nullptr);
     gBattPct   = batteryPercent(gBattVolts);
+
+    // ※ 깬 뒤의 전압은 여기서 안 적는다. setup 안에서 재면 아직 낮게 나온다.
+    //   loop 가 1초 뒤에 잰 값을 쓴다 (아래 1f).
 
 
     // 기록기. 쓰기 작업을 코어 0 에 띄운다 (SDLOG.md §4)
@@ -3825,6 +4425,12 @@ void setup() {
     gPrefs.putUInt("boot_n", gPrefs.getUInt("boot_n", 0) + 1);
     gPrefs.end();
     hlog::begin();
+
+    // 깊은잠에서 깼으면 그 기록부터 남긴다. 사람이 명령을 안 쳐도 남게.
+    if (gRtcMagic == kRtcMagic && gRtcSleptUs != 0) {
+        doSleepStat();
+        sleepLogToCard();
+    }
 
     // ── 센서 붙이기 ─────────────────────────────────────────────────────
     gpsBegin();
@@ -3931,6 +4537,23 @@ void loop() {
         // 사라졌으면 끄고 나머지로 계속 간다. 돌아오면 다시 붙는다.
         checkSensors();
         hlog::healthCheck();
+    }
+
+    // 1f) 켠 뒤 20초 동안 배터리 값을 1초마다 담아 둔다. `battboot` 가 꺼낸다.
+    //     깬 직후에 값이 낮게 나오는 것이 언제 제자리로 오는지 보려는 것이다.
+    {
+        static int curveN = 0;
+        static uint32_t curveAt = 0;
+        if (curveN < kBattBootN && now - curveAt >= 1000) {
+            curveAt = now;
+            readBatteryVolts(&gBattBoot[curveN]);
+            // 깼을 때 전압은 **이 값**을 쓴다. setup 안에서 잰 값은 낮게 나온다.
+            // 켠 지 1초면 제자리다 [확인: 2026-09-08 battboot 곡선].
+            if (curveN == 0 && gWokeFromSleep) {
+                gRtcWakeMv = (uint32_t)(gBattBoot[0] / rak::kBattDivider);
+            }
+            curveN++;
+        }
     }
 
     // 1e) 저장 버튼. 사람 손가락이라 자주 볼 필요 없다.
@@ -4048,9 +4671,13 @@ void loop() {
         ds.satellites = gGps.satellites.isValid() ? (int)gGps.satellites.value() : 0;
         ds.hdop       = gGps.hdop.isValid() ? (float)gGps.hdop.hdop() : -1.0f;
 
-        const uint32_t tD = micros();
-        sail::displayUpdate(ds);
-        secDone(gStDraw, micros() - tD);
+        // 버튼이 막대를 그리고 있으면 평소 계기 화면은 건너뛴다.
+        // 안 그러면 4 Hz 로 막대를 지워 버린다.
+        if (!gBtnOwnsScreen) {
+            const uint32_t tD = micros();
+            sail::displayUpdate(ds);
+            secDone(gStDraw, micros() - tD);
+        }
     }
 
     // 7) 1 Hz — 시리얼 로그.
