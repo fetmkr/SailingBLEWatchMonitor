@@ -211,6 +211,7 @@ ESP32-S3 는 코어가 둘이다. 하나에 다 몰면 서로 기다린다.
   5) displayOff()      화면 (VDD 라 3V3_S 밖이다)
   6) 손 뗄 때까지 기다림   ← 빼먹으면 잠들자마자 다시 깬다
   7) 3V3_S 내리고 붙들기 · SD 칩셀렉트 HIGH 로 붙들기 · 버튼 풀업 살리기
+  8) 뜬 핀 떼어놓기 (배터리 GPIO1 · GPS PPS GPIO21) — 중간 전압에 뜬 입력이 샌다
 ```
 
 ---
@@ -235,10 +236,10 @@ ESP32-S3 는 코어가 둘이다. 하나에 다 몰면 서로 기다린다.
 
 | 파일 | 줄 | 맡은 일 |
 |---|---|---|
-| `src/main.cpp` | 4800 | setup·loop·GPS·IMU·BLE·버튼·잠들기·시리얼 명령 |
-| `src/hlog.cpp` | 1100 | 기록. 링버퍼와 코어 0 쓰기 일꾼, 되읽어 검사 |
+| `src/main.cpp` | 5,300 | setup·loop·GPS·IMU·BLE·버튼·잠들기·시리얼 명령 |
+| `src/hlog.cpp` | 1,100 | 기록. 링버퍼와 코어 0 쓰기 일꾼, 되읽어 검사 |
 | `src/netsrv.cpp` | 1100 | WiFi 서버. 파일 보내기, 저절로 끄기 |
-| `src/lora.cpp` | 300 | SX1262 설정, 코어 0 받기 일꾼 |
+| `src/lora.cpp` | 340 | SX1262 설정, 코어 0 받기 일꾼 |
 | `src/display_rak.cpp` | 350 | OLED 그리기 |
 | `include/board_rak.h` | 280 | 핀 번호와 그 근거. **여기가 실측 기록이다** |
 | `include/protocol.h` | 280 | BLE·로라 짐 모양. ★ 사본이 넷이라 같이 고쳐야 한다 |
