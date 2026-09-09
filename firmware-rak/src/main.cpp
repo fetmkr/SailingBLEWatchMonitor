@@ -3050,13 +3050,11 @@ static void goToSleep(uint32_t testWakeSec) {
     esp_deep_sleep_start();
 }
 
-// setup() 의 **맨 첫 줄**에서 부른다. Serial.begin 보다도 먼저다.
-//
-// drain 중이면 여기서 전압만 적고 도로 잠들어 아래로 안 내려간다. 화면도 GPS 도
-// BLE 도 안 올린다 — 깨어 있는 시간을 최대한 짧게 해야 재는 값이 안 흔들린다.
-//
-// 사람이 버튼을 누르면 (깨운 이유가 타이머가 아니면) drain 을 끝내고 정상 부팅한다.
 // 깬 뒤 배터리 ADC 가 언제 제자리로 오는지 열두 번 찍어 둔다.
+//
+// 왜 이게 필요했나. 깨자마자 잰 배터리 값이 3.65 V 인데 1.98 V 로 나왔다.
+// "천천히 차는 것" 인지 "딴 값을 읽는 것" 인지를 몰라서 모양을 봐야 했다.
+// 재보니 3.3초 내내 평평하다가 setup 이 다 돌면 뛰었다. 차는 게 아니었다.
 static void probeGate() {
     if (!gProbeOn) return;
     gProbeOn = 0;
@@ -3080,6 +3078,14 @@ static void probeGate() {
     }
 }
 
+// setup() 의 **맨 첫 줄**에서 부른다. Serial.begin 보다도 먼저다.
+//
+// drain 중이면 여기서 전압만 적고 도로 잠들어 아래로 안 내려간다. 화면도 GPS 도
+// BLE 도 안 올린다 — **깨어 있는 시간이 곧 재는 값을 흔든다.** 한 번 깰 때
+// 1.6초가 걸리고 15번이면 24초다. 13시간에 걸쳐 평균 20 µA 쯤 되는데, 우리가
+// 재려는 값이 그 자릿수라 최대한 짧게 해야 한다.
+//
+// 사람이 버튼을 누르면 (깨운 이유가 타이머가 아니면) drain 을 끝내고 정상 부팅한다.
 static void drainGate() {
     if (!gDrainOn) return;
     if (esp_reset_reason() != ESP_RST_DEEPSLEEP)                  { gDrainOn = 0; return; }
