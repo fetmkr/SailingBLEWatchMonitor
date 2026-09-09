@@ -6,6 +6,11 @@ RAK3112(ESP32-S3) 펌웨어의 구조와 도는 순서. 코드는 `firmware-rak/
 로라와 BLE 는 `PROTOCOL.md`, 기록 파일은 `SDLOG.md`, GPS 설정은 `GPS.md`,
 끄고 켜기는 `POWER.md`, 파일 보내기는 `TRANSFER.md`.
 
+**그림판 사본** — 같은 내용을 그림으로 그린 것이 있다.
+https://claude.ai/code/artifact/35ba1b27-010c-4aa5-b7b0-6d6066cee067
+
+★ 둘은 같은 내용이다. 고칠 때는 **같이 고쳐야 한다.**
+
 ---
 
 ## 1. 무엇이 무엇에 붙어 있나
