@@ -102,11 +102,19 @@ void drawChecked(int x, int y, const char* s, const char* what) {
 
 } // namespace
 
+// 0x3C 가 대답하나. 붙어 있는지만 가볍게 두드려 본다.
 bool displayPresent() {
     Wire.beginTransmission(rak::kAddrDisplay);
     return Wire.endTransmission() == 0;
 }
 
+// 화면을 올린다. 없으면 false 만 주고 조용히 지나간다.
+//
+// ★ 화면이 없다고 배가 계기를 통째로 잃으면 안 된다. 여기서 실패해도
+//   GPS·IMU·기록·BLE 는 그대로 돈다.
+//
+// ★ 반드시 main 의 Wire.begin 뒤에 불러야 한다. 이유는 파일 맨 위 주석에 있다.
+//   이미 올라와 있으면 다시 초기화하지 않는다 — 화면이 깜빡인다.
 bool displayBegin() {
     if (!displayPresent()) {
         gOk = false;
@@ -121,6 +129,10 @@ bool displayBegin() {
     return true;
 }
 
+// 1 Hz. 화면이 아직 붙어 있나 본다.
+//
+// 배 위에서 진동으로 커넥터가 빠질 수 있다. 빠지면 그리기를 멈추고, 다시
+// 꽂히면 알아서 붙는다. 안 멈추면 매번 I2C 가 타임아웃되면서 루프가 느려진다.
 void displayHealthCheck() {
     const bool now = displayPresent();
     if (gOk && !now) {
@@ -227,6 +239,13 @@ void displayOn() {
     gOled.setPowerSave(0);
 }
 
+// 한 장면 그린다. 4 Hz 로 부르면 충분하다.
+//
+// 128x64 한 장이 1 KB 고 I2C 400㎑ 로 25 ms 쯤 걸린다. 더 자주 그리면
+// 그만큼 메인 루프가 붙잡힌다. 사람 눈에는 4 Hz 면 안 끊겨 보인다.
+//
+// **값이 없으면 없다고 그린다.** 위성을 못 잡았으면 속도 자리에 --.-- 를
+// 쓴다. 0 을 쓰면 "멈춰 있다" 로 읽혀서 배 위에서 잘못 판단한다.
 void displayUpdate(const DisplayState& s) {
     if (!gOk) return;
 

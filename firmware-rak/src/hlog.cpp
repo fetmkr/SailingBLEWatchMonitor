@@ -32,6 +32,11 @@ char*  gBuf = nullptr;
 volatile size_t gHead = 0;
 volatile size_t gTail = 0;
 
+// 링버퍼에 얼마나 차 있나. 머리가 꼬리를 앞지르면 한 바퀴 돌아온 것이라
+// 뺄셈을 반대로 한다.
+//
+// bufFree 가 1 을 빼는 이유. 머리와 꼬리가 같은 자리면 "비었다" 로 보기로
+// 정했다. 그래서 꽉 채우면 빈 것과 구분이 안 된다. 한 칸을 늘 비워 둔다.
 size_t bufUsed() {
     const size_t h = gHead, t = gTail;
     return (h >= t) ? (h - t) : (kBufSize - t + h);
@@ -80,6 +85,10 @@ const char* gBootWhy = "?";
 // 코어 0 에서 NVS 를 만지지 않으려고 표식만 세운다.
 volatile bool gFailedStop = false;
 
+// 카드가 꽂혀 있나. RAK15002 가 IO 슬롯 38번으로 알려준다 (GPIO39, 꽂히면 LOW).
+//
+// 부를 때마다 pinMode 를 다시 하는 이유. 이 핀은 GPS 를 슬롯 D 에 꽂으면
+// GPS 리셋과 같은 선이 된다 (board_rak.h). 남이 방향을 바꿔 놓고 갔을 수 있다.
 bool cardPresent() {
     pinMode(rak::kSdCardDetect, INPUT_PULLUP);
     return digitalRead(rak::kSdCardDetect) == LOW;
@@ -117,6 +126,31 @@ inline void put32(uint8_t* p, size_t& o, uint32_t v) {
 
 // ── 쓰기 작업 (코어 0) ───────────────────────────────────────────────────
 
+// 카드에 실제로 쓰는 일꾼. **코어 0 에서 혼자 돈다.**
+//
+// 메인 루프(코어 1)는 링버퍼에 밀어넣기만 하고 바로 돌아간다. 카드가 속으로
+// 정리하느라 오래 대답을 안 해도 BLE 10 Hz 와 로라 차례가 안 밀린다.
+//
+// 하는 일이 셋이다.
+//
+//   1) 기록 중이 아닐 때
+//      멈춰 달라는 표(gStopWanted)가 서 있으면 남은 것을 다 쏟고 파일을 닫는다.
+//      **여기서만 닫는다.** 메인 루프가 닫으면 쓰는 도중에 파일이 사라진다.
+//
+//   2) 기록 중일 때 — 모아서 쓴다
+//      4 KB 가 차거나 0.5초가 지나면 내보낸다. 한 줄씩 쓰면 카드가 매번
+//      속으로 한 블록을 지웠다 쓰느라 훨씬 느리다.
+//      한 번에 kChunk(4 KB)를 넘기지 않는 이유는 그게 카드의 블록 크기에
+//      맞아떨어져서다. 링버퍼 끝을 넘어가면 그 앞까지만 쓰고 다음 바퀴에 마저 쓴다.
+//
+//   3) 5초에 한 번 못 박기(flush)
+//      쓰기는 카드 안의 캐시에만 들어갈 수 있다. flush 를 해야 진짜 남는다.
+//      전원이 갑자기 끊기면 마지막 flush 뒤의 5초치를 잃는다. 그 이상 자주
+//      하면 카드가 자주 멈춰서 오히려 손해다.
+//
+// 쓰기가 모자라게 들어가면(w != n) 카드가 죽은 것으로 보고 스스로 멈춘다.
+// 코어 0 에서는 NVS 를 안 만지기로 했으므로 표식(gFailedStop)만 세우고,
+// 메인 루프의 healthCheck 가 그걸 보고 뒷정리를 한다.
 void writerTask(void*) {
     uint32_t lastWrite = millis(), lastFlush = millis();
     for (;;) {
@@ -187,6 +221,11 @@ uint16_t crc16(const uint8_t* p, size_t n) {
 // ── 바깥에서 부르는 것들 ─────────────────────────────────────────────────
 
 namespace {
+// "지금 기록 중" 이라는 표를 NVS 에 세우고 지운다.
+//
+// 왜 필요한가. 전원이 갑자기 끊기면 stop() 을 못 거친다. 그러면 이 표가 1 로
+// 남는다. 다음에 켤 때 그걸 보고 "지난번에 끊겼구나" 를 안다.
+// 사람이 끝낸 경우에는 stop() 이 0 으로 지우므로 표가 안 남는다.
 void setCutFlag(uint8_t v) {
     Preferences p;
     p.begin("sail", false);
@@ -195,6 +234,8 @@ void setCutFlag(uint8_t v) {
 }
 } // namespace
 
+// 지난번이 그냥 끊겼나. 위 표를 읽는다. main.cpp 가 켤 때 물어보고
+// 이어서 기록을 시작할지 정한다.
 bool cutShort() {
     Preferences p;
     p.begin("sail", true);
@@ -207,6 +248,12 @@ void clearCutFlag() { setCutFlag(0); }
 
 void noteBootReason(const char* why) { if (why) gBootWhy = why; }
 
+// 링버퍼를 잡고 코어 0 에 일꾼을 띄운다. setup() 에서 한 번만 부른다.
+//
+// ★ PSRAM 을 먼저 쓴다. 내부 RAM 은 BLE 스택이 크게 쓰는데 64 KB 를 거기서
+//   떼어 가면 광고가 끊길 수 있다. PSRAM 이 없거나 실패하면 내부 RAM 으로
+//   물러서고, 그것도 안 되면 **기록 기능만 끄고 나머지는 그대로 돈다.**
+//   카드가 없다고 배가 계기를 통째로 잃으면 안 된다.
 void begin() {
     if (gBuf) return;
     gBuf = (char*)ps_malloc(kBufSize);          // PSRAM 먼저. 내부 RAM 은 BLE 가 쓴다
@@ -493,6 +540,18 @@ void stop() {
     }
 }
 
+// 항법 한 줄(38바이트)을 링버퍼에 넣는다. 1 Hz 로 부른다.
+//
+// 값을 바꾸지 않고 **다듬기 전 원본 그대로** 적는다. 앱에 보이는 속도는
+// 다듬고 잡음 바닥을 씌운 값인데 그걸 저장하면 원본을 되살릴 수 없다.
+//
+// 표식(event)을 여기서 합친다. 버튼을 눌러도 그 자리에서 안 적고 **다음
+// 항법 줄에** 붙는다 (mark 참조). 첫 줄에는 kEvFirst 가 자동으로 붙는다.
+//
+// ★ CRC 를 36 으로 박아 두었다. kNavSize(38)에서 CRC 두 바이트를 뺀 값이다.
+//   줄 크기를 고치면 이 숫자도 같이 고쳐야 한다. 안 고치면 CRC 가 엉뚱한
+//   범위를 덮는데 **에러가 안 난다.** 파서 쪽에서만 깨져 보인다.
+//   (writeImu 는 kImuSize - 2 로 적어서 이 함정이 없다)
 void writeNav(const NavSample& s) {
     if (!gRecording) return;
     uint8_t r[kNavSize];
@@ -522,6 +581,11 @@ void writeNav(const NavSample& s) {
     if (push(r, kNavSize)) ++gNavRows;
 }
 
+// 9축 한 줄(19바이트)을 링버퍼에 넣는다. 100 Hz 로 부른다.
+//
+// 초당 1.9 KB 로 전체 양의 대부분이 여기서 나온다. 그래서 줄을 최대한
+// 줄였다 — v1.0 에 있던 쿼터니언(8바이트)을 뺐다. 각도는 나중에 가속도와
+// 자이로로 다시 구할 수 있지만, 원본을 안 남기면 못 되살린다.
 void writeImu(const ImuSample& s) {
     if (!gRecording) return;
     uint8_t r[kImuSize];
@@ -536,6 +600,13 @@ void writeImu(const ImuSample& s) {
     if (push(r, kImuSize)) ++gImuRows;
 }
 
+// 사람이 눈으로 읽는 사본 한 줄. 10초에 한 번 부른다.
+//
+// 카드를 뽑아 컴퓨터에 꽂았을 때 파서 없이 바로 확인하는 용이다.
+// 초당 15바이트라 전체의 0.5% 밖에 안 된다.
+//
+// 여기서 바로 카드에 안 쓴다. 램에 모았다가 1분에 한 번 쏟는다 —
+// 10초마다 다른 파일을 건드리면 바이너리 파일 자리가 조각난다.
 void writeText(const NavSample& s, const TextSample& t) {
     if (!gRecording || !gTxt) return;
 
@@ -602,6 +673,11 @@ void writeText(const NavSample& s, const TextSample& t) {
     }
 }
 
+// 이 세션에서 위성을 **처음** 잡은 시각을 적어 둔다. 두 번째부터는 무시한다.
+//
+// 시작할 때는 이 값을 모른다. 해변에서 버튼을 누르면 보통 1~2분 뒤에 잡힌다.
+// 그래서 stop() 이 파일을 닫으면서 머리글에 이 값을 다시 써 넣고 파일 이름도
+// 고친다.
 void noteUtcStart(uint32_t epochSec, uint16_t ms) {
     if (!gRecording || gUtcStart || !epochSec) return;
     gUtcStart = epochSec;
@@ -610,6 +686,11 @@ void noteUtcStart(uint32_t epochSec, uint16_t ms) {
                   (unsigned long)epochSec, ms);
 }
 
+// 이벤트 표식. 버튼을 짧게 누르면 여기로 온다.
+//
+// ★ 그 자리에서 안 적는다. **다음 항법 줄에 붙는다** (writeNav 가 합친다).
+//   항법은 1 Hz 라 표식이 최대 1초 늦게 찍힌다. 마크 부표를 지나는 순간을
+//   초 단위로 보려면 그 점을 감안해야 한다.
 void mark() {
     gPendingEvent |= kEvMark;
     Serial.println("[LOG] 다음 줄에 표식을 붙입니다");
@@ -621,6 +702,10 @@ uint32_t sinceTextMs() { return millis() - gTextLastRow; }
 
 uint32_t recStartedMs() { return gStartedMs; }
 
+// 지금 상태를 한 덩어리로 베껴 준다. `rec` 명령과 화면, BLE 가 쓴다.
+//
+// 값을 직접 내주지 않고 베끼는 이유. 이 값들은 코어 0 의 일꾼이 계속 고친다.
+// 부르는 쪽이 하나씩 읽으면 읽는 도중에 바뀌어 앞뒤가 안 맞는 상태를 본다.
 void getStatus(Status* out) {
     if (!out) return;
     out->recording   = gRecording;
@@ -849,6 +934,10 @@ void verify(uint32_t session) {
  *
  * 파일 전체를 램에 올리지 않는다. 끝에서 필요한 만큼만 되짚어 읽는다.
  */
+// 텍스트 사본의 앞이나 뒤 몇 줄을 뱉는다. `rec tail` / `rec head` 가 부른다.
+//
+// 카드를 뽑지 않고 배 위에서 "지금 것이 제대로 찍혔나" 를 보는 용이다.
+// head=true 면 앞에서, false 면 뒤에서 읽는다.
 void tail(uint32_t session, uint16_t lines, bool head) {
     if (gRecording) { Serial.println("[꼬리] 기록 중에는 못 합니다. rec off 먼저."); return; }
     if (!cardPresent()) { Serial.println("[꼬리] 카드가 없습니다."); return; }
@@ -918,6 +1007,10 @@ void tail(uint32_t session, uint16_t lines, bool head) {
     Serial.println("──────────────────────────────────────────");
 }
 
+// 세션 하나를 지운다. HLG 와 TXT 둘 다. `rec rm <번호>` 가 부른다.
+//
+// 못 되돌린다. 그래서 기록 중에는 막고, 번호로만 받는다 —
+// 파일 이름을 직접 받으면 오타 하나로 남의 세션을 지운다.
 bool removeSession(uint32_t session) {
     if (gRecording) { Serial.println("[지움] 기록 중에는 못 합니다. rec off 먼저."); return false; }
     if (!session)   { Serial.println("[지움] 번호를 적으세요."); return false; }
@@ -958,6 +1051,10 @@ bool removeSession(uint32_t session) {
     return ok == n;
 }
 
+// 카드에 있는 세션 목록. `rec ls` 가 부른다.
+//
+// 이름의 앞 번호가 정렬을 맡으므로 이름순이 곧 만든 순서다. 시각이 틀렸거나
+// `_nosat` 이 붙어 있어도 순서는 안 뒤집힌다 (nameFor 참조).
 void listFiles() {
     if (gRecording) { Serial.println("[목록] 기록 중에는 못 합니다."); return; }
     if (!cardPresent()) { Serial.println("[목록] 카드가 없습니다."); return; }
@@ -984,6 +1081,17 @@ void listFiles() {
     Serial.println("──────────────────────────────────────────");
 }
 
+// 1 Hz 로 메인 루프가 부른다. 기록이 조용히 죽어 있는 것을 잡는다.
+//
+// 두 가지를 본다.
+//
+//   1) 코어 0 이 쓰기 실패로 저절로 멈췄나
+//      일꾼은 NVS 를 못 만지므로 표식만 세워 둔다. 여기서 받아 이어시작
+//      표시를 지운다. 카드가 죽은 것이라 다시 켜서 또 걸어봐야 똑같이 실패한다.
+//
+//   2) 기록 중에 카드가 빠졌나
+//      배 위에서 진동으로 빠질 수 있다. 그대로 두면 쓰기가 계속 실패하면서
+//      링버퍼가 차고, 결국 메인 루프가 push 에서 5초씩 기다리게 된다.
 void healthCheck() {
     // 쓰기가 실패해서 코어 0 이 저절로 멈춘 경우. 카드가 죽은 것이니
     // 다시 켜서 또 걸어봐야 똑같이 실패한다. 이어시작 표시를 지운다.

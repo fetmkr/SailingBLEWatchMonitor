@@ -57,12 +57,32 @@ Rx       gRing[kRingLen];
 volatile size_t   gHead = 0, gTail = 0;
 volatile uint32_t gDropped = 0, gReceived = 0, gCrcErrors = 0;
 
+// 짐이 하나 들어왔다고 칩이 DIO1 을 흔들 때 불린다.
+//
+// ★ 여기서 하는 일은 **깨우는 것 하나뿐이다.** SPI 로 짐을 꺼내지 않는다.
+//   인터럽트 안에서 SPI 를 돌리면 그 사이 다른 인터럽트가 막히고, RadioLib 이
+//   속으로 쓰는 대기 함수가 인터럽트 문맥에서 안전하지 않다.
+//   IRAM_ATTR 은 이 함수를 램에 두라는 표시다. 플래시를 읽는 중에도
+//   인터럽트가 들어올 수 있는데, 그때 플래시에 있는 코드는 못 부른다.
 void IRAM_ATTR onDio1() {
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(gRxSem, &woken);
     if (woken) portYIELD_FROM_ISR();
 }
 
+// 받기 일꾼. **코어 0 에서 혼자 돈다.** 깨워 주면 짐을 꺼내 링버퍼에 옮긴다.
+//
+// 왜 코어를 나눴나. SX1262 는 받은 짐을 **하나만** 들고 있다. 다음 것이
+// 오면 덮어쓴다. 함대에서 차례 간격이 25 ms 이므로 루프가 25 ms 넘게
+// 딴 데 가 있으면 그 배를 잃는다. 메인 루프에는 SD·화면·GPS·BLE 가 다
+// 걸려 있어서 그 약속을 지킬 수가 없다.
+//
+// ★ 순서가 중요하다. 짐을 읽자마자 **먼저** 다시 듣는 자리로 돌려놓는다.
+//   아래에서 링버퍼가 꽉 차서 버리게 되더라도 무전기는 계속 듣고 있어야 한다.
+//   반대로 하면 링버퍼가 찬 동안 오는 배를 통째로 못 듣는다.
+//
+// CRC 가 깨진 것은 세기만 하고 버린다. 짐 안에 배 번호가 있는데 그게 틀리면
+// 남의 배를 내 배로 그릴 수 있다. 의심스러우면 안 쓰는 쪽이 맞다.
 void rxWorker(void*) {
     uint8_t buf[kPayloadLen];
     for (;;) {
@@ -147,6 +167,10 @@ void sleep() {
     Serial.printf("[LORA] 재웁니다 (st=%d)\n", (int)st);
 }
 
+// 링버퍼에서 하나 꺼낸다. 메인 루프가 부른다. 없으면 false.
+//
+// 꺼내는 쪽이 하나(메인 루프)고 넣는 쪽도 하나(코어 0 일꾼)라 자물쇠가 없다.
+// 머리와 꼬리를 각자 하나씩만 만지므로 서로 안 밟는다.
 bool pop(Rx& out) {
     if (gTail == gHead) return false;
     out = gRing[gTail];
@@ -158,6 +182,10 @@ uint32_t dropped()   { return gDropped; }
 uint32_t received()  { return gReceived; }
 uint32_t crcErrors() { return gCrcErrors; }
 
+// `lora` — 설정과 지금까지의 성적을 사람이 읽게 뱉는다.
+//
+// 제일 중요한 줄은 마지막의 "버림" 이다. 0 이 아니면 메인 루프가 링버퍼를
+// 제때 안 꺼내 간 것이고, 그건 배를 놓쳤다는 뜻이다.
 void report() {
     if (!gUp) { Serial.println("[LORA] 안 올라와 있습니다"); return; }
     Serial.println("──────────────────────────────────────────");
@@ -234,11 +262,17 @@ void reportNoise(uint16_t samples) {
 /// `lora watch` — 짐이 올 때마다 한 줄씩 뱉는다. **두 대로 시험할 때 쓴다.**
 /// 한쪽에서 `lora tx`, 다른 쪽에서 `lora watch`.
 bool gWatch = false;
+// `lora watch` — 받는 것을 시리얼에 그대로 찍을지 켜고 끈다.
+// 보드 두 대로 거리 시험을 할 때 쓴다. 한쪽에서 `lora tx`, 다른 쪽에서 이것.
 void watchToggle() {
     gWatch = !gWatch;
     Serial.printf("[LORA] 받는 것 보여주기 %s\n", gWatch ? "켬 — 다른 보드에서 lora tx 하세요" : "끔");
 }
 
+// 메인 루프가 1 Hz 로 부른다. 링버퍼를 비워 준다.
+//
+// ★ `lora watch` 가 꺼져 있어도 **반드시 불러야 한다.** 안 부르면 링버퍼가
+//   차고 코어 0 일꾼이 받은 짐을 버리기 시작한다 (report 의 "버림").
 void pump() {
     Rx r;
     while (pop(r)) {
@@ -249,6 +283,11 @@ void pump() {
     }
 }
 
+// `lora regs` — 데이터시트 15장의 칩 버그 세 개가 실제로 걸렸는지 되읽는다.
+//
+// 왜 되읽나. 이 셋은 **안 걸려도 아무 표시가 안 난다.** 무전기는 멀쩡히
+// 켜지고 짐도 오간다. 다만 거리가 반토막 나거나 어느 날 송신부가 탄다.
+// 설정을 써 넣은 것과 칩에 실제로 들어간 것은 다른 이야기라 눈으로 본다.
 void reportRegs() {
     if (!gUp) { Serial.println("[LORA] 안 올라와 있습니다"); return; }
 

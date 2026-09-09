@@ -95,6 +95,10 @@ char     gLastFileDone[40] = {0};
 uint32_t gLastDoneAt   = 0;        // millis. 0 이면 아직 없다
 uint32_t gLastDoneMs   = 0;        // 얼마나 걸렸나
 
+// 방금 누가 말을 걸었는지 적어 둔다. 요청이 올 때마다 불린다.
+//
+// 자리가 꽉 차면 **제일 오래 안 본 상대**를 밀어낸다. 배 한 척에 아이폰과
+// 아이패드와 노트북이 동시에 붙을 수 있어서 하나만으로는 모자란다.
 void sawClient(uint32_t ip, const char* id = nullptr) {
     if (ip == 0) return;
     const uint32_t now = millis();
@@ -117,6 +121,10 @@ void sawClient(uint32_t ip, const char* id = nullptr) {
     snprintf(gSeen[oldest].id, sizeof(gSeen[oldest].id), "%s", (id && *id) ? id : "");
 }
 
+// 지금 몇 대가 붙어 있나. 세면서 오래된 것은 자리에서 지운다.
+//
+// WiFi 는 "끊겼다" 를 안 알려줄 때가 많다. 앱을 그냥 닫거나 배가 멀어지면
+// 아무 신호 없이 조용해진다. 그래서 시간으로 잊는다.
 int seenCount() {
     const uint32_t now = millis();
     int n = 0;
@@ -128,6 +136,8 @@ int seenCount() {
     return n;
 }
 
+// IP 번호를 사람이 읽는 글로. ESP32 는 IP 를 뒤집힌 순서로 담아 두므로
+// 낮은 바이트부터 꺼낸다.
 void ipText4(uint32_t ip, char* out, size_t n) {
     if (ip == 0) { if (n) out[0] = 0; return; }
     snprintf(out, n, "%lu.%lu.%lu.%lu",
@@ -208,6 +218,16 @@ bool     gFast   = false;
 uint32_t gFastAt = 0;
 constexpr uint32_t kFastHoldMs = 5000;
 
+// 파일을 보내는 동안만 BLE 를 내리고 WiFi 를 전속력으로 돌린다.
+//
+// 왜 BLE 를 내리나. 둘이 같은 2.4㎓ 안테나를 나눠 쓴다. BLE 가 켜져 있으면
+// WiFi 가 절전 모드를 못 끄고, 그러면 파일 보내는 속도가 반토막 난다.
+//
+// ★ 순서를 바꾸면 칩이 죽는다. BLE 를 먼저 내리고 절전을 끈다.
+//   반대로 하면 그 자리에서 abort() 한다.
+//
+// 다 보내고 5초가 지나면 poll() 이 알아서 되돌린다. 매번 껐다 켜지 않는
+// 이유는 파일이 여러 개일 때 그 사이마다 BLE 를 올렸다 내리면 손해라서다.
 void fastOn() {
     gFastAt = millis();
     if (gFast) return;
@@ -220,6 +240,7 @@ void fastOn() {
     Serial.println("[NET] 파일 보내는 동안 BLE 를 내립니다.");
 }
 
+// BLE 를 되살린다. fastOn 의 정확한 역순이다. 절전을 먼저 켜고 BLE 를 올린다.
 void fastOff() {
     if (!gFast) return;
     WiFi.setSleep(true);      // 절전을 먼저 켜고
@@ -304,6 +325,10 @@ void loadCreds() {
 #define SAIL_AP_PASS "sailing1234"
 #endif
 
+// 카드를 올린다. 이미 올라와 있으면 그냥 true.
+//
+// 기록기(hlog)와 이 서버가 같은 카드를 쓴다. 둘 다 필요할 때 올리고 안 쓰면
+// 내린다. 서로 붙잡고 있으면 안 되니 짧게 쓰고 놓는다.
 bool sdUp() {
     if (gSdUp) return true;
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
@@ -311,6 +336,7 @@ bool sdUp() {
     return gSdUp;
 }
 
+// 카드를 놓는다. 파일을 다 보낸 뒤에 부른다.
 void sdDown() {
     if (gSdUp) { SD.end(); gSdUp = false; }
 }
@@ -325,6 +351,10 @@ void cors() {
     gServer.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
 }
 
+// GET /status — 앱이 제일 먼저 물어보는 것.
+//
+// 기록 상태·카드 여유·지금 누가 받고 있나까지 한 덩어리로 준다.
+// 앱이 여러 번 물어보지 않게 필요한 것을 다 담는다.
 void handleStatus() {
     cors();
     hlog::Status st;
@@ -684,6 +714,9 @@ void handleRec() {
                  "{\"ok\":false,\"error\":\"아직 안 만들었습니다\"}");
 }
 
+// GET / — 브라우저로 그냥 들어왔을 때 보여주는 쪽지.
+//
+// 앱 없이 확인할 길이 하나는 있어야 한다. 배에서 노트북만 있을 때 쓴다.
 void handleRoot() {
     cors();
     char body[640];
@@ -719,6 +752,9 @@ void mdnsHostInto(char* host, size_t cap) {
     if (j == 0) snprintf(host, cap, "sail");
 }
 
+// 이름으로 찾게 해 준다. IP 를 몰라도 `sail-XX.local` 로 들어온다.
+//
+// 배마다 IP 가 다르고 대회장에서는 매번 바뀐다. 이름은 안 바뀐다.
 void startMdns() {
     // ★ 이름은 **배 이름**으로 짓는다. 붙은 WiFi 이름으로 지으면 안 된다.
     //
@@ -866,6 +902,13 @@ void routes() {
 
 } // namespace
 
+// 보드가 스스로 WiFi 를 연다 (AP 모드). 대회장에 쓸 만한 망이 없을 때.
+//
+// 이름은 배 이름 그대로다 — 여러 대가 있어도 어느 배인지 바로 안다.
+// 비밀번호는 secrets.h 에 있고 그 파일은 커밋 안 된다.
+//
+// ★ 라디오를 재우지 않는다. ESP32-S3 기본값이 절전이라 비컨 사이에 라디오를
+//   꺼 버리는데, 그동안은 파일이 안 나간다.
 bool startAP() {
     stop();
     snprintf(gSsid, sizeof(gSsid), "%s", ::sailFullName());
@@ -908,6 +951,10 @@ bool startAP() {
     return true;
 }
 
+// 이미 있는 WiFi 에 들어간다 (STA 모드). 이름과 비밀번호는 NVS 에 있다.
+//
+// AP 모드보다 이쪽이 낫다. 노트북이 인터넷을 안 잃고, 여러 배를 한 망에서
+// 같이 볼 수 있다. 못 들어가면 부르는 쪽이 AP 로 물러선다.
 bool startJoin(uint32_t timeoutMs) {
     loadCreds();
     if (strlen(gStaSsid) == 0) {
@@ -949,6 +996,10 @@ bool startJoin(uint32_t timeoutMs) {
     return true;
 }
 
+// WiFi 를 통째로 내리고 BLE 를 되살린다.
+//
+// 배에서 WiFi 는 **평소에 꺼져 있는 것이 정상이다.** 켜져 있으면 전기를
+// 먹고 BLE 를 방해한다. 파일 받을 때만 켰다가 끝나면 끈다.
 void stop() {
     const bool wasUp = (gMode != Mode::Off);
     if (wasUp) {
@@ -976,6 +1027,16 @@ void stop() {
     if (wasUp) ::sailBleStart();
 }
 
+// 메인 루프가 계속 부른다. 요청을 받고, 끌 때가 됐나 본다.
+//
+// **끄는 조건이 세 갈래다. 위에서부터 빠른 순서다.**
+//
+//   1) 쓰던 상대가 사라졌다   — 제일 빠르다. 앱을 닫거나 배가 멀어지면 바로
+//   2) 빌려 간 앱이 조용하다  — 앱이 "몇 초만 쓸게" 하고 말이 없으면
+//   3) 그냥 시간이 다 됐다    — 켜 놓고 잊은 경우만 여기까지 온다
+//
+// 세 개를 다 두는 이유. WiFi 는 끊겼다는 것을 안 알려줄 때가 많다. 하나만
+// 믿으면 배 위에서 WiFi 가 켜진 채로 남아 전기를 먹는다.
 void poll() {
     if (gMode == Mode::Off) return;
     gServer.handleClient();
@@ -1024,12 +1085,17 @@ const char* apPass() { return SAIL_AP_PASS; }
 
 const char* lastIp() { loadLastIp(); return gLastIp; }
 
+// 저절로 꺼지기까지 몇 밀리초 남았나. 화면과 앱이 보여준다.
 uint32_t idleLeftMs() {
     if (gMode == Mode::Off || !gIdleOffMs) return 0;
     const uint32_t gone = millis() - gLastUse;
     return gone >= gIdleOffMs ? 0 : gIdleOffMs - gone;
 }
 
+// WiFi 이름과 비밀번호를 NVS 에 넣는다. BLE 로 받는다 (PROTOCOL.md §9).
+//
+// 예전에는 secrets.h 에 박아 두고 다시 구웠다. 배가 30대면 대회장 WiFi 가
+// 바뀔 때마다 30대를 노트북에 꽂아야 했다.
 void setCreds(const char* ssid, const char* pass) {
     gWifiPrefs.begin("wifi", /*readOnly=*/false);
     gWifiPrefs.putString("ssid", ssid ? ssid : "");
