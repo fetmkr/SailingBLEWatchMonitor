@@ -1763,6 +1763,118 @@ static float headingDeg() {
     return h;
 }
 
+// ── 기울기를 보정한 방위 (INSLIB 에서 가져온 식) ─────────────────────────
+//
+// ★ 위의 headingDeg() 는 자력계 두 축을 그냥 atan2 한다. **배가 기울면 틀린다.**
+//   자기장은 한국에서 아래로 53° 로 꽂힌다. 배가 누우면 그 아래 성분이 옆 축으로
+//   새어 들어와서 방위를 밀어 버린다.
+//
+//   계산해 본 값이다 (복각 53°, 뱃머리 방향을 5° 씩 다 돌려본 최대 오차).
+//
+//       힐 10°  →  13.6° 틀림
+//       힐 20°  →  29.1° 틀림
+//       힐 30°  →  50.4° 틀림
+//
+//   딩기는 20~30° 로 눕는다. 그리고 우리가 재려는 leeway 는 3~8° 다.
+//   **오차가 재려는 값보다 네 배에서 열 배 크다.** 그대로면 leeway 는 잡음이다.
+//
+// 식은 github.com/jnz/inslib 의 ahrs_mag_detilt 를 그대로 옮겼다 (MIT).
+// 자력 벡터를 힐·피치만큼 되돌려 수평으로 눕힌 뒤 atan2 한다.
+//
+// ── 앞·오른쪽·아래를 어떻게 아나 ────────────────────────────────────────
+//
+// 지금 설정이 이미 두 축을 알려주고 있다. 방위를 atan2(a, b) 로 구하는데,
+// 자기 방위의 정의가 atan2(-오른쪽, 앞) 이므로
+//
+//       앞     = magAxis(gHdgAxisB) * gHdgSignB
+//       오른쪽 = magAxis(gHdgAxisA) * (-gHdgSignA)
+//
+// 남은 축이 아래고, 부호는 오른손 법칙으로 정해진다 (아래 = 앞 × 오른쪽).
+//
+// ★ 이 부호가 맞는지는 **손으로 기울여 봐야 안다.** `hdgtilt` 명령이 두 방위를
+//   나란히 찍는다. 보드를 좌우로 기울일 때 보정한 쪽이 안 움직이면 맞는 것이고,
+//   반대로 두 배로 흔들리면 아래 축 부호가 뒤집힌 것이다.
+//
+// ★ 힐·피치는 **보정 전 값(raw)** 을 쓴다. currentHeelDeg 는 사람이 잡아 둔
+//   평형 기준을 뺀 값이라 "배가 평평한가" 를 말하지, "센서가 중력에 대해 얼마나
+//   기울었나" 를 말하지 않는다. 자력계를 눕히려면 뒤쪽이 필요하다.
+static uint8_t magDownAxis() {
+    // 앞도 오른쪽도 아닌 나머지 축
+    return (uint8_t)(3 - gHdgAxisA - gHdgAxisB);
+}
+
+// 오른손 좌표계가 되도록 아래 축의 부호를 정한다.
+// (앞, 오른쪽, 아래) 가 오른손이려면 세 축 번호의 순서와 부호 곱이 맞아야 한다.
+static float magDownSign() {
+    const uint8_t f = gHdgAxisB, r = gHdgAxisA, d = magDownAxis();
+    if (f == r) return 0.0f;                    // 설정이 잘못됐다
+    // (0,1,2) 와 그 순환은 +, 나머지는 -
+    const bool even = (f == 0 && r == 1) || (f == 1 && r == 2) || (f == 2 && r == 0);
+    const float parity = even ? 1.0f : -1.0f;
+    (void)d;
+    return parity * gHdgSignB * (-gHdgSignA);
+}
+
+// 가속도계 값을 **자력계 좌표계로** 옮긴다.
+//
+// 한 칩인데 자력계만 따로 든 칩(AK8963)이라 축이 다르다. 라이브러리가 안 맞춰 준다.
+//     자력 X = 가속 Y,   자력 Y = 가속 X,   자력 Z = -가속 Z
+//     [확인: MPU-9250 데이터시트 Orientation of Axes + 세션 27 실측]
+// 바꾸는 식이 제 짝이라 그대로 뒤집어 쓰면 된다.
+static void accInMagFrame(float out[3]) {
+    out[0] =  gAcc.y;
+    out[1] =  gAcc.x;
+    out[2] = -gAcc.z;
+}
+
+// 기울기를 보정한 방위. 자력계가 없거나 중력을 못 재면 -1.
+//
+// ★ 힐·피치 설정(gHeelAxis / gPitchAxis)을 **안 쓴다.** 그쪽은 아직 정리가 안 됐고
+//   (보드를 세워 달아서 평형에서 raw 피치가 86° 로 나온다) 그걸 넣으면 보정이
+//   엉뚱해진다. 대신 **가속도계로 중력 방향을 직접 재서** 쓴다.
+//   그러면 보드를 어떻게 달았든 상관없다.
+static float headingTiltDeg() {
+    if (!gMagOk || !gImuOk) return -1.0f;
+
+    const uint8_t dAx = magDownAxis();
+    const float   dSg = magDownSign();
+    if (dSg == 0.0f) return -1.0f;              // 앞뒤 축이 같게 설정됐다
+
+    // 자력을 (앞, 오른쪽, 아래) 로 옮긴다
+    const float mf =  magAxis(gHdgAxisB) * gHdgSignB;
+    const float mr = -magAxis(gHdgAxisA) * gHdgSignA;
+    const float md =  magAxis(dAx) * dSg;
+
+    // 가속을 같은 자리로 옮긴다. 쉬고 있을 때 가속도계는 **위쪽**을 가리키므로
+    // 부호를 뒤집어야 중력(아래) 방향이 된다.
+    float a[3];
+    accInMagFrame(a);
+    const float pick[3] = { a[gHdgAxisB], a[gHdgAxisA], a[dAx] };
+    const float gf = -pick[0] * gHdgSignB;
+    const float gr =  pick[1] * gHdgSignA;      // (-1) x (-1)
+    const float gd = -pick[2] * dSg;
+
+    const float gn = sqrtf(gf * gf + gr * gr + gd * gd);
+    if (gn < 0.2f) return -1.0f;                // 자유낙하 수준. 아래를 모른다
+
+    // 중력에서 힐과 피치를 뽑는다 (Tait-Bryan ZYX)
+    const float roll  = atan2f(gr, gd);
+    const float pitch = atan2f(-gf, sqrtf(gr * gr + gd * gd));
+
+    // INSLIB 의 ahrs_mag_detilt 를 그대로 옮긴 부분
+    const float cr = cosf(roll),  sr = sinf(roll);
+    const float ct = cosf(pitch), st = sinf(pitch);
+    const float ty = cr * mr - sr * md;
+    const float tz = sr * mr + cr * md;
+    const float hx = ct * mf + st * tz;
+    const float hy = ty;
+
+    float h = atan2f(-hy, hx) * 180.0f / (float)M_PI + gHdgOffsetDeg;
+    while (h < 0.0f)    h += 360.0f;
+    while (h >= 360.0f) h -= 360.0f;
+    return h;
+}
+
 // 9축 한 줄 요약
 static void printImuLine() {
     if (!gImuOk) {
@@ -1779,6 +1891,13 @@ static void printImuLine() {
     const AxisName hAx(gHeelAxis, gHeelSign), pAx(gPitchAxis, gPitchSign);
     Serial.printf(" | 힐 %+6.1f° (가속 %s)  피치 %+6.1f° (가속 %s)\n",
                   currentHeelDeg(), hAx.text, currentPitchDeg(), pAx.text);
+    // 두 방위를 나란히 찍는다. 어느 쪽을 쓸지 정하기 전까지는 재기만 한다.
+    // (속도의 도플러 대 위치차분과 같은 방식이다)
+    if (gMagOk) {
+        const float flat = headingDeg(), tilt = headingTiltDeg();
+        Serial.printf("   방위 비교  평평 %5.1f°  |  기울기보정 %5.1f°  |  차이 %+5.1f°\n",
+                      flat, tilt, wrap180(tilt - flat));
+    }
 }
 
 // 지금 자세를 평형(힐 0°, 피치 0°)으로 삼는다. 배를 물에 띄우고 평형일 때 쓴다.
@@ -2552,6 +2671,54 @@ static void doSleepStat() {
     }
     Serial.println("  ※ ADC 소스 임피던스가 2.5 MΩ 라 mV 단위는 흔들립니다.");
     Serial.println("  ※ USB 를 꽂은 채로 재면 충전 때문에 값이 무의미합니다.");
+    Serial.println("──────────────────────────────────────────");
+}
+
+// `hdgtilt` — 기울기 보정이 제대로 되는지 손으로 기울여 확인한다.
+//
+// 5초 동안 두 방위를 계속 찍는다. 보드를 좌우로 기울이면서 본다.
+//
+//   보정한 쪽이 거의 안 움직인다        → 맞다
+//   보정한 쪽이 오히려 두 배로 흔들린다  → 아래 축 부호가 뒤집혔다
+//   둘이 똑같이 움직인다                → 보정이 안 들어가고 있다
+//
+// 뱃머리 방향은 그대로 두고 **기울이기만** 해야 한다. 돌리면서 기울이면
+// 무엇 때문에 바뀐 건지 못 가른다.
+static void doHeadingTilt() {
+    if (!gMagOk) { Serial.println("[HDG] 자력계가 없습니다."); return; }
+    const uint8_t d = magDownAxis();
+    const char* nm[3] = {"X", "Y", "Z"};
+    Serial.println("──────────────────────────────────────────");
+    Serial.println("  기울기 보정 방위 확인 — 5초. 뱃머리는 두고 좌우로 기울여 보세요.");
+    Serial.printf("  자력계 축 배정   앞 %s%s   오른쪽 %s%s   아래 %s%s\n",
+                  gHdgSignB < 0 ? "-" : "+", nm[gHdgAxisB],
+                  gHdgSignA > 0 ? "-" : "+", nm[gHdgAxisA],
+                  magDownSign() < 0 ? "-" : "+", nm[d]);
+    Serial.println("  ※ 아래 축 부호는 오른손 법칙으로 정한 것이라 확인이 필요합니다.");
+    Serial.println("  ──────────────────────────────────────");
+    Serial.println("      힐     피치     평평     보정     차이");
+    const uint32_t t0 = millis();
+    float flatMin = 999, flatMax = -999, tiltMin = 999, tiltMax = -999;
+    while (millis() - t0 < 5000) {
+        imuUpdate();
+        const float flat = headingDeg(), tilt = headingTiltDeg();
+        if (flat < flatMin) flatMin = flat;   if (flat > flatMax) flatMax = flat;
+        if (tilt < tiltMin) tiltMin = tilt;   if (tilt > tiltMax) tiltMax = tilt;
+        Serial.printf("  %+6.1f  %+6.1f   %5.1f°   %5.1f°   %+5.1f°\n",
+                      currentHeelDeg(), currentPitchDeg(), flat, tilt, wrap180(tilt - flat));
+        delay(250);
+        feedWatchdog();
+    }
+    Serial.println("  ──────────────────────────────────────");
+    Serial.printf("  흔들린 폭   평평 %.1f°   보정 %.1f°\n",
+                  flatMax - flatMin, tiltMax - tiltMin);
+    if (tiltMax - tiltMin < (flatMax - flatMin) * 0.5f) {
+        Serial.println("  ★ 보정한 쪽이 훨씬 덜 흔들립니다 — 잘 되고 있습니다.");
+    } else if (tiltMax - tiltMin > (flatMax - flatMin) * 1.5f) {
+        Serial.println("  ★ 보정한 쪽이 더 흔들립니다 — 아래 축 부호가 뒤집혔습니다.");
+    } else {
+        Serial.println("  ※ 차이가 뚜렷하지 않습니다. 더 크게(20° 넘게) 기울여 보세요.");
+    }
     Serial.println("──────────────────────────────────────────");
 }
 
@@ -3675,6 +3842,7 @@ static void printHelp() {
     Serial.println("  imu           9축 값 5초 출력 — 기울여 보세요");
     Serial.println("  scan          I2C — 화면 RAK1921(0x3C) / IMU RAK1905(0x68)");
     Serial.println("  oledw         화면에 쓸 한글 줄의 폭을 잰다 (128px 안에 드나)");
+    Serial.println("  hdgtilt       기울기 보정 방위 확인 — 손으로 기울이며 5초 본다");
     Serial.println("  off           보드를 끈다 (깊은잠). 버튼 5초 누르면 켜진다");
     Serial.println("  sleepstat     지난번에 정말 잤나 — 헛깬 횟수와 전압 낙차");
     Serial.println("  drain         잠자기 전류 재기 — 13시간 동안 15번 찍는다");
@@ -3726,6 +3894,7 @@ static void handleCommand(String line) {
     if (line == "scan")                { doScan();     return; }
     if (line == "batt")                { printBattery(); return; }
     if (line == "oledw")               { doOledWidth(); return; }
+    if (line == "hdgtilt")             { doHeadingTilt(); return; }
     if (line == "sleepstat")           { doSleepStat(); return; }
     if (line == "drain")               { doDrainStart(false); return; }
     if (line == "drain fast")          { doDrainStart(true);  return; }
