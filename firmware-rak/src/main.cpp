@@ -1827,6 +1827,21 @@ static void accInMagFrame(float out[3]) {
     out[2] = -gAcc.z;
 }
 
+// 자이로도 같은 자리로. 가속·자이로는 같은 좌표계라 식이 같다.
+static void gyrInMagFrame(float out[3]) {
+    out[0] =  gGyr.y;
+    out[1] =  gGyr.x;
+    out[2] = -gGyr.z;
+}
+
+// 아래 축을 도는 각속도 = 뱃머리가 돌아가는 속도 (°/s).
+static float yawRateDegS() {
+    if (!gImuOk) return 0.0f;
+    float g[3];
+    gyrInMagFrame(g);
+    return g[magDownAxis()] * magDownSign();
+}
+
 // 기울기를 보정한 방위. 자력계가 없거나 중력을 못 재면 -1.
 //
 // ★ 힐·피치 설정(gHeelAxis / gPitchAxis)을 **안 쓴다.** 그쪽은 아직 정리가 안 됐고
@@ -2696,29 +2711,94 @@ static void doHeadingTilt() {
                   magDownSign() < 0 ? "-" : "+", nm[d]);
     Serial.println("  ※ 아래 축 부호는 오른손 법칙으로 정한 것이라 확인이 필요합니다.");
     Serial.println("  ──────────────────────────────────────");
-    Serial.println("      힐     피치     평평     보정     차이");
+    Serial.println("      힐     피치     평평     보정     차이    자력크기");
     const uint32_t t0 = millis();
     float flatMin = 999, flatMax = -999, tiltMin = 999, tiltMax = -999;
+    float magMin = 9999, magMax = -9999;
+    float yawSum = 0.0f, yawAbs = 0.0f;   // 손으로 기울이다 같이 돈 양
+    uint32_t tPrev = millis();
+    // 자이로가 말하는 회전을 뺀 나머지. 이게 진짜 남은 오차다.
+    float resMin = 999, resMax = -999;
+    bool  resFirst = true; float res0 = 0;
+    float heelMin = 999, heelMax = -999;
     while (millis() - t0 < 5000) {
+        // ★ FIFO 가 켜져 있으면 imuUpdate() 는 자력계만 갱신한다. 가속·자이로는
+        //   FIFO 에서 오는데 그건 메인 루프가 퍼 온다. 여기서 안 퍼 오면
+        //   **가속도계가 얼어붙은 채로 자력계만 움직인다.**
+        //   실제로 그렇게 재서 힐이 20줄 내내 +46.5° 로 똑같이 나왔다 (2026-09-09).
+        imuDrainFifo();
         imuUpdate();
         const float flat = headingDeg(), tilt = headingTiltDeg();
         if (flat < flatMin) flatMin = flat;   if (flat > flatMax) flatMax = flat;
         if (tilt < tiltMin) tiltMin = tilt;   if (tilt > tiltMax) tiltMax = tilt;
-        Serial.printf("  %+6.1f  %+6.1f   %5.1f°   %5.1f°   %+5.1f°\n",
-                      currentHeelDeg(), currentPitchDeg(), flat, tilt, wrap180(tilt - flat));
+        const float hh = currentHeelDeg();
+        if (hh < heelMin) heelMin = hh;   if (hh > heelMax) heelMax = hh;
+        const float mm = sqrtf(gMag.x*gMag.x + gMag.y*gMag.y + gMag.z*gMag.z);
+        if (mm < magMin) magMin = mm;   if (mm > magMax) magMax = mm;
+        Serial.printf("  %+6.1f  %+6.1f   %5.1f°   %5.1f°   %+5.1f°   %5.1f\n",
+                      currentHeelDeg(), currentPitchDeg(), flat, tilt,
+                      wrap180(tilt - flat), mm);
+        const uint32_t tNow = millis();
+        const float dt = (tNow - tPrev) / 1000.0f;
+        tPrev = tNow;
+        const float yr = yawRateDegS();
+        yawSum += yr * dt;
+        yawAbs += fabsf(yr) * dt;
+
+        // 보정한 방위에서 자이로가 말하는 회전을 뺀다.
+        // 손이 돌린 만큼은 방위가 진짜 바뀐 것이라 오차가 아니다.
+        const float res = wrap180(tilt - yawSum);
+        if (resFirst) { res0 = res; resFirst = false; }
+        const float r = wrap180(res - res0);
+        if (r < resMin) resMin = r;   if (r > resMax) resMax = r;
+
         delay(250);
         feedWatchdog();
     }
     Serial.println("  ──────────────────────────────────────");
     Serial.printf("  흔들린 폭   평평 %.1f°   보정 %.1f°\n",
                   flatMax - flatMin, tiltMax - tiltMin);
-    if (tiltMax - tiltMin < (flatMax - flatMin) * 0.5f) {
+    // ★ 충분히 기울이지 않았으면 판정하지 않는다.
+    //   기울기가 작으면 두 값이 원래 비슷하다. 그걸 보고 "부호가 뒤집혔다" 고
+    //   단정한 적이 있다 (2026-09-09). 조건 없는 판정은 판정이 아니다.
+    Serial.printf("  기울인 폭   %.0f°  (%.0f° 에서 %.0f° 까지)\n",
+                  heelMax - heelMin, heelMin, heelMax);
+    if (heelMax - heelMin < 40.0f) {
+        Serial.println("  ※ 기울기가 모자랍니다. 좌우로 40° 넘게 흔들어야 판정할 수 있습니다.");
+    } else if (tiltMax - tiltMin < (flatMax - flatMin) * 0.6f) {
         Serial.println("  ★ 보정한 쪽이 훨씬 덜 흔들립니다 — 잘 되고 있습니다.");
     } else if (tiltMax - tiltMin > (flatMax - flatMin) * 1.5f) {
-        Serial.println("  ★ 보정한 쪽이 더 흔들립니다 — 아래 축 부호가 뒤집혔습니다.");
+        Serial.println("  ★ 보정한 쪽이 더 흔들립니다 — 아래 축 부호를 의심하세요.");
     } else {
-        Serial.println("  ※ 차이가 뚜렷하지 않습니다. 더 크게(20° 넘게) 기울여 보세요.");
+        Serial.println("  ※ 차이가 뚜렷하지 않습니다.");
     }
+    // ── 손으로 기울이다 같이 돌지 않았나 ────────────────────────────────
+    //
+    // 사람 손으로 기울이면 살짝 돌기도 한다. 그러면 방위가 **진짜로** 바뀐 것이라
+    // 보정한 값이 움직이는 게 맞다. 그걸 오차로 세면 안 된다.
+    // 자이로로 아래 축을 도는 각을 모아서 얼마나 돌았는지 재 둔다.
+    Serial.printf("  돌아간 각   알짜 %+.1f°   합계 %.1f°  (자이로)\n", yawSum, yawAbs);
+    Serial.printf("  자이로가 말하는 회전을 빼면 남는 흔들림 %.1f°\n", resMax - resMin);
+    Serial.println((resMax - resMin) < 10.0f
+        ? "  ★ 10° 밑입니다 — 기울기 보정이 제대로 되고 있습니다."
+        : "  ※ 아직 남습니다. 자력계 크기가 흔들리면 그것부터 잡아야 합니다.");
+
+    // ── 자력계 크기가 일정한가 ──────────────────────────────────────────
+    //
+    // 지구 자기장은 한자리에서 세기가 일정하다. 돌리기만 하면 방향만 바뀌고
+    // 크기는 그대로여야 한다. 크기가 변하면 **보드 위의 쇠붙이가 만드는 고정
+    // 편차(하드아이언)** 가 얹혀 있는 것이다.
+    //
+    // 이게 남으면 기울기 보정 식이 아무리 정확해도 결과가 틀린다. 입력이
+    // 틀렸기 때문이다. [확인: 2026-09-09 첫 시험 — 29 에서 42 µT 로 45% 흔들림]
+    Serial.printf("  자력 크기   %.1f ~ %.1f µT   흔들림 %.0f%%\n",
+                  magMin, magMax,
+                  magMax > 0 ? (magMax - magMin) * 100.0f / magMax : 0.0f);
+    Serial.println(((magMax - magMin) > magMax * 0.15f)
+        ? "  ★ 크기가 15% 넘게 변합니다 — 하드아이언 보정이 먼저입니다."
+        : "  자력 크기는 거의 일정합니다.");
+    Serial.println("  ※ 한국의 지구 자기장은 약 50 µT 입니다. 크게 벗어나면 주변 쇠붙이");
+    Serial.println("    때문입니다. 책상·노트북에서 떨어진 데서 다시 해보세요.");
     Serial.println("──────────────────────────────────────────");
 }
 
