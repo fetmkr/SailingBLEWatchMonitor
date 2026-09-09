@@ -3963,7 +3963,12 @@ static void printHelp() {
     Serial.println("  hdg off <도>  방위 0점 보정 (자기 편각 + 보드 어긋남)");
     Serial.println("  pitch [x|y|z] 피치를 어느 가속도 축에서 볼지");
     Serial.println("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)");
-    Serial.println("  help          이 도움말");
+    Serial.println("  status        한 줄 상태 / loopstat  루프가 어디에 시간을 쓰나");
+    Serial.println("  battboot      켠 뒤 1초마다 담은 배터리 값");
+    Serial.println("  probe <초>    깬 뒤 ADC 가 언제 제자리로 오나 (probestat 로 봄)");
+    Serial.println("  wifi ssid/pass <값>   망 이름·비밀번호를 NVS 에 넣는다");
+    Serial.println("  wifi scan / status / idle <초> / off");
+    Serial.println("  help          이 도움말  (전체 목록은 저장소 COMMANDS.md)");
     Serial.println("──────────────────────────────────────────");
     Serial.println("  붙어 있는 것:  GPS 슬롯A · IMU 슬롯C · 화면 J12 · SD IO슬롯");
     Serial.println("  값 뒤의 (GPS)(IMU)(SIM) 이 그 값의 출처입니다.");
