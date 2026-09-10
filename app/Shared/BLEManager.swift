@@ -162,6 +162,23 @@ final class BLEManager: NSObject, ObservableObject {
     /// 제어 통로가 열려 있나. 안 열려 있으면 단추를 잠근다.
     @Published private(set) var controlReady = false
 
+    /// 자력계 보정이 몇 점까지 왔나. 안 하는 중이면 nil.
+    ///
+    /// 보드가 1초에 한 번 `magcal 37/128 …` 로 알려준다. 그 앞부분만 뽑는다.
+    /// **숫자만으로는 부족하다** — 화면이 막대로 그려야 사람이 언제 그만둘지 안다.
+    @Published private(set) var magcalProgress: (done: Int, total: Int)?
+
+    /// 보드가 보낸 줄에서 `N/M` 을 뽑는다. 못 뽑으면 nil.
+    private func parseMagcalProgress(_ text: String) -> (Int, Int)? {
+        guard text.hasPrefix("magcal ") else { return nil }
+        let parts = text.dropFirst(7).split(separator: " ", maxSplits: 1)
+        guard let first = parts.first else { return nil }
+        let nums = first.split(separator: "/")
+        guard nums.count == 2,
+              let a = Int(nums[0]), let b = Int(nums[1]), b > 0 else { return nil }
+        return (a, b)
+    }
+
     /// 보드에 명령 한 줄을 보낸다. 줄바꿈은 여기서 붙인다.
     ///
     /// - 답은 `controlReply` 로 온다. 바로 안 온다 — 보드가 처리하고 알려준다.
@@ -751,6 +768,13 @@ extension BLEManager: CBPeripheralDelegate {
             guard !text.isEmpty else { return }
             controlReply = text
             controlReplyAt = Date()
+            // 보정 진행이면 막대로 그릴 수 있게 숫자를 뽑아 둔다.
+            // 끝났다는 말(저장/지웠습니다/실패)이 오면 막대를 내린다.
+            if let p = parseMagcalProgress(text) {
+                magcalProgress = p
+            } else if text.hasPrefix("magcal") {
+                magcalProgress = nil
+            }
             appendLog("← \(text)")
             return
         }

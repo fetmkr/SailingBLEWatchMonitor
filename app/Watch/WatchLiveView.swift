@@ -398,10 +398,39 @@ private struct SettingsPage: View {
                 magcalButton("저장", "magcal stop")
             }
 
-            if !ble.controlReady {
-                Text("보드에 붙어야 쓸 수 있습니다")
+            // ★ 진행을 눈으로 보여준다.
+            //
+            //   처음에는 보드가 답한 글자만 띄웠는데, 보드가 진행을 시리얼로만
+            //   보내서 워치에서는 "시작했다" 한 줄 뜨고 끝이었다. 128점이 차는
+            //   내내 아무 변화가 없어서 언제 그만둘지 알 수가 없었다.
+            //   보드가 이제 1초에 한 번 BLE 로도 보내고, 여기서 막대로 그린다.
+            if let p = ble.magcalProgress {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text("\(p.done) / \(p.total) 점")
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        Spacer()
+                        if p.done >= p.total {
+                            Text("다 찼다").font(.system(size: 10)).foregroundStyle(.green)
+                        }
+                    }
+                    GeometryReader { g in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.gray.opacity(0.25))
+                            Capsule()
+                                .fill(p.done >= p.total ? Color.green : Color.accentColor)
+                                .frame(width: g.size.width * CGFloat(p.done) / CGFloat(p.total))
+                        }
+                    }
+                    .frame(height: 6)
+                    Text("계속 돌리세요")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+            } else if !ble.controlReady {
+                Text("보드에 안 붙어 있습니다 — 눌러보면 이유가 나옵니다")
                     .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.orange)
             } else if ble.controlReply.isEmpty {
                 Text("배를 한 바퀴 천천히 돌리면서 시작")
                     .font(.system(size: 9))
@@ -416,6 +445,16 @@ private struct SettingsPage: View {
     }
 
     /// 작은 단추 하나. 배경을 직접 그려서 높이를 우리가 정한다.
+    ///
+    /// ★ **잠그지 않는다.**
+    ///
+    ///   처음에는 보드에 안 붙어 있으면 .disabled 로 잠갔다. 그런데 그러면
+    ///   눌러도 아무 일이 안 일어난다 — 왜 안 되는지 말해주는 길까지 같이
+    ///   막혔다. sendControl 안에 "보드에 안 붙어 있습니다" 를 띄우는 코드를
+    ///   써 놓고 그게 절대 안 불리게 만들어 둔 것이다.
+    ///   사용자가 "눌러도 아무 일도 안 일어난다" 고 했다 (2026-09-10).
+    ///
+    ///   **말 못 하는 단추보다 말하는 단추가 낫다.** 눌리게 두고 이유를 말한다.
     private func magcalButton(_ title: String, _ cmd: String) -> some View {
         Button {
             ble.sendControl(cmd)
@@ -427,11 +466,10 @@ private struct SettingsPage: View {
                 .background(
                     RoundedRectangle(cornerRadius: 6)
                         .fill(ble.controlReady ? Color.accentColor.opacity(0.28)
-                                               : Color.gray.opacity(0.18))
+                                               : Color.orange.opacity(0.22))
                 )
         }
         .buttonStyle(.plain)
-        .disabled(!ble.controlReady)
     }
 
     // ── 세션 (앱 켜면 자동 시작)

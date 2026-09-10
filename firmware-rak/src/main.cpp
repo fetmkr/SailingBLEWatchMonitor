@@ -2511,6 +2511,7 @@ static uint32_t gBattBoot[kBattBootN];
 static constexpr uint32_t kRtcMagic = 0x5A5AC0DE;
 
 static void armButtonWake();                       // 아래 "끄기 (깊은잠)" 항목
+static void controlSay(const char* line);          // 아래 "BLE 제어" 항목
 static void doSleepStat();                         // 아래 "잠자기 기록" 항목
 static void sleepLogToCard();
 static bool logStartNow(uint32_t prevSession = 0);  // 아래 "기록 (hlog)" 항목
@@ -2721,12 +2722,29 @@ static void magCalStatus(char* out, size_t n) {
 
 /** 명령 처리. 답 한 줄을 out 에 쓴다. 시리얼·BLE 공용. */
 static void magCalCmd(const String& arg, char* out, size_t n) {
+    // ── 여러 번 눌러도 안 꼬이게 ────────────────────────────────────────
+    //
+    // 사람은 단추를 두 번 누르고, 다 안 찼는데 저장을 누르고, 시작도 안 하고
+    // 저장을 누른다. **그때마다 무슨 일이 벌어졌는지 말해줘야 한다.**
     if (arg == "on" || arg == "start") {
+        if (gMagCalOn) {
+            // 이미 모으는 중이면 **지우지 않는다.** 두 번 눌렀다고 모은 걸
+            // 날려버리면 사람은 왜 0 으로 돌아갔는지 모른다.
+            snprintf(out, n, "magcal 이미 모으는 중 %d/%d — 계속 돌리세요 "
+                             "(다시 시작하려면 magcal reset)", gMagCalN, kMagCalMax);
+            return;
+        }
         gMagCalN = 0;
         gMagCalOn = true;
         gMagCalSaidAt = 0;
-        snprintf(out, n, "magcal 시작 — 보드를 사방으로 천천히 돌리세요. "
-                         "%d점 모으면 됩니다. 끝나면 magcal stop", kMagCalMax);
+        snprintf(out, n, "magcal 시작 — 사방으로 천천히 돌리세요. %d점", kMagCalMax);
+        return;
+    }
+    if (arg == "reset") {
+        gMagCalN = 0;
+        gMagCalOn = true;
+        gMagCalSaidAt = 0;
+        snprintf(out, n, "magcal 처음부터 다시 — %d점", kMagCalMax);
         return;
     }
     if (arg == "clear") {
@@ -2737,7 +2755,16 @@ static void magCalCmd(const String& arg, char* out, size_t n) {
         return;
     }
     if (arg == "stop") {
-        if (!gMagCalOn) { snprintf(out, n, "magcal 시작한 적이 없습니다"); return; }
+        if (!gMagCalOn) {
+            snprintf(out, n, "magcal 모으는 중이 아닙니다 — magcal on 부터 누르세요");
+            return;
+        }
+        // 너무 적으면 **끄지 않는다.** 여기서 꺼버리면 다시 처음부터 모아야 한다.
+        if (gMagCalN < 20) {
+            snprintf(out, n, "magcal 아직 %d점뿐 — 스무 개 넘게 필요합니다. "
+                             "계속 돌리세요", gMagCalN);
+            return;
+        }
         gMagCalOn = false;
         // 맞추기 전 크기가 얼마나 흔들렸나. 이것과 뒤의 값을 견줘야 뜻이 있다.
         float lo = 1e9f, hi = -1e9f;
@@ -2760,15 +2787,26 @@ static void magCalCmd(const String& arg, char* out, size_t n) {
     magCalStatus(out, n);
 }
 
-/** 모으는 동안 1초에 한 번 알려준다. 사람이 언제 그만할지 알아야 한다. */
+/** 모으는 동안 1초에 한 번 알려준다. 사람이 언제 그만할지 알아야 한다.
+ *
+ *  ★ **BLE 로도 보낸다.** 처음에는 시리얼로만 찍었는데, 그러면 워치·폰에서는
+ *    "시작했다" 한 줄 뜨고 128점이 차는 내내 아무 변화가 없다. 언제 그만둘지
+ *    알 수가 없다. 보정은 진행이 보여야 하는 작업이라 그게 반쪽이었다.
+ *    [사용자가 잡아 줌, 2026-09-10]
+ *
+ *  줄 모양을 앱이 읽기 좋게 맞춘다 — `magcal N/M ...` 로 시작한다.
+ *  앱은 그 N/M 만 뽑아 막대로 그린다. 못 뽑으면 글자 그대로 보여준다.
+ */
 static void magCalTick(uint32_t nowMs) {
     if (!gMagCalOn) return;
     if (nowMs - gMagCalSaidAt < 1000) return;
     gMagCalSaidAt = nowMs;
     float sp[3]; magCalSpread(sp);
-    Serial.printf("[MAGCAL] %d/%d 점  퍼짐 X%.0f Y%.0f Z%.0f uT%s\n",
-                  gMagCalN, kMagCalMax, sp[0], sp[1], sp[2],
-                  gMagCalN >= kMagCalMax ? "  ★ 다 찼습니다. magcal stop" : "");
+    char msg[120];
+    snprintf(msg, sizeof(msg), "magcal %d/%d  퍼짐 %.0f/%.0f/%.0f uT%s",
+             gMagCalN, kMagCalMax, sp[0], sp[1], sp[2],
+             gMagCalN >= kMagCalMax ? "  다 찼습니다" : "");
+    controlSay(msg);      // 시리얼과 BLE 양쪽으로 나간다
 }
 
 // `sleepstat` — 지난번에 정말 잤나.

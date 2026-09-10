@@ -90,9 +90,12 @@ struct SettingsView: View {
     //   화면으로 만들었다.
     private var magcalSection: some View {
         Section {
+            // ★ 단추를 잠그지 않는다. 잠그면 왜 안 되는지 말해주는 길까지
+            //   막힌다 — 눌러도 아무 일이 없어서 고장으로 보인다.
             if !ble.controlReady {
-                Label("보드에 붙어야 쓸 수 있습니다", systemImage: "antenna.radiowaves.left.and.right.slash")
-                    .foregroundStyle(.secondary)
+                Label("보드에 안 붙어 있습니다 — 눌러보면 이유가 나옵니다",
+                      systemImage: "antenna.radiowaves.left.and.right.slash")
+                    .foregroundStyle(.orange)
                     .font(.footnote)
             }
             Button {
@@ -100,21 +103,35 @@ struct SettingsView: View {
             } label: {
                 Label("치우침 재기 시작", systemImage: "circle.dotted")
             }
-            .disabled(!ble.controlReady)
 
             Button {
                 ble.sendControl("magcal stop")
             } label: {
                 Label("맞추고 저장", systemImage: "checkmark.circle")
             }
-            .disabled(!ble.controlReady)
 
             Button {
                 ble.sendControl("magcal")
             } label: {
                 Label("지금 상태 물어보기", systemImage: "questionmark.circle")
             }
-            .disabled(!ble.controlReady)
+
+            // 진행 중이면 막대로 보여준다. 숫자만으로는 언제 그만둘지 모른다.
+            if let p = ble.magcalProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("\(p.done) / \(p.total) 점")
+                            .font(.headline.monospacedDigit())
+                        Spacer()
+                        Text(p.done >= p.total ? "다 찼습니다 — 저장하세요" : "계속 돌리세요")
+                            .font(.caption)
+                            .foregroundStyle(p.done >= p.total ? .green : .secondary)
+                    }
+                    ProgressView(value: Double(p.done), total: Double(p.total))
+                        .tint(p.done >= p.total ? .green : .accentColor)
+                }
+                .padding(.vertical, 2)
+            }
 
             if !ble.controlReply.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
