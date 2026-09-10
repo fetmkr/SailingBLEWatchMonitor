@@ -35,6 +35,7 @@
 
 | 파일 | 무엇 |
 |---|---|
+| `REQUIREMENTS.md` | **★ 요구사항과 앱별 진행표.** 넷이 어디까지 왔나 |
 | `ARCHITECTURE.md` | **펌웨어가 어떻게 생겼나.** 코어 분담·setup 순서·loop 주기 |
 | `COMMANDS.md` | **시리얼 명령 여든 가지.** 갈래별 |
 | `PROTOCOL.md` | BLE·로라 규약 |
