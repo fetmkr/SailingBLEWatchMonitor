@@ -2341,7 +2341,6 @@ static RTC_DATA_ATTR uint32_t gRtcFalse;       // 5초 못 채우고 도로 잔 
 static RTC_DATA_ATTR uint32_t gRtcFull;        // 5초 채워 켜진 횟수
 static RTC_DATA_ATTR uint64_t gRtcSleepUs;     // 마지막으로 잠든 RTC 시각
 static RTC_DATA_ATTR uint32_t gRtcSleepMv;     // 그때 배터리 mV
-static RTC_DATA_ATTR uint32_t gRtcWakeMv;      // 마지막으로 깼을 때 배터리 mV
 static RTC_DATA_ATTR uint64_t gRtcSleptUs;     // 마지막으로 잔 시간
 static RTC_DATA_ATTR uint32_t gRtcGpsBytes;    // 깨자마자 GPS 가 뱉은 바이트 수
 static RTC_DATA_ATTR uint32_t gRtcTestSec;     // 시험용 타이머 (0 이면 안 씀)
@@ -2352,68 +2351,7 @@ static constexpr int kBattBootN = 20;
 static uint32_t gBattBoot[kBattBootN];
 static constexpr uint32_t kRtcMagic = 0x5A5AC0DE;
 
-// ── 잠자기 전류 재기 (drain) ─────────────────────────────────────────────
-//
-// 자면서 스스로 깨서 배터리 전압만 적고 다시 잔다.
-//
-// ★ 왜 이게 필요한가. 끝점 두 개만 재면 **표면 전압과 진짜 방전을 못 가른다.**
-//   충전기를 뗀 배터리는 표면에 전압이 떠 있고 그게 수십 분에 걸쳐 저절로
-//   빠진다. 방전이 아닌데 방전처럼 보이고, 크기가 30 mV 라 우리 신호와 같다.
-//
-//   실제로 그것 때문에 같은 보드 같은 코드가 세 번 다 다르게 나왔다.
-//     10.47시간  32 mV → 3.06 mV/h    2.46시간  31 mV → 12.60 mV/h
-//   낙차는 셋 다 30 mV 언저리인데 시간만 달랐던 것이다.
-//
-//   점이 많으면 갈린다. 표면 전압은 처음에 꺾이다 평평해지는 곡선이고,
-//   진짜 방전은 처음부터 끝까지 같은 기울기의 직선이다.
-//
-// 시각표를 앞은 촘촘히, 뒤는 성기게 잡았다. 곡선이 꺾이는 데가 앞이라서다.
-// 같은 간격으로 스무 번 깨는 것보다 이쪽이 적게 깨고 더 잘 보인다.
-//
-// ★ 재는 것 자체가 전기를 먹는다. 한 번 깰 때 1.6초쯤 걸리고 15번이면 24초다.
-//   13시간에 걸쳐 평균 20 µA 쯤 된다. 그래서 깨어 있던 시간을 합쳐 두고
-//   drainstat 이 같이 보여준다. 빼고 봐야 한다.
-static const uint16_t kDrainAt[] = { 5, 10, 20, 30, 45, 60, 90, 120,
-                                     180, 240, 300, 420, 540, 660, 780 };
-static constexpr int kDrainMax = sizeof(kDrainAt) / sizeof(kDrainAt[0]);
-
-static RTC_DATA_ATTR uint8_t  gDrainOn;
-static RTC_DATA_ATTR uint8_t  gDrainN;
-static RTC_DATA_ATTR uint16_t gDrainMv[kDrainMax];       // 1.35초 기다린 뒤 값
-static RTC_DATA_ATTR uint16_t gDrainEarly[kDrainMax];    // 0.15초 만에 잰 값
-static RTC_DATA_ATTR uint32_t gDrainSec[kDrainMax];
-static RTC_DATA_ATTR uint64_t gDrainT0;
-static RTC_DATA_ATTR uint32_t gDrainAwakeMs;
-// 시각표의 단위. 60 이면 분(진짜), 1 이면 초(`drain fast` — 코드 길을 확인하는 용).
-static RTC_DATA_ATTR uint16_t gDrainScale;
-
-// ── 눈금을 맞추는 두 점 ──────────────────────────────────────────────────
-//
-// ★ 깨자마자 잰 값은 진짜보다 낮게 나온다. 원인은 아직 모른다.
-//   [확인: 2026-09-09 probe] 눈금 1420 이 3.3초 내내 평평하다가, setup 이 다 돌고
-//   나면 2647 이 된다. 천천히 차는 게 아니라 딱 두 값 사이를 오간다.
-//   세 가지를 짚어봤는데 셋 다 아니었다.
-//     핀 떼어놓기(rtc_gpio_isolate) · 디지털 입력 버퍼 끄기 · 3V3_S 켜기
-//
-// **그런데 비율은 아주 안정적이다.**
-//     1417/2644 = 0.5359   1421/2645 = 0.5372   1420/2647 = 0.5365
-//   세 번이 0.25% 안에 든다.
-//
-// 그래서 원인을 모르는 채로도 쓸 수 있게 만들었다. 재는 값은 **모양**을 주고,
-// 시작과 끝에 제대로 잰 값 두 개가 **눈금**을 준다. 둘을 맞추면 진짜 mV 가 나온다.
-// 두 앵커로 되짚은 비율이 0.536 근처면 이 방법이 맞는 것이고, 아니면 못 쓴다.
-static RTC_DATA_ATTR uint16_t gDrainAnchor0;   // 시작할 때 제대로 잰 배터리 mV
-static RTC_DATA_ATTR uint16_t gDrainAnchor1;   // 끝나고 제대로 잰 배터리 mV
-static RTC_DATA_ATTR uint8_t  gDrainWantAnchor1;
-
-// `probe <초>` — 깬 뒤 배터리 값이 언제 제자리로 오는지 재는 용.
-// 깨자마자 0.3초 간격으로 열두 번 찍고 정상 부팅한다.
-static RTC_DATA_ATTR uint8_t  gProbeOn;
-static RTC_DATA_ATTR uint16_t gProbeMv[12];
-static RTC_DATA_ATTR uint16_t gProbeRaw[12];   // 눈금 그대로. 변환을 안 거친 값
-
 static void armButtonWake();                       // 아래 "끄기 (깊은잠)" 항목
-static void drainGate();
 static void doSleepStat();                         // 아래 "잠자기 기록" 항목
 static void sleepLogToCard();
 static bool logStartNow(uint32_t prevSession = 0);  // 아래 "기록 (hlog)" 항목
@@ -2564,78 +2502,13 @@ static void sleepLogToCard() {
     File f = SD.open("/SLEEP.TXT", FILE_APPEND);
     if (!f) return;
     const double sec = (double)gRtcSleptUs / 1e6;
-    const double drop = (double)gRtcSleepMv - (double)gRtcWakeMv;
-    f.printf("잔시간 %.1fs  %umV->%umV  낙차 %.1f mV/h  GPS바이트 %u  "
+    // ★ 깰 때 전압과 거기서 나온 낙차는 안 적는다. 못 믿는 값이다 (doSleepStat 참고).
+    f.printf("잔시간 %.1fs  잘때 %umV  GPS바이트 %u  "
              "잠든횟수 %u  헛깸 %u  켜짐 %u\n",
-             sec, (unsigned)gRtcSleepMv, (unsigned)gRtcWakeMv,
-             sec > 30.0 ? drop * 3600.0 / sec : 0.0,
+             sec, (unsigned)gRtcSleepMv,
              (unsigned)gRtcGpsBytes, (unsigned)gRtcSleeps,
              (unsigned)gRtcFalse, (unsigned)gRtcFull);
     f.close();
-}
-
-// `drain` — 잠자기 전류 재기를 시작한다.
-static void doDrainStart(bool fast) {
-    gDrainScale = fast ? 1 : 60;
-    gDrainOn = 1;
-    gDrainN  = 0;
-    gDrainAwakeMs = 0;
-    for (int i = 0; i < kDrainMax; i++) { gDrainMv[i] = 0; gDrainEarly[i] = 0; gDrainSec[i] = 0; }
-    gDrainT0 = nowUs();
-    gDrainAnchor1 = 0;
-    gDrainWantAnchor1 = 1;
-    { uint32_t mv = 0; readBatteryVolts(&mv);
-      gDrainAnchor0 = (uint16_t)(mv / rak::kBattDivider); }
-    Serial.println("──────────────────────────────────────────");
-    Serial.printf("  잠자기 전류 재기 — %d번 찍고 %u%s 뒤에 끝납니다\n",
-                  kDrainMax, (unsigned)kDrainAt[kDrainMax - 1],
-                  fast ? "초 (빠른 확인용)" : "분");
-    Serial.println("  ★ USB 를 뽑고 30분쯤 쉬게 한 뒤에 시작해야 합니다.");
-    Serial.println("    갓 충전한 배터리는 표면 전압이 떠 있어 방전처럼 보입니다.");
-    Serial.println("  끝나면 저절로 켜집니다. 그 전에 보려면 버튼 5초.");
-    Serial.println("  결과는 drainstat.");
-    Serial.println("──────────────────────────────────────────");
-    Serial.flush();
-    goToSleep((uint32_t)kDrainAt[0] * gDrainScale);
-}
-
-// `drainstat` — 찍어 둔 표를 뱉는다.
-static void doDrainStat() {
-    Serial.println("──────────────────────────────────────────");
-    if (gDrainN == 0) {
-        Serial.println("  아직 찍은 게 없습니다 (drain 으로 시작)");
-        Serial.println("──────────────────────────────────────────");
-        return;
-    }
-    Serial.printf("  %u/%d 점%s\n", (unsigned)gDrainN, kDrainMax,
-                  gDrainOn ? "  (아직 도는 중)" : "  (끝)");
-    Serial.printf("  깨어 있던 시간 합 %.1f초 — 이만큼은 재느라 쓴 것이라 빼고 봐야 합니다\n",
-                  gDrainAwakeMs / 1000.0f);
-    Serial.printf("  눈금 맞추는 두 점   시작 %u mV   끝 %u mV%s\n",
-                  (unsigned)gDrainAnchor0, (unsigned)gDrainAnchor1,
-                  gDrainAnchor1 ? "" : "  (아직 없음)");
-    if (gDrainAnchor1 && gDrainN >= 2) {
-        const float k0 = (float)gDrainMv[0] / rak::kBattDivider / gDrainAnchor0;
-        const float k1 = (float)gDrainMv[gDrainN-1] / rak::kBattDivider / gDrainAnchor1;
-        Serial.printf("  되짚은 비율        처음 %.4f   끝 %.4f", k0, k1);
-        Serial.println((k0 > 0.50f && k0 < 0.57f && k1 > 0.50f && k1 < 0.57f)
-            ? "   → 0.536 근처. 쓸 수 있다" : "   ★ 어긋난다. 이 표는 못 쓴다");
-    }
-    Serial.println("  ──────────────────────────────────────");
-    Serial.println("     지난 시간      빨리 잰 값   기다린 값   처음 대비");
-    const int32_t base = gDrainMv[0];
-    for (int i = 0; i < gDrainN; i++) {
-        const uint32_t sec = gDrainSec[i];
-        Serial.printf("  %3u분 %02us     %5u mV     %5u mV   %+5d mV\n",
-                      (unsigned)(sec / 60), (unsigned)(sec % 60),
-                      (unsigned)(gDrainEarly[i] / rak::kBattDivider),
-                      (unsigned)(gDrainMv[i]    / rak::kBattDivider),
-                      (int)((gDrainMv[i] - base) / rak::kBattDivider));
-    }
-    Serial.println("  ──────────────────────────────────────");
-    Serial.println("  ※ 빨리 잰 값과 기다린 값이 같으면 다음부터 안 기다려도 됩니다.");
-    Serial.println("  ※ 앞쪽이 빠르게 꺾이면 그건 표면 전압입니다. 빼고 뒤쪽에 직선을 맞추세요.");
-    Serial.println("──────────────────────────────────────────");
 }
 
 // `sleepstat` — 지난번에 정말 잤나.
@@ -2667,23 +2540,30 @@ static void doSleepStat() {
     }
     const double sec = (double)gRtcSleptUs / 1e6;
     Serial.printf("  마지막으로 잔 시간 %.1f 초 (%.2f 시간)\n", sec, sec / 3600.0);
-    Serial.printf("  잘 때 %u mV  →  깰 때 %u mV\n",
-                  (unsigned)gRtcSleepMv, (unsigned)gRtcWakeMv);
+    // ★ 깰 때 전압은 안 보여준다.
+    //
+    //   깬 직후에는 배터리 값이 틀리게 읽힌다. 얼마나 잤느냐에 따라 다르게
+    //   틀린다 — 5분 자면 2198, 60분 자면 3393 mV 로 나왔다. 5분만 자도
+    //   전압이 15 mV **올라가** 있다. 배터리가 저절로 충전될 리 없다.
+    //   [확인: 2026-09-09~10, off 300 과 13시간짜리 두 판]
+    //
+    //   원인을 못 찾았다. 세 가지를 짚었는데 셋 다 아니었다 (핀 떼어놓기,
+    //   디지털 입력 버퍼 끄기, 3V3_S 켜기).
+    //
+    //   ★ 그런데 이걸 화면에 숫자로 뱉어 뒀더니 **내가 그 위에 13시간짜리
+    //     측정을 쌓았다.** 문서에 "못 믿는 값" 이라고 적어 뒀는데도 그랬다.
+    //     적어 두는 걸로는 안 막힌다. 안 보여주는 것으로 막는다.
+    //     이 저장소의 원칙 그대로다 — 값이 없으면 없다고 보여준다.
+    Serial.printf("  잘 때 %u mV\n", (unsigned)gRtcSleepMv);
+    Serial.println("  깰 때  --   (깬 직후 값은 못 믿는다. 원인 미상)");
     Serial.printf("  깨자마자 GPS 가 뱉은 바이트  %u\n", (unsigned)gRtcGpsBytes);
     Serial.println(gRtcGpsBytes > 0
         ? "  ★ 0 이 아닙니다 — 자는 동안 3V3_S 가 안 꺼졌습니다. GPS 가 계속 돌았습니다."
         : "  0 입니다 — 3V3_S 는 제대로 꺼져 있었습니다.");
 
-    const double dropMv = (double)gRtcSleepMv - (double)gRtcWakeMv;
-    if (sec > 30.0) {
-        const double perHour = dropMv * 3600.0 / sec;
-        Serial.printf("  시간당 낙차       %.1f mV/h\n", perHour);
-        Serial.println(perHour > 10.0
-            ? "  ★ 10 mV/h 를 넘습니다 — 자는 동안 뭔가가 켜져 있습니다."
-            : "  낙차가 작습니다 — 자는 쪽은 괜찮아 보입니다.");
-    } else {
-        Serial.println("  ※ 30초 넘게 재워야 낙차가 뜻이 있습니다.");
-    }
+    Serial.println("  ※ 시간당 낙차는 안 계산한다. 깰 때 값을 못 믿으므로");
+    Serial.println("    거기서 나오는 숫자도 못 믿는다. 잠자기 전류를 재려면");
+    Serial.println("    멀티미터를 배터리 선에 물려야 한다 (POWER.md).");
     Serial.println("  ※ ADC 소스 임피던스가 2.5 MΩ 라 mV 단위는 흔들립니다.");
     Serial.println("  ※ USB 를 꽂은 채로 재면 충전 때문에 값이 무의미합니다.");
     Serial.println("──────────────────────────────────────────");
@@ -3047,79 +2927,6 @@ static void goToSleep(uint32_t testWakeSec) {
     Serial.printf("[SLEEP] 잘 자라. 5초 누르면 깬다. (%u번째, %u mV)\n",
                   (unsigned)gRtcSleeps, (unsigned)gRtcSleepMv);
     Serial.flush();
-    esp_deep_sleep_start();
-}
-
-// 깬 뒤 배터리 ADC 가 언제 제자리로 오는지 열두 번 찍어 둔다.
-//
-// 왜 이게 필요했나. 깨자마자 잰 배터리 값이 3.65 V 인데 1.98 V 로 나왔다.
-// "천천히 차는 것" 인지 "딴 값을 읽는 것" 인지를 몰라서 모양을 봐야 했다.
-// 재보니 3.3초 내내 평평하다가 setup 이 다 돌면 뛰었다. 차는 게 아니었다.
-static void probeGate() {
-    if (!gProbeOn) return;
-    gProbeOn = 0;
-    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER) return;
-
-    rtc_gpio_hold_dis((gpio_num_t)rak::kBattAdcPin);
-    rtc_gpio_deinit((gpio_num_t)rak::kBattAdcPin);
-    // ★ 디지털 입력 버퍼를 끈다.
-    //   deinit 은 핀을 보통 GPIO 로 돌려놓는데 그때 입력 버퍼가 켜진다.
-    //   분압 마디가 2.1 V 라 버퍼의 위아래가 동시에 열려 전류가 흐르고,
-    //   소스 저항이 2.5 MΩ 이라 그 전류만으로 전압이 절반으로 끌려 내려간다.
-    //   [확인: 2026-09-09 probe — 눈금 1417 이 3.3초 내내 평평하다가 2644 로 뜀]
-    gpio_set_direction((gpio_num_t)rak::kBattAdcPin, GPIO_MODE_DISABLE);
-    analogSetPinAttenuation(rak::kBattAdcPin, ADC_11db);
-    for (int i = 0; i < 12; i++) {
-        uint32_t mv = 0;
-        readBatteryVolts(&mv);
-        gProbeMv[i]  = (uint16_t)mv;
-        gProbeRaw[i] = (uint16_t)analogRead(rak::kBattAdcPin);
-        delay(268);          // 재는 데 32ms 걸리니 합쳐서 0.3초 간격
-    }
-}
-
-// setup() 의 **맨 첫 줄**에서 부른다. Serial.begin 보다도 먼저다.
-//
-// drain 중이면 여기서 전압만 적고 도로 잠들어 아래로 안 내려간다. 화면도 GPS 도
-// BLE 도 안 올린다 — **깨어 있는 시간이 곧 재는 값을 흔든다.** 한 번 깰 때
-// 1.6초가 걸리고 15번이면 24초다. 13시간에 걸쳐 평균 20 µA 쯤 되는데, 우리가
-// 재려는 값이 그 자릿수라 최대한 짧게 해야 한다.
-//
-// 사람이 버튼을 누르면 (깨운 이유가 타이머가 아니면) drain 을 끝내고 정상 부팅한다.
-static void drainGate() {
-    if (!gDrainOn) return;
-    if (esp_reset_reason() != ESP_RST_DEEPSLEEP)                  { gDrainOn = 0; return; }
-    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER)   { gDrainOn = 0; return; }
-
-    const uint32_t t0 = millis();
-
-    // 자는 동안 떼어 놨던 배터리 핀을 되살린다
-    rtc_gpio_hold_dis((gpio_num_t)rak::kBattAdcPin);
-    rtc_gpio_deinit((gpio_num_t)rak::kBattAdcPin);
-    analogSetPinAttenuation(rak::kBattAdcPin, ADC_11db);
-
-    // 두 번 잰다. 빨리 잰 것과 기다렸다 잰 것.
-    // 둘이 같으면 다음부터는 안 기다려도 된다는 뜻이라 깨는 값이 싸진다.
-    uint32_t early = 0, late = 0;
-    delay(150);   readBatteryVolts(&early);
-    delay(1200);  readBatteryVolts(&late);
-
-    const int i = gDrainN;
-    if (i < kDrainMax) {
-        gDrainSec[i]   = (uint32_t)((nowUs() - gDrainT0) / 1000000ull);
-        gDrainEarly[i] = (uint16_t)early;
-        gDrainMv[i]    = (uint16_t)late;
-        gDrainN        = (uint8_t)(i + 1);
-    }
-    gDrainAwakeMs += (millis() - t0) + 250;   // 부팅 앞부분을 어림해 얹는다
-
-    if (gDrainN >= kDrainMax) { gDrainOn = 0; return; }   // 다 찍었다. 정상 부팅
-
-    const uint32_t waitSec = ((uint32_t)kDrainAt[gDrainN] -
-                              (uint32_t)kDrainAt[gDrainN - 1]) * gDrainScale;
-    armButtonWake();
-    esp_sleep_enable_timer_wakeup((uint64_t)waitSec * 1000000ull);
-    rtc_gpio_isolate((gpio_num_t)rak::kBattAdcPin);   // 다시 떼어 놓는다
     esp_deep_sleep_start();
 }
 
@@ -3930,10 +3737,7 @@ static void printHelp() {
     Serial.println("  oledw         화면에 쓸 한글 줄의 폭을 잰다 (128px 안에 드나)");
     Serial.println("  hdgtilt       기울기 보정 방위 확인 — 손으로 기울이며 5초 본다");
     Serial.println("  off           보드를 끈다 (깊은잠). 버튼 5초 누르면 켜진다");
-    Serial.println("  sleepstat     지난번에 정말 잤나 — 헛깬 횟수와 전압 낙차");
-    Serial.println("  drain         잠자기 전류 재기 — 13시간 동안 15번 찍는다");
-    Serial.println("  drain fast    같은 길을 초 단위로 — 13분이면 끝난다 (확인용)");
-    Serial.println("  drainstat     그 표를 본다");
+    Serial.println("  sleepstat     지난번에 정말 잤나 — 헛깬 횟수·잔 시간·3V3_S");
     Serial.println("  sd            SD카드 마운트 + 쓰기 시험");
     Serial.println("  sdbench [줄수] SD 쓰기 속도·최대 멈춤 실측 (기본 3600줄)");
     Serial.println("  rec           ★ 기록 상태. rec on / rec off / rec mark");
@@ -3965,7 +3769,6 @@ static void printHelp() {
     Serial.println("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)");
     Serial.println("  status        한 줄 상태 / loopstat  루프가 어디에 시간을 쓰나");
     Serial.println("  battboot      켠 뒤 1초마다 담은 배터리 값");
-    Serial.println("  probe <초>    깬 뒤 ADC 가 언제 제자리로 오나 (probestat 로 봄)");
     Serial.println("  wifi ssid/pass <값>   망 이름·비밀번호를 NVS 에 넣는다");
     Serial.println("  wifi scan / status / idle <초> / off");
     Serial.println("  help          이 도움말  (전체 목록은 저장소 COMMANDS.md)");
@@ -3987,35 +3790,6 @@ static void handleCommand(String line) {
     if (line == "oledw")               { doOledWidth(); return; }
     if (line == "hdgtilt")             { doHeadingTilt(); return; }
     if (line == "sleepstat")           { doSleepStat(); return; }
-    if (line == "drain")               { doDrainStart(false); return; }
-    if (line == "drain fast")          { doDrainStart(true);  return; }
-    if (line == "drainstat")           { doDrainStat();  return; }
-    if (line.startsWith("probe ")) {
-        gProbeOn = 1;
-        for (int i = 0; i < 12; i++) { gProbeMv[i] = 0; gProbeRaw[i] = 0; }
-        Serial.println("[PROBE] 자고 깨서 0.3초 간격으로 열두 번 찍습니다. probestat 으로 봅니다.");
-        Serial.flush();
-        goToSleep((uint32_t)line.substring(6).toInt());
-        return;
-    }
-    if (line == "probestat") {
-        Serial.println("──────────────────────────────────────────");
-        Serial.println("  깬 뒤 배터리 ADC 가 제자리로 오는 모양 (0.3초 간격)");
-        for (int i = 0; i < 12; i++) {
-            if (!gProbeMv[i]) continue;
-            Serial.printf("  %4.1f초   눈금 %4u   핀 %4u mV  →  배터리 %.3f V\n",
-                          i * 0.3f, (unsigned)gProbeRaw[i], (unsigned)gProbeMv[i],
-                          (gProbeMv[i] / 1000.0f) / rak::kBattDivider);
-        }
-        uint32_t now = 0; readBatteryVolts(&now);
-        Serial.printf("  지금     눈금 %4u   핀 %4u mV  →  배터리 %.3f V\n",
-                      (unsigned)analogRead(rak::kBattAdcPin),
-                      (unsigned)now, (now / 1000.0f) / rak::kBattDivider);
-        Serial.println("  ※ 눈금이 같은데 mV 만 다르면 감쇠 설정이 안 먹은 것이다.");
-        Serial.println("  ※ 눈금부터 다르면 핀에 뭔가 매달린 것이다.");
-        Serial.println("──────────────────────────────────────────");
-        return;
-    }
     if (line == "battboot") {
         Serial.println("──────────────────────────────────────────");
         Serial.println("  켠 뒤 1초마다 담은 배터리 ADC 값");
@@ -4890,8 +4664,6 @@ static void resumeRecordingIfCut() {
 void setup() {
     // ★ 제일 첫 줄. Serial 보다도 먼저다.
     //   잠자기 전류를 재는 중이면 여기서 전압만 적고 도로 잠들어 아래로 안 온다.
-    drainGate();
-    probeGate();
 
     Serial.begin(115200);
     delay(300);
@@ -5096,12 +4868,6 @@ void loop() {
             // 깼을 때 전압은 **이 값**을 쓴다. setup 안에서 잰 값은 낮게 나온다.
             // 켠 지 1초면 제자리다 [확인: 2026-09-08 battboot 곡선].
             if (curveN == 0 && gWokeFromSleep) {
-                gRtcWakeMv = (uint32_t)(gBattBoot[0] / rak::kBattDivider);
-                // drain 이 끝나고 처음 켜진 것이면 끝 앵커를 여기서 잡는다
-                if (gDrainWantAnchor1 && !gDrainOn) {
-                    gDrainWantAnchor1 = 0;
-                    gDrainAnchor1 = (uint16_t)(gBattBoot[0] / rak::kBattDivider);
-                }
             }
             curveN++;
         }
