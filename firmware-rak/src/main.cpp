@@ -154,6 +154,12 @@ static float   gPitchSign = 1.0f;   // -1 이면 앞뒤가 뒤집혀 있다는 �
 //
 // ★ 여기에 자기 편각은 안 들어 있다. 한국은 약 8도 서편이다.
 //   `hdg off <도>` 로 그 보정과 보드 방향 어긋남을 한꺼번에 넣는다.
+// 자력계 치우침(하드아이언). 켤 때 NVS 에서 읽는다. 0 이면 지금까지와 같다.
+// 자세한 것은 아래 "자력계 치우침 빼기" 항목.
+static float gMagOff[3] = {0.0f, 0.0f, 0.0f};
+static float gMagRadius = 0.0f;   // 맞춘 공의 반지름. 지구 자기장이면 50 µT 언저리
+static float gMagResid  = 0.0f;   // 맞추고 남은 흔들림
+
 static uint8_t gHdgAxisA = 1;       // atan2 의 첫 인자 (기본 Y)
 static uint8_t gHdgAxisB = 0;       // 두 번째 인자 (기본 X)
 static float   gHdgSignA = 1.0f;
@@ -294,6 +300,11 @@ static void loadSettings() {
     gPitchAxis      = gPrefs.getUChar("pitch_axis", 2); // 기본 피치 Z
     gPitchSign      = gPrefs.getChar("pitch_sgn", 1) < 0 ? -1.0f : 1.0f;
     gPitchOffsetDeg = gPrefs.getFloat("pitch_off", 0.0f);
+    gMagOff[0]      = gPrefs.getFloat("mag_ox", 0.0f);
+    gMagOff[1]      = gPrefs.getFloat("mag_oy", 0.0f);
+    gMagOff[2]      = gPrefs.getFloat("mag_oz", 0.0f);
+    gMagRadius      = gPrefs.getFloat("mag_r",  0.0f);
+    gMagResid       = gPrefs.getFloat("mag_res", 0.0f);
     gHdgAxisA       = gPrefs.getUChar("hdg_a", 1);
     gHdgAxisB       = gPrefs.getUChar("hdg_b", 0);
     gHdgSignA       = gPrefs.getChar("hdg_sa", 1) < 0 ? -1.0f : 1.0f;
@@ -1698,6 +1709,25 @@ static void imuFifoBegin() {
 }
 
 // FIFO 를 퍼 온다. 20 ms 마다 부르면 보통 두 벌씩 나온다.
+// 뱃머리가 도는 속도 (°/s). 진짜 수직에 투영해서 구한다.
+//
+// ★ 몸통의 축이 아니라 **가속도계가 알려주는 수직**을 쓴다. 배가 기울면
+//   몸통 축은 이미 수직이 아니라서 그 축을 도는 각속도는 뱃머리가 도는
+//   속도가 아니다.
+static float yawRateNow() {
+    if (!gImuOk) return 0.0f;
+    // 자이로·가속을 자력계 좌표로 (한 칩인데 축이 다르다 — accInMagFrame 주석)
+    const float g[3] = {  gGyr.y,  gGyr.x, -gGyr.z };
+    const float a[3] = {  gAcc.y,  gAcc.x, -gAcc.z };
+    const float n = sqrtf(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]);
+    if (n < 0.2f) return 0.0f;                 // 자유낙하 수준. 아래를 모른다
+    return -(g[0]*a[0] + g[1]*a[1] + g[2]*a[2]) / n;   // 가속은 위를 가리키니 뒤집는다
+}
+
+// 켠 뒤로 뱃머리가 돈 각의 합 (°). 100 Hz 로 쌓인다.
+// 자이로 치우침 때문에 오래 두면 흘러간다. **차이로만 쓴다.**
+static float gYawIntDeg = 0.0f;
+
 static void imuDrainFifo() {
     if (!gImuOk || !gFifoOn) return;
     int16_t sets = gImu.getNumberOfFifoDataSets();
@@ -1722,6 +1752,11 @@ static void imuDrainFifo() {
     for (int16_t i = 0; i < sets; ++i) {
         gAcc = gImu.getGValuesFromFifo();       // 순서 중요: 가속 6바이트 먼저
         gGyr = gImu.getGyrValuesFromFifo();     // 그다음 자이로 6바이트
+        // ★ 뱃머리가 돈 각을 **여기서** 모은다. 벌 하나가 10 ms 다.
+        //   진단 명령 안에서 4 Hz 로 적분했다가 값이 통째로 틀렸다 — 손으로
+        //   흔들면 각속도가 그보다 훨씬 빨리 변해서 사이를 다 놓친다.
+        //   재는 자리는 값이 오는 자리여야 한다 (2026-09-10).
+        gYawIntDeg += yawRateNow() * 0.010f;
         if (hlog::recording()) logWriteImu(gImuTickMs);
         gImuTickMs += 10;
         ++gFifoSets;
@@ -1730,10 +1765,141 @@ static void imuDrainFifo() {
 
 // 자력계까지 포함한 갱신. 10 Hz 로 부른다.
 // 자력계(AK8963)는 100 Hz 로 못 따라오므로 여기서만 읽는다.
+// ── 자력계 치우침 빼기 (하드아이언) ──────────────────────────────────────
+//
+// 자력계는 지구 자기장만 재지 않는다. **보드에 붙은 쇠붙이가 만드는 자기장까지
+// 같이 잰다.** 나사·커넥터·배터리·화면 같은 것들이 조금씩 자화되어 있다.
+//
+// 그건 보드와 **같이 돈다.** 그래서 보드 입장에서는 늘 같은 방향에 있는
+// 상수가 된다. 재는 값이 이렇게 된다.
+//
+//     잰 값 = 지구 자기장(방향만 도는 일정한 크기) + 상수
+//
+// 그래서 돌리기만 해도 크기가 변한다. 실제로 그랬다.
+//     [확인: 2026-09-09 hdgtilt — 한 판 안에서 16~45% 흔들림]
+//
+// ★ 이걸 안 빼면 기울기 보정 식이 아무리 정확해도 결과가 틀린다. 입력이
+//   틀렸기 때문이다. 검산에서 식은 72가지 전부 0.5° 미만이었다.
+//
+// ── 어떻게 찾나 ─────────────────────────────────────────────────────────
+//
+// 상수가 없으면 잰 값들이 **원점을 중심으로 한 공 껍질** 위에 놓인다.
+// 상수가 있으면 공이 통째로 옆으로 밀린다. **밀린 중심이 곧 그 상수다.**
+//
+// 그러니 자세도 COG 도 안 쓴다. 기하학만 쓴다. 이게 순서상 3번이고,
+// 4번(박스가 돌아앉은 각)보다 먼저 와야 한다 — 안 그러면 남은 치우침이
+// 뱃머리 방향마다 다른 오차를 만들고 그게 leeway 인 척 섞인다.
+//
+// ── 점을 고르는 법 ──────────────────────────────────────────────────────
+//
+// 다 저장할 수 없으니 **서로 6 µT 이상 떨어진 것만** 128개까지 담는다.
+// 이 한 가지 규칙이 두 가지를 한꺼번에 해준다.
+//   · 가만히 있으면 안 쌓인다 (같은 자리라 걸러진다)
+//   · 골고루 돌려야 채워진다 (한쪽만 보면 금방 멈춘다)
+static constexpr int   kMagCalMax    = 128;
+static constexpr float kMagCalMinGap = 6.0f;    // µT. 이만큼 떨어져야 새 점
+
+static int16_t gMagCalPts[kMagCalMax][3];       // 0.1 µT 단위
+static int     gMagCalN  = 0;
+static bool    gMagCalOn = false;
+static uint32_t gMagCalSaidAt = 0;
+
+// (선언은 loadSettings 보다 앞이라 파일 위쪽에 있다)
+static xyzFloat gMagRaw;                        // 빼기 전 원본
+
+/** 지금 값을 점 목록에 넣을지 본다. 이미 있는 점과 가까우면 안 넣는다. */
+static void magCalCollect() {
+    if (!gMagCalOn || gMagCalN >= kMagCalMax) return;
+    for (int i = 0; i < gMagCalN; i++) {
+        const float dx = gMagRaw.x - gMagCalPts[i][0] * 0.1f;
+        const float dy = gMagRaw.y - gMagCalPts[i][1] * 0.1f;
+        const float dz = gMagRaw.z - gMagCalPts[i][2] * 0.1f;
+        if (dx*dx + dy*dy + dz*dz < kMagCalMinGap * kMagCalMinGap) return;
+    }
+    gMagCalPts[gMagCalN][0] = (int16_t)lroundf(gMagRaw.x * 10.0f);
+    gMagCalPts[gMagCalN][1] = (int16_t)lroundf(gMagRaw.y * 10.0f);
+    gMagCalPts[gMagCalN][2] = (int16_t)lroundf(gMagRaw.z * 10.0f);
+    gMagCalN++;
+}
+
+/** 4x4 연립방정식을 푼다 (가우스 소거, 부분 피벗). 못 풀면 false. */
+static bool solve4(float A[4][4], float b[4], float out[4]) {
+    for (int c = 0; c < 4; c++) {
+        int piv = c;
+        for (int r = c + 1; r < 4; r++)
+            if (fabsf(A[r][c]) > fabsf(A[piv][c])) piv = r;
+        if (fabsf(A[piv][c]) < 1e-9f) return false;
+        if (piv != c) {
+            for (int k = 0; k < 4; k++) { const float t = A[c][k]; A[c][k] = A[piv][k]; A[piv][k] = t; }
+            const float t = b[c]; b[c] = b[piv]; b[piv] = t;
+        }
+        for (int r = c + 1; r < 4; r++) {
+            const float f = A[r][c] / A[c][c];
+            for (int k = c; k < 4; k++) A[r][k] -= f * A[c][k];
+            b[r] -= f * b[c];
+        }
+    }
+    for (int r = 3; r >= 0; r--) {
+        float v = b[r];
+        for (int k = r + 1; k < 4; k++) v -= A[r][k] * out[k];
+        out[r] = v / A[r][r];
+    }
+    return true;
+}
+
+/** 모은 점들에 공을 맞춘다. 중심이 곧 치우침이다.
+ *
+ *  x²+y²+z² = 2ax + 2by + 2cz + d  를 최소제곱으로 푼다.
+ *  중심 (a,b,c), 반지름 = sqrt(d + a²+b²+c²).
+ *  ★ 선형이라 반복이 없다. 못 도는 경우가 없어서 실시간에 안전하다.
+ */
+static bool magCalSolve() {
+    if (gMagCalN < 20) return false;
+    float A[4][4] = {{0}}, b[4] = {0};
+    for (int i = 0; i < gMagCalN; i++) {
+        const float x = gMagCalPts[i][0] * 0.1f;
+        const float y = gMagCalPts[i][1] * 0.1f;
+        const float z = gMagCalPts[i][2] * 0.1f;
+        const float row[4] = { 2*x, 2*y, 2*z, 1.0f };
+        const float rhs = x*x + y*y + z*z;
+        for (int r = 0; r < 4; r++) {
+            for (int c = 0; c < 4; c++) A[r][c] += row[r] * row[c];
+            b[r] += row[r] * rhs;
+        }
+    }
+    float sol[4];
+    if (!solve4(A, b, sol)) return false;
+    const float r2 = sol[3] + sol[0]*sol[0] + sol[1]*sol[1] + sol[2]*sol[2];
+    if (!(r2 > 1.0f) || !isfinite(r2)) return false;
+
+    gMagOff[0] = sol[0]; gMagOff[1] = sol[1]; gMagOff[2] = sol[2];
+    gMagRadius = sqrtf(r2);
+
+    // 맞추고 나서 얼마나 남았나. 이 숫자가 좋아졌을 때만 쓴다.
+    float sum = 0.0f;
+    for (int i = 0; i < gMagCalN; i++) {
+        const float x = gMagCalPts[i][0] * 0.1f - gMagOff[0];
+        const float y = gMagCalPts[i][1] * 0.1f - gMagOff[1];
+        const float z = gMagCalPts[i][2] * 0.1f - gMagOff[2];
+        const float d = sqrtf(x*x + y*y + z*z) - gMagRadius;
+        sum += d * d;
+    }
+    gMagResid = sqrtf(sum / gMagCalN);
+    return true;
+}
+
 static void imuUpdate() {
     if (!gImuOk) return;
     if (!gFifoOn) imuFast();   // FIFO 가 켜져 있으면 가속·자이로는 거기서 온다
-    if (gMagOk) gMag = gImu.getMagValues();
+    if (gMagOk) {
+        gMagRaw = gImu.getMagValues();
+        // 치우침을 여기서 뺀다. 아래로 가는 모든 것(방위·화면·기록)이 뺀 값을 쓴다.
+        // ★ 보정 전에는 gMagOff 가 0 이라 지금까지와 값이 똑같다.
+        gMag.x = gMagRaw.x - gMagOff[0];
+        gMag.y = gMagRaw.y - gMagOff[1];
+        gMag.z = gMagRaw.z - gMagOff[2];
+        magCalCollect();
+    }
     // 라이브러리의 getRoll()/getPitch() 는 안 쓴다. 보드를 세워 달아서
     // 그 각도는 힐·피치와 다른 회전을 잰다. 아래 "힐과 피치" 항목 참고.
 }
@@ -1834,13 +2000,6 @@ static void gyrInMagFrame(float out[3]) {
     out[2] = -gGyr.z;
 }
 
-// 아래 축을 도는 각속도 = 뱃머리가 돌아가는 속도 (°/s).
-static float yawRateDegS() {
-    if (!gImuOk) return 0.0f;
-    float g[3];
-    gyrInMagFrame(g);
-    return g[magDownAxis()] * magDownSign();
-}
 
 // 기울기를 보정한 방위. 자력계가 없거나 중력을 못 재면 -1.
 //
@@ -2511,6 +2670,107 @@ static void sleepLogToCard() {
     f.close();
 }
 
+// ── `magcal` — 자력계 치우침 재기 ────────────────────────────────────────
+//
+// 시리얼과 BLE 양쪽에서 같은 말로 부른다 (PROTOCOL.md §9).
+// 배 위에서는 폰으로, 부두에서는 USB 로.
+//
+//     magcal        지금 상태
+//     magcal on     모으기 시작
+//     magcal stop   맞추고 저장
+//     magcal clear  지운다 (0 으로 되돌림)
+//
+// **화면이 필요한 작업이라 버튼으로 안 만들었다.** 몇 점 모았는지, 어디가
+// 비었는지, 끝나고 좋아졌는지를 봐야 한다. 그리고 버튼은 이미 셋이 차 있다.
+static void magCalSave() {
+    gPrefs.begin("sail", false);
+    gPrefs.putFloat("mag_ox", gMagOff[0]);
+    gPrefs.putFloat("mag_oy", gMagOff[1]);
+    gPrefs.putFloat("mag_oz", gMagOff[2]);
+    // 반지름과 남은 흔들림도 남긴다. 다시 구워도 "얼마나 잘 맞췄나" 를 알아야 한다.
+    gPrefs.putFloat("mag_r",  gMagRadius);
+    gPrefs.putFloat("mag_res", gMagResid);
+    gPrefs.end();
+}
+
+/** 모은 점이 세 축으로 얼마나 퍼져 있나. 좁은 축이 덜 돌린 쪽이다. */
+static void magCalSpread(float out[3]) {
+    for (int c = 0; c < 3; c++) {
+        int16_t lo = 32767, hi = -32768;
+        for (int i = 0; i < gMagCalN; i++) {
+            if (gMagCalPts[i][c] < lo) lo = gMagCalPts[i][c];
+            if (gMagCalPts[i][c] > hi) hi = gMagCalPts[i][c];
+        }
+        out[c] = gMagCalN ? (hi - lo) * 0.1f : 0.0f;
+    }
+}
+
+/** 한 줄로 요약. 시리얼에도 BLE 에도 같은 말이 나간다. */
+static void magCalStatus(char* out, size_t n) {
+    if (gMagCalOn) {
+        float sp[3]; magCalSpread(sp);
+        snprintf(out, n, "magcal on %d/%d  퍼짐 %.0f/%.0f/%.0f uT",
+                 gMagCalN, kMagCalMax, sp[0], sp[1], sp[2]);
+    } else if (gMagOff[0] != 0.0f || gMagOff[1] != 0.0f || gMagOff[2] != 0.0f) {
+        snprintf(out, n, "magcal off  치우침 %.1f %.1f %.1f uT  반지름 %.1f  남은흔들림 %.2f",
+                 gMagOff[0], gMagOff[1], gMagOff[2], gMagRadius, gMagResid);
+    } else {
+        snprintf(out, n, "magcal off  아직 안 잼 (magcal on 으로 시작)");
+    }
+}
+
+/** 명령 처리. 답 한 줄을 out 에 쓴다. 시리얼·BLE 공용. */
+static void magCalCmd(const String& arg, char* out, size_t n) {
+    if (arg == "on" || arg == "start") {
+        gMagCalN = 0;
+        gMagCalOn = true;
+        gMagCalSaidAt = 0;
+        snprintf(out, n, "magcal 시작 — 보드를 사방으로 천천히 돌리세요. "
+                         "%d점 모으면 됩니다. 끝나면 magcal stop", kMagCalMax);
+        return;
+    }
+    if (arg == "clear") {
+        gMagOff[0] = gMagOff[1] = gMagOff[2] = 0.0f;
+        gMagRadius = gMagResid = 0.0f;
+        magCalSave();
+        snprintf(out, n, "magcal 지웠습니다 (치우침 0)");
+        return;
+    }
+    if (arg == "stop") {
+        if (!gMagCalOn) { snprintf(out, n, "magcal 시작한 적이 없습니다"); return; }
+        gMagCalOn = false;
+        // 맞추기 전 크기가 얼마나 흔들렸나. 이것과 뒤의 값을 견줘야 뜻이 있다.
+        float lo = 1e9f, hi = -1e9f;
+        for (int i = 0; i < gMagCalN; i++) {
+            const float x = gMagCalPts[i][0]*0.1f, y = gMagCalPts[i][1]*0.1f, z = gMagCalPts[i][2]*0.1f;
+            const float m = sqrtf(x*x + y*y + z*z);
+            if (m < lo) lo = m;   if (m > hi) hi = m;
+        }
+        if (!magCalSolve()) {
+            snprintf(out, n, "magcal 실패 — 점 %d개로는 부족합니다 (스무 개 넘게, 사방으로)",
+                     gMagCalN);
+            return;
+        }
+        magCalSave();
+        snprintf(out, n, "magcal 저장 — 치우침 %.1f %.1f %.1f uT | "
+                         "크기 %.0f~%.0f → %.1f±%.2f uT | 점 %d",
+                 gMagOff[0], gMagOff[1], gMagOff[2], lo, hi, gMagRadius, gMagResid, gMagCalN);
+        return;
+    }
+    magCalStatus(out, n);
+}
+
+/** 모으는 동안 1초에 한 번 알려준다. 사람이 언제 그만할지 알아야 한다. */
+static void magCalTick(uint32_t nowMs) {
+    if (!gMagCalOn) return;
+    if (nowMs - gMagCalSaidAt < 1000) return;
+    gMagCalSaidAt = nowMs;
+    float sp[3]; magCalSpread(sp);
+    Serial.printf("[MAGCAL] %d/%d 점  퍼짐 X%.0f Y%.0f Z%.0f uT%s\n",
+                  gMagCalN, kMagCalMax, sp[0], sp[1], sp[2],
+                  gMagCalN >= kMagCalMax ? "  ★ 다 찼습니다. magcal stop" : "");
+}
+
 // `sleepstat` — 지난번에 정말 잤나.
 //
 // 자는 보드는 아무 말도 못 한다. 그래서 잠들기 직전에 RTC 메모리에 적어 둔 것을
@@ -2595,11 +2855,7 @@ static void doHeadingTilt() {
     const uint32_t t0 = millis();
     float flatMin = 999, flatMax = -999, tiltMin = 999, tiltMax = -999;
     float magMin = 9999, magMax = -9999;
-    float yawSum = 0.0f, yawAbs = 0.0f;   // 손으로 기울이다 같이 돈 양
-    uint32_t tPrev = millis();
-    // 자이로가 말하는 회전을 뺀 나머지. 이게 진짜 남은 오차다.
-    float resMin = 999, resMax = -999;
-    bool  resFirst = true; float res0 = 0;
+    const float yaw0 = gYawIntDeg;        // 100 Hz 로 쌓인 값을 읽기만 한다
     float heelMin = 999, heelMax = -999;
     while (millis() - t0 < 5000) {
         // ★ FIFO 가 켜져 있으면 imuUpdate() 는 자력계만 갱신한다. 가속·자이로는
@@ -2618,19 +2874,6 @@ static void doHeadingTilt() {
         Serial.printf("  %+6.1f  %+6.1f   %5.1f°   %5.1f°   %+5.1f°   %5.1f\n",
                       currentHeelDeg(), currentPitchDeg(), flat, tilt,
                       wrap180(tilt - flat), mm);
-        const uint32_t tNow = millis();
-        const float dt = (tNow - tPrev) / 1000.0f;
-        tPrev = tNow;
-        const float yr = yawRateDegS();
-        yawSum += yr * dt;
-        yawAbs += fabsf(yr) * dt;
-
-        // 보정한 방위에서 자이로가 말하는 회전을 뺀다.
-        // 손이 돌린 만큼은 방위가 진짜 바뀐 것이라 오차가 아니다.
-        const float res = wrap180(tilt - yawSum);
-        if (resFirst) { res0 = res; resFirst = false; }
-        const float r = wrap180(res - res0);
-        if (r < resMin) resMin = r;   if (r > resMax) resMax = r;
 
         delay(250);
         feedWatchdog();
@@ -2657,11 +2900,18 @@ static void doHeadingTilt() {
     // 사람 손으로 기울이면 살짝 돌기도 한다. 그러면 방위가 **진짜로** 바뀐 것이라
     // 보정한 값이 움직이는 게 맞다. 그걸 오차로 세면 안 된다.
     // 자이로로 아래 축을 도는 각을 모아서 얼마나 돌았는지 재 둔다.
-    Serial.printf("  돌아간 각   알짜 %+.1f°   합계 %.1f°  (자이로)\n", yawSum, yawAbs);
-    Serial.printf("  자이로가 말하는 회전을 빼면 남는 흔들림 %.1f°\n", resMax - resMin);
-    Serial.println((resMax - resMin) < 10.0f
-        ? "  ★ 10° 밑입니다 — 기울기 보정이 제대로 되고 있습니다."
-        : "  ※ 아직 남습니다. 자력계 크기가 흔들리면 그것부터 잡아야 합니다.");
+    Serial.printf("  돌아간 각   %+.1f°  (자이로 100 Hz 적분)\n", gYawIntDeg - yaw0);
+    // ★ "자이로로 회전을 빼고 남은 오차" 를 찍었었는데 **없앴다.**
+    //
+    //   빼면 오히려 커졌다 (21.0° → 30.8°). 빼서 나빠지면 빼는 방법이 틀린 것이다.
+    //   이유는 표본 속도다. 이 명령은 자이로를 4 Hz 로 읽어 적분하는데, 손으로
+    //   흔들면 각속도가 그보다 훨씬 빨리 변한다. 0.25초에 한 번 찍은 값으로는
+    //   그 사이 움직임을 통째로 놓친다. 제대로 하려면 100 Hz 로 적분해야 하고
+    //   그건 이 명령 구조로는 안 된다.
+    //
+    //   ★ 그리고 뺄 필요도 없다. **평평 대 보정 비교는 손으로 돌려도 성립한다.**
+    //     배가 진짜로 X° 돌면 두 값이 똑같이 X° 움직인다. 그러니 흔들림 폭의
+    //     차이는 여전히 기울기 탓이다. 위의 비교 하나로 충분하다.
 
     // ── 자력계 크기가 일정한가 ──────────────────────────────────────────
     //
@@ -3657,8 +3907,15 @@ static void controlLine(const char* raw) {
         controlSay(out);
         return;
     }
+    // 자력계 치우침. **시리얼과 같은 함수를 부른다** — 말이 어긋날 수가 없다.
+    if (line == "magcal" || line.startsWith("magcal ")) {
+        char msg[200];
+        magCalCmd(line.length() > 7 ? line.substring(7) : String(""), msg, sizeof(msg));
+        controlSay(msg);
+        return;
+    }
     if (line == "help") {
-        controlSay("cmds: wifi ssid|pass|scan|on|ap|off|status");
+        controlSay("cmds: wifi ssid|pass|scan|on|ap|off|status | magcal on|stop|clear");
         return;
     }
     snprintf(out, sizeof(out), "err unknown %s", line.c_str());
@@ -3736,6 +3993,7 @@ static void printHelp() {
     Serial.println("  scan          I2C — 화면 RAK1921(0x3C) / IMU RAK1905(0x68)");
     Serial.println("  oledw         화면에 쓸 한글 줄의 폭을 잰다 (128px 안에 드나)");
     Serial.println("  hdgtilt       기울기 보정 방위 확인 — 손으로 기울이며 5초 본다");
+    Serial.println("  magcal        자력계 치우침 재기. on / stop / clear (BLE 로도 됨)");
     Serial.println("  off           보드를 끈다 (깊은잠). 버튼 5초 누르면 켜진다");
     Serial.println("  sleepstat     지난번에 정말 잤나 — 헛깬 횟수·잔 시간·3V3_S");
     Serial.println("  sd            SD카드 마운트 + 쓰기 시험");
@@ -3790,6 +4048,12 @@ static void handleCommand(String line) {
     if (line == "oledw")               { doOledWidth(); return; }
     if (line == "hdgtilt")             { doHeadingTilt(); return; }
     if (line == "sleepstat")           { doSleepStat(); return; }
+    if (line == "magcal" || line.startsWith("magcal ")) {
+        char msg[200];
+        magCalCmd(line.length() > 7 ? line.substring(7) : String(""), msg, sizeof(msg));
+        Serial.printf("  %s\n", msg);
+        return;
+    }
     if (line == "battboot") {
         Serial.println("──────────────────────────────────────────");
         Serial.println("  켠 뒤 1초마다 담은 배터리 ADC 값");
@@ -4872,6 +5136,9 @@ void loop() {
             curveN++;
         }
     }
+
+    // 1g) 자력계 치우침을 재는 중이면 1초에 한 번 진행을 알려준다.
+    magCalTick(now);
 
     // 1e) 저장 버튼. 사람 손가락이라 자주 볼 필요 없다.
     buttonPoll(now);
