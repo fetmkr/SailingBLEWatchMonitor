@@ -144,6 +144,39 @@ final class BLEManager: NSObject, ObservableObject {
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var telemetryChar: CBCharacteristic?
+
+    // ── 제어 통로 (REQUIREMENTS B1·B2) ───────────────────────────────────
+    //
+    // 보드에 글자 한 줄을 써 넣으면 한 줄로 답한다. **시리얼 명령과 같은 말이다**
+    // (PROTOCOL.md §9). 그래서 새로 외울 규격이 없다.
+    //
+    // ★ 여태 이 통로가 앱에 없었다. UUID 만 선언해 두고 안 썼다.
+    //   그래서 배 위에서 보드를 만질 방법이 노트북뿐이었다 — 자력계 보정처럼
+    //   물 위에서 해야 하는 일을 못 했다. 2026-09-10 에 표로 대조하다 드러났다.
+    private var controlChar: CBCharacteristic?
+
+    /// 보드가 마지막으로 답한 줄. 화면이 그대로 보여준다.
+    @Published private(set) var controlReply: String = ""
+    /// 그 답이 온 시각. 오래되면 화면이 흐리게 만든다.
+    @Published private(set) var controlReplyAt: Date?
+    /// 제어 통로가 열려 있나. 안 열려 있으면 단추를 잠근다.
+    @Published private(set) var controlReady = false
+
+    /// 보드에 명령 한 줄을 보낸다. 줄바꿈은 여기서 붙인다.
+    ///
+    /// - 답은 `controlReply` 로 온다. 바로 안 온다 — 보드가 처리하고 알려준다.
+    /// - 통로가 안 열려 있으면 조용히 버리지 않고 그 사실을 남긴다.
+    func sendControl(_ line: String) {
+        guard let chr = controlChar, let p = peripheral else {
+            appendLog("제어 통로가 아직 안 열렸습니다 — \(line)")
+            controlReply = "보드에 안 붙어 있습니다"
+            controlReplyAt = Date()
+            return
+        }
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+        appendLog("→ \(line)")
+        p.writeValue(data, for: chr, type: .withResponse)
+    }
     private var housekeeping: Timer?
     private var disconnectedAt: Date?
     private var connEma: TimeInterval = 0
@@ -660,7 +693,10 @@ extension BLEManager: CBPeripheralDelegate {
             return
         }
         appendLog("서비스 발견 → characteristic 탐색")
-        peripheral.discoverCharacteristics([SailProtocol.telemetryUUID], for: svc)
+        // 텔레메트리와 제어를 같이 찾는다. 제어가 없는 옛 펌웨어도 있으므로
+        // 없다고 연결을 끊지는 않는다.
+        peripheral.discoverCharacteristics(
+            [SailProtocol.telemetryUUID, SailProtocol.controlUUID], for: svc)
     }
 
     func peripheral(_ peripheral: CBPeripheral,
@@ -679,6 +715,18 @@ extension BLEManager: CBPeripheralDelegate {
         appendLog("notify 구독 요청")
         peripheral.setNotifyValue(true, for: chr)
         peripheral.readValue(for: chr) // 첫 값을 곧바로 채운다
+
+        // 제어 통로. 없어도 계기는 그대로 돌아간다 — 옛 펌웨어를 위해 조용히 넘긴다.
+        if let ctl = service.characteristics?
+            .first(where: { $0.uuid == SailProtocol.controlUUID }) {
+            controlChar = ctl
+            controlReady = true
+            peripheral.setNotifyValue(true, for: ctl)   // 보드의 답을 받는다
+            appendLog("제어 통로 열림")
+        } else {
+            controlReady = false
+            appendLog("제어 통로 없음 — 옛 펌웨어입니다")
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral,
@@ -695,6 +743,17 @@ extension BLEManager: CBPeripheralDelegate {
                     didUpdateValueFor characteristic: CBCharacteristic,
                     error: Error?) {
         guard error == nil, let data = characteristic.value else { return }
+
+        // 제어 통로의 답은 글자다. 텔레메트리 디코더에 넣으면 안 된다.
+        if characteristic.uuid == SailProtocol.controlUUID {
+            let text = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            controlReply = text
+            controlReplyAt = Date()
+            appendLog("← \(text)")
+            return
+        }
 
         guard let decoded = TelemetrySample.decodeTelemetryPacket(data) else {
             appendLog("디코딩 실패 — \(data.count)바이트: \(data.map { String(format: "%02X", $0) }.joined(separator: " "))")

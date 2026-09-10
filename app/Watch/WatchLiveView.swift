@@ -361,6 +361,8 @@ private struct SettingsPage: View {
                 }
 
                 Divider()
+                magcalSection
+                Divider()
                 sessionSection
                 Divider()
                 diagnostics
@@ -368,6 +370,55 @@ private struct SettingsPage: View {
             .padding(.horizontal, 4)
         }
         .onAppear { ble.refreshDiscovery() }
+    }
+
+    // ── 자력계 치우침 보정 (REQUIREMENTS B4·D3)
+    //
+    // 아이폰과 같은 기능이다. 배 위에서 해야 하는 작업이라 손목에도 둔다.
+    // 배를 돌리면서 손목만 보면 되니까 오히려 여기가 편하다.
+    //
+    // ★ 화면이 좁으니 단추 둘만 둔다. 시작과 저장. 상태는 자동으로 온다.
+    private var magcalSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                Image(systemName: "circle.dotted")
+                Text("자력계 치우침").font(.caption2)
+            }
+            .foregroundStyle(.secondary)
+
+            HStack(spacing: 4) {
+                Button {
+                    ble.sendControl("magcal on")
+                } label: {
+                    Text("시작").font(.caption2).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!ble.controlReady)
+
+                Button {
+                    ble.sendControl("magcal stop")
+                } label: {
+                    Text("저장").font(.caption2).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!ble.controlReady)
+            }
+
+            if !ble.controlReady {
+                Text("보드에 붙어야 쓸 수 있습니다")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            } else if ble.controlReply.isEmpty {
+                Text("배를 한 바퀴 천천히 돌리면서 시작")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text(ble.controlReply)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     // ── 세션 (앱 켜면 자동 시작)

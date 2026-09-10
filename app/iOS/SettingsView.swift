@@ -23,6 +23,8 @@ struct SettingsView: View {
                     pickerSection
                 }
 
+                magcalSection
+
                 // 모듈 이야기 바로 밑에 둔다. 주변에 어떤 배가 떠 있는지
                 // 보는 화면이라 모듈 고르는 흐름과 이어진다.
                 Section {
@@ -76,6 +78,62 @@ struct SettingsView: View {
     }
 
     // MARK: 고정된 상태
+
+    // ── 자력계 치우침 보정 (REQUIREMENTS B4·D3) ─────────────────────────
+    //
+    // **배 위에서 해야 하는 작업이다.** 보드에 붙은 쇠붙이가 만드는 자기장을
+    // 빼는 일인데, 배에 달아 놓은 상태의 값을 재야 맞다. 그래서 노트북이 아니라
+    // 여기 있어야 한다.
+    //
+    // ★ 진행을 보여주는 것이 이 화면의 존재 이유다. 몇 점 모았는지, 어디가
+    //   비었는지를 모르면 언제 그만둘지 알 수가 없다. 그래서 버튼이 아니라
+    //   화면으로 만들었다.
+    private var magcalSection: some View {
+        Section {
+            if !ble.controlReady {
+                Label("보드에 붙어야 쓸 수 있습니다", systemImage: "antenna.radiowaves.left.and.right.slash")
+                    .foregroundStyle(.secondary)
+                    .font(.footnote)
+            }
+            Button {
+                ble.sendControl("magcal on")
+            } label: {
+                Label("치우침 재기 시작", systemImage: "circle.dotted")
+            }
+            .disabled(!ble.controlReady)
+
+            Button {
+                ble.sendControl("magcal stop")
+            } label: {
+                Label("맞추고 저장", systemImage: "checkmark.circle")
+            }
+            .disabled(!ble.controlReady)
+
+            Button {
+                ble.sendControl("magcal")
+            } label: {
+                Label("지금 상태 물어보기", systemImage: "questionmark.circle")
+            }
+            .disabled(!ble.controlReady)
+
+            if !ble.controlReply.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("보드가 답한 것")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(ble.controlReply)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+        } header: {
+            Text("자력계 치우침")
+        } footer: {
+            Text("배에 달아 놓은 채로 배를 한 바퀴 천천히 돌리세요. "
+               + "128점이 차면 '맞추고 저장'. "
+               + "맞춘 반지름이 50 µT 근처면 잘 된 것입니다 (한국 지구 자기장).")
+        }
+    }
 
     @ViewBuilder
     private func pinnedSection(_ pin: ModulePin) -> some View {
