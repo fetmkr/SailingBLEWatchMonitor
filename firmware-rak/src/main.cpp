@@ -3960,17 +3960,59 @@ static void controlLine(const char* raw) {
     controlSay(out);
 }
 
+// ── BLE 로 들어온 줄을 담아 두는 자리 ────────────────────────────────────
+//
+// ★ **BLE 콜백에서 명령을 처리하면 안 된다.**
+//
+//   콜백은 `nimble_host` 작업에서 도는데 그 스택이 **5120 바이트**다
+//   (CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE). 거기서 controlLine 의
+//   char out[240], magcal 의 char msg[200], 실수 형식 맞추기, 공 맞추기까지
+//   하니까 넘쳤다.
+//
+//   실제로 `magcal stop` 을 BLE 로 받는 순간 보드가 죽었다.
+//     [확인: 2026-09-11 코어덤프 — Crashed task 'nimble_host']
+//   같은 명령이 시리얼로는 멀쩡했다. loop 스택은 8192 바이트라서다.
+//
+//   그리고 스택 말고도 이유가 하나 더 있다. magCalCmd 가 만지는 값들을
+//   메인 루프의 magCalCollect 도 만진다. 다른 작업에서 동시에 만지면
+//   언젠가 어긋난다.
+//
+// 그래서 콜백은 **줄을 베껴 두기만** 하고, 일은 메인 루프가 한다.
+// 로라 받기와 같은 방식이다.
+static constexpr int kCtlQueueMax = 4;
+static constexpr int kCtlLineMax  = 192;
+static char gCtlQueue[kCtlQueueMax][kCtlLineMax];
+static volatile uint8_t gCtlHead = 0, gCtlTail = 0;
+
+/** 콜백에서 부른다. 베끼기만 한다. 꽉 차면 버리고 그 사실을 남긴다. */
+static void controlEnqueue(const char* line) {
+    const uint8_t next = (uint8_t)((gCtlHead + 1) % kCtlQueueMax);
+    if (next == gCtlTail) { Serial.println("[CTL] 줄이 밀렸습니다 — 버립니다"); return; }
+    snprintf(gCtlQueue[gCtlHead], kCtlLineMax, "%s", line);
+    gCtlHead = next;
+}
+
+/** 메인 루프가 부른다. 담아 둔 줄을 여기서 처리한다. */
+static void controlPump() {
+    while (gCtlTail != gCtlHead) {
+        controlLine(gCtlQueue[gCtlTail]);
+        gCtlTail = (uint8_t)((gCtlTail + 1) % kCtlQueueMax);
+    }
+}
+
 class ControlCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
         (void)info;
         const std::string v = chr->getValue();
-        // 한 번에 여러 줄이 올 수도 있다. 줄 단위로 끊어 처리한다.
+        // 한 번에 여러 줄이 올 수도 있다. 줄 단위로 끊어 담아만 둔다.
         String buf(v.c_str());
         int at = 0;
         while (at < (int)buf.length()) {
             int nl = buf.indexOf('\n', at);
             if (nl < 0) nl = buf.length();
-            controlLine(buf.substring(at, nl).c_str());
+            String one = buf.substring(at, nl);
+            one.trim();
+            if (one.length()) controlEnqueue(one.c_str());
             at = nl + 1;
         }
     }
@@ -5117,6 +5159,7 @@ void loop() {
     static uint32_t lastText   = 0;
 
     pollSerial();
+    controlPump();      // BLE 로 들어온 명령. ★ 콜백이 아니라 여기서 처리한다
     netsrv::poll();
 
     // GPS 는 쉬지 않고 읽는다. UART 버퍼가 넘치면 문장 중간이 잘려 나간다.

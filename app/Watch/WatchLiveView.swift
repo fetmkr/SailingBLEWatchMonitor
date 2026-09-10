@@ -460,13 +460,16 @@ private struct SettingsPage: View {
             ble.sendControl(cmd)
         } label: {
             Text(title)
-                .font(.system(size: 12, weight: .medium))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
+                .font(.system(size: 15, weight: .semibold))
+                // ★ 누르는 자리는 44 다. 처음에 20 쯤으로 만들었더니
+                //   "너무 안 눌린다" 는 말이 나왔다 (2026-09-11).
+                //   글자를 키우는 게 아니라 **눌리는 넓이**를 키워야 한다.
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())      // 배경 없는 곳도 눌리게
                 .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(ble.controlReady ? Color.accentColor.opacity(0.28)
-                                               : Color.orange.opacity(0.22))
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(ble.controlReady ? Color.accentColor.opacity(0.30)
+                                               : Color.orange.opacity(0.25))
                 )
         }
         .buttonStyle(.plain)
