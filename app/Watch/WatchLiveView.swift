@@ -386,22 +386,16 @@ private struct SettingsPage: View {
             }
             .foregroundStyle(.secondary)
 
+            // ★ 기본 단추 스타일을 안 쓴다.
+            //
+            //   .bordered 는 워치에서 알약처럼 커진다. 두 개를 나란히 놓으니
+            //   오른쪽 위 시계 자리까지 올라가서 글자가 서로 파고들었다
+            //   (2026-09-10 실기기). controlSize(.mini) 로도 안 줄었다.
+            //
+            //   그래서 .plain 으로 두고 배경을 직접 그린다. 높이를 우리가 정한다.
             HStack(spacing: 4) {
-                Button {
-                    ble.sendControl("magcal on")
-                } label: {
-                    Text("시작").font(.caption2).frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(!ble.controlReady)
-
-                Button {
-                    ble.sendControl("magcal stop")
-                } label: {
-                    Text("저장").font(.caption2).frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(!ble.controlReady)
+                magcalButton("시작", "magcal on")
+                magcalButton("저장", "magcal stop")
             }
 
             if !ble.controlReady {
@@ -419,6 +413,25 @@ private struct SettingsPage: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// 작은 단추 하나. 배경을 직접 그려서 높이를 우리가 정한다.
+    private func magcalButton(_ title: String, _ cmd: String) -> some View {
+        Button {
+            ble.sendControl(cmd)
+        } label: {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(ble.controlReady ? Color.accentColor.opacity(0.28)
+                                               : Color.gray.opacity(0.18))
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!ble.controlReady)
     }
 
     // ── 세션 (앱 켜면 자동 시작)

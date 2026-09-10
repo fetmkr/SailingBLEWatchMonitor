@@ -97,6 +97,9 @@ final class SessionManager: NSObject, ObservableObject {
     /// 앱 진입 시 한 번 호출. 이미 돌고 있으면 아무것도 하지 않는다.
     func startIfNeeded() async {
         guard session == nil else { return }
+        // 사람이 손으로 끝냈으면 다시 안 건다. 앞으로 나올 때마다 되살아나면
+        // "종료" 단추가 아무 뜻이 없어진다.
+        guard !stoppedByUser else { return }
         print("[SESSION] startIfNeeded — 권한 \(authText), HealthKit \(HKHealthStore.isHealthDataAvailable())")
         guard HKHealthStore.isHealthDataAvailable() else {
             errorMessage = "이 기기에서 HealthKit 을 쓸 수 없습니다."
