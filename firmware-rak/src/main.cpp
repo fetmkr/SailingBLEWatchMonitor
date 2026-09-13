@@ -656,6 +656,14 @@ static void gpsBegin() {
     // 지금 모듈이 어느 속도로 말하는지 알 수 없다. 방금 전원이 들어왔으면
     // 9600 이지만, 보드만 리셋되고 모듈은 안 꺼졌다면 이미 115200 이다.
     // 두 속도로 각각 보낸다. 못 알아듣는 쪽은 그냥 버려진다.
+    // 받는 버퍼. 기본은 256 바이트다 [확인: HardwareSerial.cpp].
+    // NAV-PV 를 10 Hz 로 받으면 NMEA 와 합쳐 초당 2 KB 쯤이다. SD 를 여는 0.7 초
+    // 동안 루프가 멈추면 256 바이트는 넘친다. begin 전에만 바꿀 수 있다.
+    {
+        const size_t got = Serial1.setRxBufferSize(4096);
+        Serial.printf("[GPS] 받는 버퍼 %u 바이트%s\n", (unsigned)got,
+                      got ? "" : " — ★ 못 바꿨습니다 (이미 열려 있음)");
+    }
     for (uint32_t baud : {9600u, kGpsBaud}) {
         Serial1.begin(baud, SERIAL_8N1, rak::kUART1_RX, rak::kUART1_TX);
         delay(150);
@@ -682,13 +690,13 @@ static void gpsBegin() {
     // 문장 두 종류만 켜 두고 115200 을 쓰기 때문에 대역이 남는다.
     gpsSetRate(10);
 
-    // NAV-PV 를 1 Hz 로 계속 내보내게 한다 (측위 10회당 1번).
+    // NAV-PV 를 측위마다(10 Hz) 내보내게 한다.
     //
-    // NMEA 로 만들어지기 전의 속도를 보려는 것이다. RMC 가 0 인데 이쪽이
-    // 살아 있으면 다듬기가 어디서 걸리는지 알 수 있다. 80바이트에 초당 한 번이라
-    // 115200bps 에서 부담이 없다.
+    // 화면 속도가 이걸 쓴다 (아래 "화면 속도"). 북·동 속도와 칩이 밝힌 오차가
+    // 여기에만 있다. 88바이트 × 10 = 초당 880 바이트, 115200bps 의 8% 쯤이다.
+    // 원래는 1 Hz 였다 (2026-09-13 에 올림).
     {
-        const uint8_t on[4] = {0x01, 0x03, 10, 0};
+        const uint8_t on[4] = {0x01, 0x03, 1, 0};
         casicSend(0x06, 0x01, on, 4);
         delay(80);
     }
@@ -782,6 +790,10 @@ static constexpr uint8_t kPvVelMeasured = 4;   // 이보다 작으면 잰 값이
 static uint8_t  gPvVelFlag  = 0;
 static bool     gPvVelValid = false;           // gPvVelFlag >= 4 일 때만 참
 static uint32_t gPvAtMs     = 0;
+static float    gPvVelN     = 0.0f;            // 북쪽 속도 m/s
+static float    gPvVelE     = 0.0f;            // 동쪽 속도 m/s
+
+static void sogShownUpdate(uint32_t nowMs);    // 아래 "화면 속도" 항목
 
 static void gpsPoll() {
     static char   line[100];
@@ -819,6 +831,8 @@ static void gpsPoll() {
                     if (++bn >= 4) { // 체크섬까지 다 받았다
                         if (bcls == 0x01 && bid == 0x03 && bneed >= 80) {
                             float sp, hd, ac, ha, ca;
+                            memcpy(&gPvVelN, bbody + 48, 4);
+                            memcpy(&gPvVelE, bbody + 52, 4);
                             memcpy(&ha, bbody + 40, 4); // 수평 위치 정확도 (m²)
                             memcpy(&sp, bbody + 64, 4);
                             memcpy(&hd, bbody + 68, 4);
@@ -861,6 +875,7 @@ static void gpsPoll() {
             line[n++] = c;
         }
     }
+    sogShownUpdate(millis());
 }
 
 // ── 다듬기 (damping) ─────────────────────────────────────────────────────
@@ -944,6 +959,116 @@ static void dampingUpdate(float rawSog, float rawCog, uint32_t nowMs) {
     float deg = atan2f(gCogSin, gCogCos) * RAD_TO_DEG;
     if (deg < 0.0f) deg += 360.0f;
     gCogDamped = deg;
+}
+
+// ── 화면 속도 — 멈추면 0, 튀면 버린다 ────────────────────────────────────
+//
+// 2026-09-13 실측 (보드를 책상에 둠, 위성 13~23)
+//   멈춘 채 칩이 준 속도   중간 0.17 · 열에 아홉 0.32 · 최대 0.64 kn
+//   칩이 밝힌 오차         중간 ±0.35 · 최대 ±0.72 kn  → 속도가 오차보다 작다
+//   가끔 20초쯤 20~28 kn 가 튄다. 그때 칩이 밝힌 오차는 ±1.5~20 kn
+//
+// 왜 속도 숫자를 평균하지 않나
+//   속도는 늘 0 이상이라 흔들림끼리 안 지워진다. 30초 평균해도 0.23 에 머문다.
+//   북·동 성분을 따로 평균하면 멈춰 있을 땐 0 으로 간다 (30초 창 최대 0.15).
+//   흘러가는 배는 방향이 같아서 평균해도 남는다.
+//   "The speed on your receiver is always positive, so it can't average out"
+//     [확인: aprs.net/vm/gps_cs.htm]
+//   Raymarine 도 벡터를 평균한다 [확인: Pathfinder 설명서 164쪽]
+//
+// 하는 일
+//   1) 칩이 밝힌 오차가 1 kn 넘거나 표식이 4 미만이면 그 표본은 버린다.
+//      직전에 0 (멈춤) 이었으면 0 을 둔다. 움직이던 중이면 --.-- 다.
+//   2) 3초 성분 평균이 0.5 kn 밑으로 가면 느린 모드. 0.8 kn 넘으면 빠진다.
+//   3) 느린 모드는 들어온 뒤부터 최대 30초 성분 평균. 0.2 kn 밑은 0.
+//   4) 빠른 모드는 원래 길(sogOut, smooth 단계) 그대로.
+//
+// ★ 숫자(0.5 / 0.8 / 0.2 / 30초 / 1 kn)는 책상 위 몇 분 자료로 정했다.
+//   물 위에서 다시 맞춘다. SD 에는 원본(pv)과 오차(a)를 같이 적는다.
+static constexpr float    kSogBadAccKn = 1.0f;
+static constexpr float    kSlowEnterKn = 0.5f;
+static constexpr float    kSlowLeaveKn = 0.8f;
+static constexpr float    kRestCutKn   = 0.2f;
+static constexpr uint32_t kSlowWinMs   = 30000;
+static constexpr uint32_t kShortWinMs  = 3000;
+static constexpr uint32_t kPvStaleMs   = 2000;
+static constexpr int      kPvRing      = 320;   // 10 Hz × 30초 + 여유
+
+struct PvSample { uint32_t ms; float n, e; };
+static PvSample gPvRing[kPvRing];               // static — 스택에 안 올린다
+static int      gPvHead = 0, gPvCount = 0;
+static uint32_t gPvSeenAt    = 0;
+static bool     gSlowMode    = false;
+static uint32_t gSlowSinceMs = 0;
+static bool     gSogShownOk  = false;
+static float    gSogShownKn  = 0.0f;
+static float    gSogShortKn  = -1.0f;           // 진단용 (sog 명령)
+static float    gSogLongKn   = -1.0f;
+static uint32_t gSogBadCount = 0;
+
+// 최근 winMs 안, notBefore 이후 표본으로 성분 평균을 내고 그 크기(노트).
+static float pvMeanKn(uint32_t nowMs, uint32_t winMs, uint32_t notBefore) {
+    float sn = 0.0f, se = 0.0f;
+    int k = 0;
+    for (int i = 0; i < gPvCount; ++i) {
+        const PvSample& s = gPvRing[(gPvHead - 1 - i + kPvRing) % kPvRing];
+        if (nowMs - s.ms > winMs || s.ms < notBefore) break;
+        sn += s.n; se += s.e; ++k;
+    }
+    if (k == 0) return -1.0f;
+    return sqrtf(sn * sn + se * se) / k * 1.943844f;
+}
+
+static void sogShownUpdate(uint32_t nowMs) {
+    // NAV-PV 가 끊겼으면 원래 길로 돌아간다. 화면이 통째로 비면 안 된다.
+    // (power 명령으로 GPS 전원이 오르내리면 NAV-PV 출력 설정이 사라진다)
+    if (gPvAtMs == 0 || nowMs - gPvAtMs > kPvStaleMs) {
+        gSlowMode   = false;
+        gSogShownOk = gGpsFix;
+        gSogShownKn = sogOut();
+        return;
+    }
+    if (gPvAtMs == gPvSeenAt) {                 // 새 표본 없음
+        if (!gSlowMode) { gSogShownKn = sogOut(); }
+        return;
+    }
+    gPvSeenAt = gPvAtMs;
+
+    const bool bad = !gPvVelValid || gPvAccKn < 0.0f || gPvAccKn > kSogBadAccKn;
+    if (bad) {
+        ++gSogBadCount;
+        dampingReset();                         // 튄 값이 다듬기에 남지 않게
+        if (!(gSogShownOk && gSogShownKn == 0.0f)) gSogShownOk = false;
+        return;
+    }
+
+    gPvRing[gPvHead] = PvSample{gPvAtMs, gPvVelN, gPvVelE};
+    gPvHead = (gPvHead + 1) % kPvRing;
+    if (gPvCount < kPvRing) ++gPvCount;
+
+    gSogShortKn = pvMeanKn(nowMs, kShortWinMs, 0);
+    if (!gSlowMode && gSogShortKn >= 0.0f && gSogShortKn < kSlowEnterKn) {
+        gSlowMode = true;
+        gSlowSinceMs = gPvAtMs;
+    } else if (gSlowMode && gSogShortKn > kSlowLeaveKn) {
+        gSlowMode = false;
+    }
+
+    if (gSlowMode) {
+        gSogLongKn  = pvMeanKn(nowMs, kSlowWinMs, gSlowSinceMs);
+        gSogShownKn = (gSogLongKn < kRestCutKn) ? 0.0f : gSogLongKn;
+    } else {
+        gSogLongKn  = -1.0f;
+        gSogShownKn = sogOut();
+    }
+    gSogShownOk = gGpsFix;
+}
+
+static void sogStatusPrint() {
+    Serial.printf("[SOG] %s | 화면 %s %.2f kn | 3초 %.2f | 30초 %.2f | 원본 %.2f ±%.2f f%u | 버린 표본 %lu\n",
+                  gSlowMode ? "느린" : "빠른", gSogShownOk ? "" : "(--.--)", gSogShownKn,
+                  gSogShortKn, gSogLongKn, gPvSpeedKn, gPvAccKn, gPvVelFlag,
+                  (unsigned long)gSogBadCount);
 }
 
 // 지금 GPS 값을 믿어도 되는지 판정한다.
@@ -2640,7 +2765,10 @@ static void buttonPoll(uint32_t nowMs) {
         if (gBtnStartOnUp) {
             gBtnStartOnUp = false;
             Serial.printf("[BTN] 놓음(%ums) — 기록 시작\n", (unsigned)held);
-            logStartNow();
+            const uint32_t tS = millis();
+            const bool okS = logStartNow();
+            Serial.printf("[BTN] 기록 시작 %s — %ums 걸림\n",
+                          okS ? "됨" : "실패", (unsigned)(millis() - tS));
             gBtnOwnsScreen = true;
             gBtnScreenTill = nowMs + kBtnHintMs;
             sail::displayNotice("기록 시작", nullptr);
@@ -3473,6 +3601,7 @@ static void logWriteText(uint32_t nowMs) {
     t.sogPosKn = gSogFromPos;
     t.pvFlag   = (gPvAtMs && millis() - gPvAtMs < 3000) ? gPvVelFlag : 255;
     t.cogAccDeg = gPvCogAccDeg;
+    t.sogAccKn  = (gPvAtMs && millis() - gPvAtMs < 3000) ? gPvAccKn : -1.0f;
     hlog::writeText(buildNav(nowMs), t);
 }
 
@@ -3683,11 +3812,11 @@ static Telemetry buildTelemetry(uint32_t nowMs) {
     t.moduleID = gModuleID;
     t.uptimeMs = nowMs;
 
-    t.sogValid = gGpsFix;
+    // 속도는 "화면 속도" 규칙을 거친다 — 멈추면 0, 튀면 --.--
+    t.sogValid = gGpsFix && gSogShownOk;
     t.cogValid = gGpsFix;
     if (gGpsFix) {
-        // 다듬은 값을 내보낸다. 세기는 `smooth` 로 고른다 (0 이면 원본 그대로).
-        t.sogKn  = sogOut();
+        t.sogKn  = gSogShownKn;
         t.cogDeg = (gCogDamped >= 0.0f) ? gCogDamped : (float)gGps.course.deg();
     }
 
@@ -4704,6 +4833,7 @@ static void handleCommand(String line) {
         return;
     }
 
+    if (line == "sog")     { sogStatusPrint(); return; }
     if (line == "navpv")   { gpsNavPv(8);  return; }
     if (line == "navpv l") { gpsNavPv(40); return; }
 

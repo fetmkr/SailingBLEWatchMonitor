@@ -316,12 +316,14 @@ bool start(const Header& h) {
     if (gRecording) { gLastError = "이미 기록 중"; return false; }
     if (!cardPresent()) { gLastError = "카드가 안 꽂혀 있습니다"; return false; }
 
+    const uint32_t tA = millis();   // 시작 단계마다 몇 ms 걸리나 (화면이 멈춰 보였다 9/13)
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
     if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
         gLastError = "마운트 실패 — sd 명령으로 이유를 보세요";
         return false;
     }
     SD.mkdir("/LOGS");
+    const uint32_t tB = millis();
 
     // ── 파일 이름 ───────────────────────────────────────────────────────
     //
@@ -363,6 +365,8 @@ bool start(const Header& h) {
         dir.close();
     }
     gSession = next;
+    Serial.printf("[LOG] 시작 단계  마운트 %ums · 폴더 훑기 %ums\n",
+                  (unsigned)(tB - tA), (unsigned)(millis() - tB));
 
     nameFor(gPath, sizeof(gPath), gSession, 0, "HLG");
     nameFor(gTxtPath, sizeof(gTxtPath), gSession, 0, "TXT");
@@ -648,6 +652,8 @@ void writeText(const NavSample& s, const TextSample& t) {
     else                 n += snprintf(line + n, sizeof(line) - n, "f- ");
     if (t.cogAccDeg >= 0) n += snprintf(line + n, sizeof(line) - n, "c%4.0f ", t.cogAccDeg);
     else                  n += snprintf(line + n, sizeof(line) - n, "c--- ");
+    if (t.sogAccKn >= 0) n += snprintf(line + n, sizeof(line) - n, "a%4.2f ", t.sogAccKn);
+    else                 n += snprintf(line + n, sizeof(line) - n, "a--- ");
 
     n += snprintf(line + n, sizeof(line) - n, "%umV  ", s.battMv);
 
