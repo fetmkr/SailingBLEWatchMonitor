@@ -339,6 +339,21 @@ void displayUpdate(const DisplayState& s) {
         drawChecked(kColL, kRow5, buf, "전압");
     }
 
+    // GPS 움직임 종류 — **늘** 그린다. 전압 바로 옆.
+    //
+    // 자리 계산 (6x10, 글자당 6px)
+    //   "4.02V"  x 2 ~ 31      모드 x 38 ~ 61 ("boat" 24px)
+    //   오른쪽 "SAT 12"/"H0.7" 은 x 92 이후. 가운데 로라 자리를 안 먹는다.
+    //
+    // 전압이 아직 없어도 모드는 그린다 — 이건 잰 값이 아니라 모듈이 답한 설정이다.
+    {
+        const char* mw =
+            s.gnssModeNow == 'h' ? "port" : s.gnssModeNow == 's' ? "stat" :
+            s.gnssModeNow == 'p' ? "ped"  : s.gnssModeNow == 'c' ? "car"  :
+            s.gnssModeNow == 'b' ? "boat" : "?";
+        gOled.drawStr(kColL + 36, kRow5, mw);
+    }
+
     // 위성이 몇 개나 보이는지. 밖에서 처음 잡을 때 35초쯤 걸리는데, 그동안
     // 아무 변화가 없으면 고장인지 기다리는 중인지 알 수가 없다. 0 → 1 → 3 → 6
     // 으로 늘어나는 게 보이면 제대로 가고 있다는 뜻이다.

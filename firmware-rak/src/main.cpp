@@ -230,7 +230,13 @@ static void feedWatchdog();
 // 모듈에 실제로 걸린 값(gGpsDyModel)이 이것과 다르면 화면에 띄운다.
 // 2026-08-30 세션 27 이 이 값을 정해 두지 않아 모듈 기본값 0(휴대)으로 돌아갔고,
 // 29분 내내 속도가 0.00 kn 으로 찍혔다. 물 위에서는 화면 말고 볼 것이 없다.
-static uint8_t gGpsDynWant = 255;
+//
+// ★ 2026-09-13 부터 하드코딩이다. 선박(4) 말고는 쓸 일이 없다.
+//   NVS 에 적어 두는 방식은 두 번 조용히 비었다 (8/30 은 begin/end 누락,
+//   9/13 부팅 로그는 gps_dyn 이 255 로 비어 모듈이 0 으로 떴다).
+//   그때마다 1노트 밑 속도가 통째로 0 이 됐다. 저장소에 기대지 않는다.
+static constexpr uint8_t kGpsBoatMode = 4;   // CFG-NAVX dyModel 4 = Nautical
+static uint8_t gGpsDynWant = kGpsBoatMode;
 
 static int gSensorPowerPin = rak::kSensorPowerA;
 
@@ -310,7 +316,7 @@ static void loadSettings() {
     gHdgSignA       = gPrefs.getChar("hdg_sa", 1) < 0 ? -1.0f : 1.0f;
     gHdgSignB       = gPrefs.getChar("hdg_sb", 1) < 0 ? -1.0f : 1.0f;
     gHdgOffsetDeg   = gPrefs.getFloat("hdg_off", 0.0f);
-    gGpsDynWant     = gPrefs.getUChar("gps_dyn", 255);
+    // gGpsDynWant 는 kGpsBoatMode 로 고정. NVS 의 gps_dyn 은 더 이상 안 읽는다.
     gDampLevel      = gPrefs.getUChar("damp", 2);
     gDeadbandKn     = gPrefs.getFloat("dead_kn", 0.10f);
     gGyrOffX        = gPrefs.getFloat("gyr_x", 0.0f);
@@ -567,6 +573,8 @@ static uint8_t gGpsDyModel = 255;
 static void casicSend(uint8_t cls, uint8_t id, const uint8_t* payload, uint16_t len);
 static bool casicQuery(uint8_t cls, uint8_t id, uint8_t* out, uint16_t cap, uint16_t* len);
 static const char* dyModelName(uint8_t m);
+static bool casicSetAcked(uint8_t cls, uint8_t id,
+                          const uint8_t* payload, uint16_t len, const char* what);
 
 // 체크섬을 붙여 한 줄 보낸다. ($ 와 * 사이 문자들의 XOR)
 static void gpsSend(const char* body) {
@@ -594,6 +602,54 @@ static void gpsSetRate(uint8_t hz) {
     gpsSend(body);
 
     gGpsHz = (ms == 100) ? 10 : (ms == 200 ? 5 : (ms == 500 ? 2 : 1));
+}
+
+// GPS 를 선박 모드(4)로 건다. 되물어서 실제로 걸린 값을 gGpsDyModel 에 둔다.
+//
+// 부를 곳은 둘이다 — 부팅(gpsBegin)과 power 명령으로 센서 전원을 껐다 켰을 때.
+// 모듈은 전원이 끊기면 기본값 0(휴대)으로 돌아간다.
+//
+// ★ 루프에서 주기적으로 부르지 않는다. 한 번 물을 때 최대 3초 루프를 붙잡는다.
+//
+// 되물어보기가 아예 안 되면(모듈 없음·응답 없음) 다시 안 한다. 부팅이 늘어질 뿐이다.
+// 걸었는데 안 바뀌었으면 세 번까지 다시 건다.
+static void gpsApplyBoatMode() {
+    uint8_t  p[44];
+    uint16_t len = 0;
+    if (!casicQuery(0x06, 0x07, p, sizeof(p), &len) || len < 44) {
+        gGpsDyModel = 255;
+        Serial.println("[GPS] ★ 움직임 종류를 못 물어봤습니다 — 화면에 ? 로 뜹니다");
+        return;
+    }
+    gGpsDyModel = p[4];
+    if (p[4] == kGpsBoatMode) {
+        Serial.printf("[GPS] 움직임 종류 %u (%s) — 이미 선박\n", p[4], dyModelName(p[4]));
+        return;
+    }
+    Serial.printf("[GPS] 움직임 종류 %u (%s) — 선박으로 겁니다\n", p[4], dyModelName(p[4]));
+
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        const uint32_t mask = (1UL << 0);          // dyModel 만 바꾼다
+        memcpy(p + 0, &mask, 4);
+        p[4] = kGpsBoatMode;
+        casicSetAcked(0x06, 0x07, p, 44, "CFG-NAVX dyModel 4");
+
+        // 말만 믿지 않는다. 되물어서 실제 값을 둔다.
+        if (casicQuery(0x06, 0x07, p, sizeof(p), &len) && len >= 44) {
+            gGpsDyModel = p[4];
+            if (p[4] == kGpsBoatMode) {
+                Serial.printf("[GPS] ✓ 되물으니 %u (%s)  (%d번째)\n",
+                              p[4], dyModelName(p[4]), attempt);
+                return;
+            }
+            Serial.printf("[GPS] ★ 되물으니 아직 %u (%s)  (%d번째)\n",
+                          p[4], dyModelName(p[4]), attempt);
+        } else {
+            gGpsDyModel = 255;
+            Serial.printf("[GPS] ★ 건 뒤 되물어보기 실패 (%d번째)\n", attempt);
+        }
+    }
+    Serial.println("[GPS] ★★ 선박 모드를 못 걸었습니다 — 저속이 0 으로 뭉개집니다");
 }
 
 static void gpsBegin() {
@@ -637,36 +693,7 @@ static void gpsBegin() {
         delay(80);
     }
 
-    // 움직임 종류(dyModel)를 모듈에 물어본다.
-    //
-    // 두 가지를 한 번에 한다.
-    //   1) 저장해 둔 값이 있으면 다르면 다시 건다 (255 면 저장한 적 없음)
-    //   2) 실제로 걸려 있는 값을 기억한다 → 기록 파일 머리글에 들어간다
-    //
-    // 2번이 없으면 헤더에 255(모름)가 찍힌다. dyModel 하나 때문에 저속을
-    // 통째로 날린 적이 있어서, 그 설정이 파일에 안 남으면 나중에 원인을
-    // 못 찾는다.
-    {
-        const uint8_t want = gPrefs.getUChar("gps_dyn", 255);
-        uint8_t  p[44];
-        uint16_t len = 0;
-        if (casicQuery(0x06, 0x07, p, sizeof(p), &len) && len >= 44) {
-            gGpsDyModel = p[4];
-            if (want <= 7 && p[4] != want) {
-                const uint32_t mask = (1UL << 0);
-                memcpy(p + 0, &mask, 4);
-                p[4] = want;
-                casicSend(0x06, 0x07, p, 44);
-                delay(120);
-                gGpsDyModel = want;
-                Serial.printf("[GPS] 움직임 종류를 %u(%s) 로 다시 걸었습니다\n",
-                              want, dyModelName(want));
-            } else {
-                Serial.printf("[GPS] 움직임 종류 %u (%s)\n",
-                              gGpsDyModel, dyModelName(gGpsDyModel));
-            }
-        }
-    }
+    gpsApplyBoatMode();
 }
 
 // ── 밖에 나갔다 와서 확인하기 위한 기록 ──────────────────────────────────
@@ -1408,28 +1435,10 @@ static void gpsCfgSetNavx(bool setModel, uint8_t model,
             // 밖에서 노트북 없이 쓰려면 껐다 켜도 유지돼야 한다.
             // 보드에 적어 두고 부팅할 때마다 다시 건다.
             if (setModel) {
-                // ★ 여닫지 않으면 안 적힌다.
-                //
-                // 여기만 begin/end 가 빠져 있었다. Preferences 는 닫힌 손잡이에
-                // 써도 아무 말 없이 실패한다. 그래서 "적어 뒀습니다" 라고
-                // 말해 놓고 실제로는 안 적혔다. 2026-08-28 에 4(선박)로 걸어
-                // 뒀다고 적었는데, 8/30 세션 27·28 이 모듈 기본값 0(휴대)으로
-                // 돌아가 29분치 속도를 통째로 0 으로 잃었다.
-                gPrefs.begin("sail", false);
-                gPrefs.putUChar("gps_dyn", model);
-                gPrefs.end();
+                // 시험용으로 지금만 바꾼다. 저장하지 않는다.
+                // 부팅하면 늘 선박(4)으로 돌아간다 — kGpsBoatMode 하드코딩.
                 gGpsDyModel = model;
-                gGpsDynWant = model;   // 화면 경고의 기준도 같이 옮긴다
-                // 말만 하지 않는다. 되읽어서 진짜 적혔는지 보고 말한다.
-                gPrefs.begin("sail", true);
-                const uint8_t back = gPrefs.getUChar("gps_dyn", 255);
-                gPrefs.end();
-                if (back == model) {
-                    Serial.println("  보드에 적어 뒀습니다. 껐다 켜도 이 모드로 다시 겁니다.");
-                } else {
-                    Serial.printf("  ★ 보드에 못 적었습니다 (되읽으니 %u). 껐다 켜면 돌아갑니다.\n",
-                                  back);
-                }
+                Serial.println("  지금만 바꿨습니다. 껐다 켜면 선박(4)으로 돌아갑니다.");
             }
         } else {
             Serial.println("  ★ ACK 는 왔는데 값이 안 바뀌었습니다 — 이 칩은 이 항목을 안 받습니다");
@@ -2598,7 +2607,9 @@ static void buttonPoll(uint32_t nowMs) {
     //
     // 2초 전에는 안 그린다. 마킹하려고 톡 누를 때마다 계기 화면이 번쩍이면
     // 안 된다. 마킹은 경고할 것도 없다 — 이미 벌어졌고 되돌릴 것도 없다.
-    if (gBtnDown && nowMs - gBtnDownAt >= kBtnLongMs) {
+    // ★ gBtnRaw 가 없으면 놓아도 이 안에서 return 해서 아래 "놓음" 에 못 간다.
+    //   그래서 2초 누르고 놓아도 기록이 안 됐고, 5초가 차면 꺼졌다 (2026-09-13).
+    if (gBtnDown && gBtnRaw && nowMs - gBtnDownAt >= kBtnLongMs) {
         const uint32_t held = nowMs - gBtnDownAt;
 
         if (held >= kBtnOffMs) {
@@ -3487,13 +3498,8 @@ bool logStartNow(uint32_t prevSession) {
     h.pitchSign = (gPitchSign < 0.0f) ? 1 : 0;
     h.heelOff   = gHeelOffsetDeg;
     h.pitchOff  = gPitchOffsetDeg;
-    if (gGpsDyModel != 255) {
-        h.gnssDyn = gGpsDyModel;            // 모듈에서 실제로 읽은 값이 있으면 그것
-    } else {
-        gPrefs.begin("sail", true);
-        h.gnssDyn = gPrefs.getUChar("gps_dyn", 255);
-        gPrefs.end();
-    }
+    // 모듈에서 실제로 읽은 값만 적는다. 못 읽었으면 255(모름). NVS 는 안 본다.
+    h.gnssDyn = gGpsDyModel;
     if (!hlog::start(h)) return false;
 
     // 카드를 마운트하는 동안 FIFO 에 옛 값이 쌓인다. 그걸 그대로 쓰면
@@ -4770,6 +4776,8 @@ static void handleCommand(String line) {
 
         gSensorPowerPin = pin;
         applySensorPower(pin, /*cycle=*/true);
+        // 전원을 껐다 켰으니 GPS 가 휴대(0)로 돌아갔다. 다시 건다.
+        if (pin) gpsApplyBoatMode();
         gPrefs.begin("sail", false);
         gPrefs.putInt("pwr_pin", pin);
         gPrefs.end();
@@ -5319,6 +5327,11 @@ void loop() {
         //   저속을 통째로 0 으로 뭉갠다 (세션 24·25·27 실측). 그때 이 낱말이
         //   보이면 물 위에서도 알아챈다.
         ds.gnssMode   = (gGpsDyModel == gGpsDynWant) ? 0 :
+            gGpsDyModel == 0 ? 'h' : gGpsDyModel == 1 ? 's' :
+            gGpsDyModel == 2 ? 'p' : gGpsDyModel == 3 ? 'c' :
+            gGpsDyModel == 4 ? 'b' : '?';
+        // 전압 옆에 늘 그리는 칸. 모듈이 실제로 답한 값이다.
+        ds.gnssModeNow =
             gGpsDyModel == 0 ? 'h' : gGpsDyModel == 1 ? 's' :
             gGpsDyModel == 2 ? 'p' : gGpsDyModel == 3 ? 'c' :
             gGpsDyModel == 4 ? 'b' : '?';
