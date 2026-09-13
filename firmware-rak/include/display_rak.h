@@ -28,6 +28,7 @@ struct DisplayState {
     uint8_t boatId       = 0;
     /// 기록 중인가. 참이면 이름 자리에 REC 와 지난 시간을 보여준다.
     bool  recording      = false;
+    bool  recFailed      = false;   // 기록이 저절로 멈췄다 → 1줄에 REC FAIL
     uint32_t recSeconds  = 0;
 
     // ── 항해 값 ──────────────────────────────────────────────────────────

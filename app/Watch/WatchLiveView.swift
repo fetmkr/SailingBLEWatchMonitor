@@ -34,11 +34,23 @@ struct WatchLiveView: View {
     /// 그것도 길이 아니다. 걸기 직전에 항해 화면으로 옮겨 놓아야 한다.
     @State private var page = 0
 
+    @EnvironmentObject private var ble: BLEManager
+
+    /// 보드의 SD 기록이 저절로 멈추면 세 페이지 배경을 빨갛게 (flags bit5).
+    /// TabView 페이지 배경은 containerBackground(_:for: .tabView) 로만 바뀐다
+    /// [확인: watchOS SDK SwiftUI.swiftinterface, watchOS 10.0].
+    private var pageBackground: Color {
+        ble.sample?.extra?.recordingFailed == true ? Color.red.opacity(0.6) : Color.black
+    }
+
     var body: some View {
         TabView(selection: $page) {
             MainPage().tag(0)
+                .containerBackground(pageBackground, for: .tabView)
             DebugPage().tag(1)
+                .containerBackground(pageBackground, for: .tabView)
             SettingsPage(page: $page).tag(2)
+                .containerBackground(pageBackground, for: .tabView)
         }
         .tabViewStyle(.page)
     }

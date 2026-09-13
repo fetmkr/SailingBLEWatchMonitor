@@ -187,6 +187,8 @@ struct TelemetryExtra {
     bool    gpsFix       = false;
     bool    imuOk        = false;
     bool    magOk        = false;
+    bool    recording    = false; // SD 에 기록 중 (flags bit4)
+    bool    recFailed    = false; // 기록이 저절로 멈췄다 (flags bit5). 사람이 멈추면 안 선다
     uint8_t satellites   = 0;
     float   hdop         = -1.0f; // 음수면 모름
     float   headingDeg   = -1.0f; // 음수면 자력계 없음
@@ -223,6 +225,8 @@ inline void encodeTelemetryExt(const Telemetry& t, const TelemetryExtra& e,
     if (e.magOk) flags |= 0x04;
     // bit3 은 예약이다. 예전에 "시뮬레이터 값" 을 뜻했지만 시뮬레이터를
     // 걷어냈다. 규격(PROTOCOL.md §3.1)이 항상 0 이라고 못 박고 있다.
+    if (e.recording) flags |= 0x10;
+    if (e.recFailed) flags |= 0x20;   // 앱이 배경을 빨갛게 칠한다
     out[12] = flags;
 
     out[13] = e.satellites;

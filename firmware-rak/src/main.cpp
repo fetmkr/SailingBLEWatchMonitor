@@ -74,6 +74,14 @@ static uint8_t     gModuleID = 1;
 //   32       예비               차례 31
 static uint8_t  gBoatId       = 0;
 static uint32_t gBoatIdSetAt  = 0; // 바꾼 시각. 30초 동안 flags 로 알린다
+
+// 기록이 저절로 멈췄나 (쓰기 실패·카드 빠짐·켤 때 이어 시작 실패).
+// 참이면 BLE flags bit5 가 서고 앱 배경이 빨개진다. 기록이 다시 돌면 내린다.
+static bool     gRecFailed      = false;
+static uint32_t gRecFailSession = 0;   // 멈춘 세션. 다시 걸 때 앞 세션 번호로 적는다
+static uint32_t gRecRestartAt   = 0;   // 0 이면 다시 걸 계획 없음
+static uint8_t  gRecRestarts    = 0;   // 이 부팅에서 다시 건 횟수
+static char     gRecFailLine[200] = {0};
 static constexpr uint8_t  kBoatIdMax     = 32;
 static constexpr uint32_t kBoatIdShoutMs = 30000;
 
@@ -3786,6 +3794,8 @@ static sail::TelemetryExtra buildExtra() {
     e.gpsFix       = gGpsFix;
     e.imuOk        = gImuOk;
     e.magOk        = gMagOk;
+    e.recording    = hlog::recording();
+    e.recFailed    = gRecFailed;
     e.satellites   = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
 
     // HDOP — 작을수록 정확하다. 음수는 "모름" 이라는 뜻이다.
@@ -4517,8 +4527,35 @@ static void handleCommand(String line) {
             }
             return;
         }
-        if (arg == "off" || arg == "stop") { hlog::stop(); return; }
+        if (arg == "off" || arg == "stop") {
+            hlog::stop();
+            // 사람이 멈췄다. 저절로 멈춘 표시(앱 빨간 배경)와 다시 걸기 계획을 내린다.
+            gRecFailed = false; gRecRestartAt = 0;
+            return;
+        }
         if (arg == "mark")                 { hlog::mark(); return; }
+        // 시험용: 다음 n 번 쓰기를 실패로 흉내 낸다.
+        //   rec fail 2   → 다시 쓰기로 살아나야 한다
+        //   rec fail 20  → 멈추고, 3초 뒤 새 파일로 다시 걸려야 한다
+        // rec fail clear — 보드에 남긴 멈춤 기록을 지운다 (시험 뒤 정리)
+        if (arg == "fail clear") {
+            Preferences p;
+            p.begin("sail", false);
+            p.remove("rec_fail");
+            p.remove("rec_fail_n");
+            p.end();
+            gRecFailLine[0] = '\0';
+            hlog::noteLastFail(nullptr);
+            gRecFailed = false; gRecRestartAt = 0; gRecRestarts = 0;
+            Serial.println("[REC] 멈춤 기록을 지웠습니다");
+            return;
+        }
+        if (arg.startsWith("fail ")) {
+            const long n = arg.substring(5).toInt();
+            hlog::testFailWrites((uint8_t)(n < 0 ? 0 : (n > 200 ? 200 : n)));
+            Serial.printf("[REC] 시험 — 다음 %ld번 쓰기를 실패로 흉내 냅니다\n", n);
+            return;
+        }
         if (arg == "ls" || arg == "list")  { hlog::listFiles(); return; }
         if (arg.startsWith("rm ")) {
             const long n = arg.substring(3).toInt();
@@ -4570,6 +4607,16 @@ static void handleCommand(String line) {
             Serial.printf("  쓴 양         %.2f MB\n", st.bytes / 1048576.0);
         }
         Serial.println("  ─── 건강 상태 ───");
+        Serial.printf("  다시 써서 살림 %u번 (이 부팅)\n", (unsigned)hlog::writeRetries());
+        {
+            Preferences p;
+            p.begin("sail", true);
+            const String last = p.getString("rec_fail", "");
+            const uint32_t cnt = p.getUInt("rec_fail_n", 0);
+            p.end();
+            if (last.length()) Serial.printf("  지난 멈춤     모두 %u번. 마지막: %s\n", (unsigned)cnt, last.c_str());
+            else               Serial.println("  지난 멈춤     없음");
+        }
         Serial.printf("  버린 줄       %u   %s\n", (unsigned)st.dropped,
                       st.dropped ? "★ 구멍이 났습니다" : "(0 이어야 정상)");
         Serial.printf("  기다린 횟수   %u   (버퍼가 찰 뻔한 횟수)\n",
@@ -5139,6 +5186,70 @@ static void resumeRecordingIfCut() {
     } else {
         hlog::Status st; hlog::getStatus(&st);
         Serial.printf("[REC] 이어 시작 못 함 — %s\n", st.lastError ? st.lastError : "알 수 없음");
+        gRecFailed = true;          // 기록할 줄 알았는데 안 돌고 있다 → 앱에 알린다
+        gRecFailSession = prev;
+    }
+}
+
+// ── 기록이 저절로 멈췄을 때 (2026-09-13) ─────────────────────────────────
+//
+// 1) 이유를 NVS 에 남긴다. 재부팅해도, 시리얼을 열어도 안 지워진다.
+//    다음 세션 TXT 머리에도 적힌다 (hlog::noteLastFail).
+// 2) 3초 뒤 새 파일로 다시 건다. 앞 세션 번호를 머리글에 적어 이어 붙일 수 있게.
+//    이 부팅에서 3번까지. 10분 넘게 잘 돌면 센 것을 지운다.
+// 3) 멈춰 있는 동안 gRecFailed → BLE bit5 · 화면 REC FAIL.
+static constexpr uint8_t  kRecRestartMax   = 3;
+static constexpr uint32_t kRecRestartGapMs = 3000;
+static constexpr uint32_t kRecRestartOkMs  = 600000;
+
+static void recFailTick(uint32_t now) {
+    hlog::FailInfo f;
+    if (hlog::takeFailure(&f)) {
+        snprintf(gRecFailLine, sizeof(gRecFailLine),
+                 "세션 %u %u분%u초째 %s%s | 쓸것 %u 쓴것 %u | errno %d %s | 다시쓰기 %u번 | 카드 %s | %.2fV | 누적 %.1fMB",
+                 (unsigned)f.session, (unsigned)(f.recSec / 60), (unsigned)(f.recSec % 60),
+                 f.kind == 2 ? "카드 빠짐" : "쓰기 실패", f.fake ? "(시험)" : "",
+                 (unsigned)f.want, (unsigned)f.wrote,
+                 f.err, f.err ? strerror(f.err) : "(이유 안 줌)",
+                 (unsigned)f.tries, f.card ? "있음" : "없음",
+                 gBattVolts, f.bytes / 1048576.0f);
+        Serial.printf("[REC] ★ 기록이 저절로 멈췄습니다 — %s\n", gRecFailLine);
+
+        Preferences p;
+        p.begin("sail", false);
+        p.putString("rec_fail", gRecFailLine);
+        p.putUInt("rec_fail_n", p.getUInt("rec_fail_n", 0) + 1);
+        p.end();
+        hlog::noteLastFail(gRecFailLine);
+
+        gRecFailed      = true;
+        gRecFailSession = f.session;
+        gRecRestartAt   = now + kRecRestartGapMs;
+        return;
+    }
+
+    if (hlog::recording()) {
+        gRecFailed = false;                               // 무엇으로든 다시 돈다
+        if (gRecRestarts && now - hlog::recStartedMs() >= kRecRestartOkMs) gRecRestarts = 0;
+        return;
+    }
+
+    if (!gRecFailed || gRecRestartAt == 0 || now < gRecRestartAt) return;
+    if (gRecRestarts >= kRecRestartMax) {
+        gRecRestartAt = 0;
+        Serial.printf("[REC] ★ 다시 걸기를 %u번 했는데 안 됩니다 — 멈춘 채로 둡니다\n", gRecRestarts);
+        return;
+    }
+    ++gRecRestarts;
+    Serial.printf("[REC] 새 파일로 다시 겁니다 (%u번째, 앞 세션 %u)\n",
+                  gRecRestarts, (unsigned)gRecFailSession);
+    if (logStartNow(gRecFailSession)) {
+        gRecRestartAt = 0;
+        gRecFailed    = false;
+    } else {
+        hlog::Status st; hlog::getStatus(&st);
+        Serial.printf("[REC] 다시 걸기 실패 — %s\n", st.lastError ? st.lastError : "알 수 없음");
+        gRecRestartAt = now + kRecRestartGapMs;
     }
 }
 
@@ -5158,6 +5269,18 @@ void setup() {
     // 초기화 도중에 멈추는 경우까지 잡으려면 여기서 먼저 켜야 한다.
     // 실제로 화면 초기화에서 멈춰 아무 로그도 없이 죽은 적이 있다.
     reportResetReason();
+    {
+        Preferences p;
+        p.begin("sail", true);
+        const String last = p.getString("rec_fail", "");
+        const uint32_t cnt = p.getUInt("rec_fail_n", 0);
+        p.end();
+        if (last.length()) {
+            strncpy(gRecFailLine, last.c_str(), sizeof(gRecFailLine) - 1);
+            hlog::noteLastFail(gRecFailLine);
+            Serial.printf("[REC] 지난 기록 실패 (모두 %u번) — %s\n", (unsigned)cnt, gRecFailLine);
+        }
+    }
     watchdogBegin();
 
     pinMode(rak::kLedGreen, OUTPUT);
@@ -5338,6 +5461,7 @@ void loop() {
         // 사라졌으면 끄고 나머지로 계속 간다. 돌아오면 다시 붙는다.
         checkSensors();
         hlog::healthCheck();
+        recFailTick(now);
     }
 
     // 1f) 켠 뒤 20초 동안 배터리 값을 1초마다 담아 둔다. `battboot` 가 꺼낸다.
@@ -5449,6 +5573,7 @@ void loop() {
         ds.battVolts    = gBattVolts;
         ds.boatId       = gBoatId;
         ds.recording    = hlog::recording();
+        ds.recFailed    = gRecFailed;
         ds.recSeconds   = ds.recording ? (now - hlog::recStartedMs()) / 1000 : 0;
 
         ds.sogKn      = gLatest.sogKn; // 다듬고 잡음 바닥까지 적용된 값

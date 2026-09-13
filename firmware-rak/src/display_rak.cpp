@@ -271,6 +271,13 @@ void displayUpdate(const DisplayState& s) {
         gOled.setDrawColor(0);
         gOled.drawStr(2, kRow1, rec);
         gOled.setDrawColor(1); // 안 되돌리면 다음 그리기가 다 뒤집힌다
+    } else if (s.recFailed) {
+        // 기록이 저절로 멈췄다. 이름 자리를 뒤집어 칠해 눈에 띄게 한다.
+        const char* rf = "REC FAIL";
+        gOled.drawBox(0, kRow1 - 8, gOled.getStrWidth(rf) + 4, 11);
+        gOled.setDrawColor(0);
+        gOled.drawStr(2, kRow1, rf);
+        gOled.setDrawColor(1);
     } else {
         drawChecked(kColL, kRow1, s.userName, "이름");
     }

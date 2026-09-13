@@ -129,6 +129,11 @@ struct TelemetryExtra: Equatable {
     var imuOK: Bool
     /// 자력계가 살아 있나
     var magOK: Bool
+    /// 보드가 지금 SD 에 기록 중인가 (flags bit4)
+    var recording: Bool = false
+    /// 기록이 **저절로** 멈췄다 (flags bit5). 사람이 멈춘 건 안 선다.
+    /// 참이면 아이폰·워치 배경을 빨갛게 칠한다 (2026-09-13).
+    var recordingFailed: Bool = false
 
     var satellites: Int
     /// 작을수록 정확. `nil` 이면 아직 모름.
@@ -247,6 +252,8 @@ extension TelemetrySample {
                 gpsFix:         flags & 0x01 != 0,
                 imuOK:          flags & 0x02 != 0,
                 magOK:          flags & 0x04 != 0,
+                recording:      flags & 0x10 != 0,
+                recordingFailed: flags & 0x20 != 0,
                 satellites:     Int(sats),
                 hdop:           hdopRaw == 255 ? nil : Double(hdopRaw) / 10.0,
                 headingDegrees: hdgRaw == 0xFFFF ? nil : Double(hdgRaw) / 10.0,

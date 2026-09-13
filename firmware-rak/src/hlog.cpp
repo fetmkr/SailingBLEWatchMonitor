@@ -1,3 +1,4 @@
+#include <errno.h>
 #include "hlog.h"
 
 #include <Arduino.h>
@@ -84,6 +85,11 @@ const char* gBootWhy = "?";
 // 쓰기 실패로 저절로 멈췄다. 메인 루프(healthCheck)가 보고 NVS 표시를 지운다.
 // 코어 0 에서 NVS 를 만지지 않으려고 표식만 세운다.
 volatile bool gFailedStop = false;
+FailInfo gFail;                       // 일꾼이 채우고 gFailedStop 을 세운다
+const char* gLastFailLine = nullptr;  // 다음 세션 TXT 머리에 적는다
+volatile uint8_t gTestFailN = 0;      // 시험용 가짜 실패 남은 횟수
+uint32_t gWriteRetries = 0;           // 다시 써서 살린 횟수
+constexpr uint8_t kWriteRetries = 3;
 
 // 카드가 꽂혀 있나. RAK15002 가 IO 슬롯 38번으로 알려준다 (GPIO39, 꽂히면 LOW).
 //
@@ -180,19 +186,53 @@ void writerTask(void*) {
         size_t n = used > kChunk ? kChunk : used;
         if (t + n > kBufSize) n = kBufSize - t;
 
+        // 한 번 쓴다. 시험 중이면 실패를 흉내 낸다 (쓰지 않고 0, EIO).
+        bool faked = false;
+        auto writeOnce = [&](const uint8_t* p, size_t len, int* errOut) -> size_t {
+            if (gTestFailN) { --gTestFailN; faked = true; *errOut = EIO; return 0; }
+            errno = 0;
+            const size_t got = gBin.write(p, len);
+            *errOut = (got != len) ? errno : 0;
+            return got;
+        };
+
         const uint32_t a = millis();
-        const size_t   w = gBin.write((const uint8_t*)(gBuf + t), n);
+        int    err  = 0;
+        size_t done = writeOnce((const uint8_t*)(gBuf + t), n, &err);
+
+        // ★ 덜 써졌으면 남은 만큼 다시 쓴다. 3번까지 (SDLOG.md §6).
+        //   전에는 한 번 실패에 곧바로 멈췄다. 세션 46 은 2시간 53분에 그렇게
+        //   끊겨서 나머지 항해를 잃었다 (추정 — 이유를 안 남겨서 확정 못 함).
+        uint8_t tries = 0;
+        while (done < n && tries < kWriteRetries) {
+            ++tries;
+            vTaskDelay(pdMS_TO_TICKS(50 * tries));
+            int e2 = 0;
+            done += writeOnce((const uint8_t*)(gBuf + t + done), n - done, &e2);
+            if (e2) err = e2;
+        }
         const uint32_t dt = millis() - a;
         if (dt > gMaxStall) gMaxStall = dt;
         lastWrite = millis();
 
-        if (w != n) {
+        if (done != n) {
+            gFail.kind    = 1;
+            gFail.session = gSession;
+            gFail.recSec  = (millis() - gStartedMs) / 1000;
+            gFail.want    = (uint32_t)n;
+            gFail.wrote   = (uint32_t)done;
+            gFail.err     = err;
+            gFail.tries   = tries;
+            gFail.card    = cardPresent();
+            gFail.bytes   = (uint32_t)gBytes;
+            gFail.fake    = faked;
             gLastError = "카드 쓰기 실패";
             gRecording = false; gStopWanted = true; gFailedStop = true;
             continue;
         }
+        if (tries) ++gWriteRetries;
         gTail = (t + n) % kBufSize;
-        gBytes += w;
+        gBytes += done;
 
         if (millis() - lastFlush >= kFlushMs) {
             const uint32_t b = millis();
@@ -433,6 +473,7 @@ bool start(const Header& h) {
                     h.gnssDyn, h.gnssHz,
                     h.imuType == kImuBNO085 ? "BNO085" : "MPU-9250");
         gTxt.printf("# 이 보드가 지난번에 꺼진 이유: %s\n", gBootWhy);
+        if (gLastFailLine) gTxt.printf("# 지난 기록 실패: %s\n", gLastFailLine);
         gTxt.printf("#\n");
         gTxt.flush();
     }
@@ -1101,17 +1142,31 @@ void listFiles() {
 void healthCheck() {
     // 쓰기가 실패해서 코어 0 이 저절로 멈춘 경우. 카드가 죽은 것이니
     // 다시 켜서 또 걸어봐야 똑같이 실패한다. 이어시작 표시를 지운다.
-    if (gFailedStop) {
-        gFailedStop = false;
-        setCutFlag(0);
-        Serial.println("[LOG] ★ 카드 쓰기가 실패해 멈췄습니다 — 이어시작은 안 합니다");
-    }
+    // 쓰기 실패는 takeFailure() 로 루프가 꺼내 간다. 여기서 표시를 안 지운다 —
+    // 루프가 곧 새 파일로 다시 걸고, 그것도 안 되고 전원이 오르내리면
+    // 켤 때 이어 시작이 한 번 더 해 본다 (rec_try 5번 한도).
     if (!gRecording) return;
     if (!cardPresent()) {
         Serial.println("[LOG] ★ 기록 중에 카드가 빠졌습니다 — 멈춥니다");
-        gLastError = "기록 중 카드가 빠졌습니다";
+        FailInfo f;
+        f.kind = 2; f.session = gSession; f.recSec = (millis() - gStartedMs) / 1000;
+        f.card = false; f.bytes = (uint32_t)gBytes;
         stop();
+        gLastError = "기록 중 카드가 빠졌습니다";
+        gFail = f;
+        gFailedStop = true;
     }
 }
+
+bool takeFailure(FailInfo* out) {
+    if (!gFailedStop || gStopWanted) return false;   // 아직 닫는 중
+    if (out) *out = gFail;
+    gFailedStop = false;
+    return true;
+}
+
+void noteLastFail(const char* line) { gLastFailLine = line; }
+void testFailWrites(uint8_t n) { gTestFailN = n; }
+uint32_t writeRetries() { return gWriteRetries; }
 
 } // namespace hlog

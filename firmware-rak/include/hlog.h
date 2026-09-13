@@ -269,6 +269,31 @@ bool recording();
 void getStatus(Status* out);
 void healthCheck();                  // 1 Hz. 카드가 빠졌는지 본다
 
+// ── 기록이 저절로 멈춘 이유 (2026-09-13) ─────────────────────────────────
+//
+// 세션 27(8/30)과 46(9/13)이 "# 끝" 없이 끊겼다. 쓰기 한 번 실패에 그대로
+// 멈추는 길이었는데, 이유를 램에만 들고 있다가 재부팅에 날렸다.
+// 이제 일꾼이 여기에 담고, 루프가 꺼내서 NVS 와 다음 세션 TXT 에 남긴다.
+struct FailInfo {
+    uint8_t  kind    = 0;   // 1 쓰기 실패 · 2 기록 중 카드 빠짐
+    uint32_t session = 0;
+    uint32_t recSec  = 0;   // 기록 시작부터 몇 초째
+    uint32_t want    = 0;   // 쓰려던 바이트
+    uint32_t wrote   = 0;   // 다시 쓰기까지 합쳐 실제로 들어간 바이트
+    int      err     = 0;   // errno. 0 이면 라이브러리가 이유를 안 줬다
+    uint8_t  tries   = 0;   // 다시 쓴 횟수
+    bool     card    = false; // 그 순간 카드 감지 핀
+    uint32_t bytes   = 0;   // 그때까지 쓴 양
+    bool     fake    = false; // rec fail 시험으로 흉내 낸 실패
+};
+// 새로 멈춘 게 있고 파일 닫기가 끝났으면 true. 한 번 꺼내면 지워진다.
+bool takeFailure(FailInfo* out);
+// 다음 세션 TXT 머리에 "지난 기록 실패" 줄로 적는다. 부팅 때 NVS 에서 읽어 넘긴다.
+void noteLastFail(const char* line);
+// 시험용. 다음 n 번의 카드 쓰기를 "0 바이트 씀, EIO" 로 흉내 낸다.
+void testFailWrites(uint8_t n);
+uint32_t writeRetries();             // 다시 써서 살린 횟수 (이 부팅)
+
 // 카드에 쓴 파일을 보드가 직접 되읽어 검사한다.
 // 카드를 뽑아 컴퓨터로 옮길 수 없을 때 쓴다. 파이썬 파서와 같은 것을 본다.
 //   session 0 이면 마지막 세션

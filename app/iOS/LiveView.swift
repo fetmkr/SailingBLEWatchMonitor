@@ -23,6 +23,10 @@ struct LiveView: View {
     private var noFix: Bool { ble.sample?.sogKnots == nil }
     private var noHeel: Bool { ble.sample?.heelDegrees == nil }
 
+    /// 보드의 SD 기록이 저절로 멈췄나 (flags bit5). 배경을 빨갛게 칠한다.
+    /// 물 위에서는 보드 화면을 들여다볼 틈이 없다. 폰 화면 전체 색으로 알린다.
+    private var recFailed: Bool { ble.sample?.extra?.recordingFailed == true }
+
     /// 숫자에만 칠하는 색. 라벨과 단위는 건드리지 않는다.
     private func numberStyle(_ warn: Bool) -> AnyShapeStyle {
         if dimmed { return AnyShapeStyle(.secondary) }
@@ -81,6 +85,8 @@ struct LiveView: View {
                     Spacer(minLength: 8)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background((recFailed ? Color.red.opacity(0.45) : Color.clear).ignoresSafeArea())
             .navigationTitle(ble.pinnedModule?.displayName ?? "모듈 미선택")
             .navigationBarTitleDisplayMode(.inline)
         }
