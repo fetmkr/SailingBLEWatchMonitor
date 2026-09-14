@@ -1430,13 +1430,15 @@ async function wake(b: ble.Board) {
       return;
     }
 
-    setProgress(`${b.name} 의 WiFi 를 켜는 중…`);
+    setProgress(`${b.name} 이 자기 WiFi 를 여는 중…`);
+    // ★ 늘 AP 다 (2026-09-14). 예전에는 `wifi on`(아는 WiFi 에 붙기)을 보냈는데,
+    //   보드가 코드에 박힌 집 WiFi 로 붙으려 해서 집 밖에서는 늘 막혔다.
+    //   AP 는 보드가 스스로 WiFi 를 여니 어디서나 된다. USB 길(wakeUsb)과 같다.
     // 번호를 같이 보낸다. 보드가 나를 뺀 나머지가 몇 대인지 세어 답한다.
-    const reply = await link.ask(`wifi on ${appId()}`, 8000);
+    const reply = await link.ask(`wifi ap ${appId()}`, 10000);
     if (!reply) { setStatus("보드가 대답이 없습니다.", "bad"); return; }
-
-    if (reply.startsWith("err wifi no-ssid")) {
-      setStatus("이 보드에 붙을 WiFi 가 정해져 있지 않습니다. WiFi 설정을 먼저 하세요.", "bad");
+    if (reply.startsWith("err wifi recording")) {
+      setStatus("기록 중입니다. 기록을 멈춘 뒤에 받으세요.", "bad");
       return;
     }
     const up = ble.parseWifiUp(reply);
@@ -1462,22 +1464,18 @@ async function wake(b: ble.Board) {
 
     ($("host") as HTMLInputElement).value = up.hosts[0];
 
-    if (up.kind === "ap") {
-      setProgress(null);
-      setStatus(`${b.name} 이 자기 WiFi 를 열었습니다 — ` +
-                `WiFi 를 "${up.ssid}" 로 바꾼 뒤 목록을 누르세요.`, "good");
-      byHand = true; renderSide();
-      return;
-    }
-
-    // 붙는 데 시간이 걸린다. 주소가 답할 때까지 두드려 본다.
-    setProgress(`${b.name} 이 ${up.ssid} 에 붙는 중…`);
-    const found = await waitForBoard(up.hosts, 25000);
+    // 사람이 이 기기의 WiFi 를 보드 AP 로 바꿀 때까지 기다린다. 앱은 대신 못 바꾼다.
+    // 비밀번호도 쳐야 하니 넉넉히 준다 (wakeUsb 와 같은 90초).
+    setProgress(up.pass
+      ? `WiFi 를 "${up.ssid}" 로 바꾸세요 · 비밀번호 ${up.pass}`
+      : `WiFi 를 "${up.ssid}" 로 바꾸세요`);
+    setStatus(`${b.name} 이 자기 WiFi 를 열었습니다. 이 기기 WiFi 를 그것으로 바꾸면 이어서 갑니다.`);
+    byHand = true; renderSide();
+    const found = await waitForBoard(up.hosts, 90000);
     setProgress(null);
     if (!found) {
-      setStatus(`${up.hosts.join(" 도 ")} 도 아직 답이 없습니다. ` +
-                `잠시 뒤 목록을 눌러 보세요.`, "bad");
-      byHand = true; renderSide();
+      setStatus(`${up.hosts[0]} 이 아직 답이 없습니다. ` +
+                `WiFi 를 "${up.ssid}" 로 바꾼 뒤 목록을 눌러 보세요.`, "bad");
       return;
     }
     setStatus(`${b.name} 준비됐습니다 — ${found}`, "good");
@@ -1573,6 +1571,9 @@ async function wakeUsb(path: string) {
       return;
     }
     setStatus(`준비됐습니다 — ${found}`, "good");
+    // 블루투스로 깨울 때와 같게, 답한 주소를 앞에 둔다 (다음에 못 찾을 때 여기로 들어온다).
+    localStorage.setItem(HOSTS_KEY,
+      JSON.stringify([found, ...up.hosts.filter((h) => h !== found)]));
     keepAliveStart();
     await listBoard();
   } catch (e) {
@@ -1761,7 +1762,8 @@ function keepAliveStart() {
       }
       keepAliveStop();
       boardFiles = [];
-      setStatus("보드와 연락이 끊겼습니다. 배 찾기로 다시 깨우세요.", "bad");
+      // 보드가 기록을 시작하면 WiFi 를 스스로 끈다 (기록이 WiFi 를 이긴다). 그것도 여기로 온다.
+      setStatus("보드와 연락이 끊겼습니다 — 보드가 기록을 시작했거나 꺼졌습니다. 배 찾기로 다시 깨우세요.", "bad");
       renderSide();
     }
   };

@@ -39,6 +39,12 @@
 #include "display_rak.h"
 #include "lora.h"
 #include "hlog.h"
+#include "casic.h"
+#include "imu_math.h"
+#include "prefs_util.h"
+#include "heading_math.h"
+#include "mag_sample.h"
+#include "magcal.h"
 #include "netsrv.h"
 #include "protocol.h"
 
@@ -82,6 +88,9 @@ static uint32_t gRecFailSession = 0;   // 멈춘 세션. 다시 걸 때 앞 세�
 static uint32_t gRecRestartAt   = 0;   // 0 이면 다시 걸 계획 없음
 static uint8_t  gRecRestarts    = 0;   // 이 부팅에서 다시 건 횟수
 static char     gRecFailLine[200] = {0};
+// 마지막 기록 시작이 왜 실패했나. 버튼·시리얼·자동 복구가 같은 말을 쓴다 (recStartFrom).
+static const char* gRecStartErr      = nullptr;
+static const char* gRecStartErrShort = nullptr;   // 화면 한 줄용
 static constexpr uint8_t  kBoatIdMax     = 32;
 static constexpr uint32_t kBoatIdShoutMs = 30000;
 
@@ -99,11 +108,62 @@ static uint32_t  gNotifyPeriodMs = sail::kNotifyPeriodMs;
 static Telemetry gLatest;
 
 // ── 실측 센서 ────────────────────────────────────────────────────────────
-static MPU9250_WE gImu = MPU9250_WE(rak::kAddrImu);
+// ★ 자력 표본을 라이브러리가 검사하지 않아서 거울 레지스터를 직접 읽는다 (mag_sample.h).
+//   라이브러리 getMagValues() 는 넘침(ST2)을 안 보고, I2C 가 아무것도 안 주면 초기화
+//   안 된 배열로 값을 만든다 [확인: MPU9250_WE.cpp#L96-L112, #L194-L205].
+//   ASA 계수(magCorrFactor)는 private 이라 같은 식으로 직접 읽어 둔다 (#L170-L177).
+class SailImu : public MPU9250_WE {
+public:
+    using MPU9250_WE::MPU9250_WE;
+    // initMagnetometer() 뒤에 부른다. Fuse ROM 모드로 들어가 읽고 연속 8 Hz 로 되돌린다
+    // (mag_sample.h readAsaFuseRom). 못 읽으면 계수 1 로 두고 거짓.
+    bool loadAsa() {
+        uint8_t raw[3] = {0, 0, 0};
+        const bool ok = mag::readAsaFuseRom(
+            [this](uint8_t m) { setMagOpMode((AK8963_opMode)m); },
+            [this](uint8_t r) { return readAK8963Register8(r); },
+            AK8963_PWR_DOWN, AK8963_FUSE_ROM_ACC_MODE, AK8963_CONT_MODE_8HZ,
+            REGISTER_AK8963_ASAX, raw);
+        for (int i = 0; i < 3; ++i) {
+            asaRaw_[i] = raw[i];
+            asa_[i] = ok ? mag::asaFactor(raw[i]) : 1.0f;
+        }
+        return ok;
+    }
+    uint8_t asaRaw(int i) const { return asaRaw_[i]; }
+    // I2C 마스터가 떠 온 HXL..CNTL1 8바이트. 실제로 읽은 바이트 수를 돌려준다.
+    uint8_t readMagMirror(uint8_t* b) {
+        if (useSPI) return 0;
+        _wire->beginTransmission(i2cAddress);
+        _wire->write(REGISTER_EXT_SLV_SENS_DATA_00);
+        if (_wire->endTransmission(false) != 0) return 0;
+        _wire->requestFrom(i2cAddress, (uint8_t)8);
+        uint8_t n = 0;
+        while (_wire->available() && n < 8) b[n++] = (uint8_t)_wire->read();
+        while (_wire->available()) _wire->read();
+        return n;
+    }
+    float asa(int i) const { return asa_[i]; }
+private:
+    float asa_[3] = {1.0f, 1.0f, 1.0f};
+    uint8_t asaRaw_[3] = {0, 0, 0};
+};
+static SailImu gImu = SailImu(rak::kAddrImu);
 static TinyGPSPlus gGps;
 
 static bool gImuOk = false; // 가속도·자이로가 붙었나
-static bool gMagOk = false; // 자력계(AK8963)까지 붙었나
+static bool gMagOk = false; // 자력계(AK8963)가 **초기화에 성공했나** (표본이 새로운지는 magFresh)
+
+// 자력 표본 상태. gMagOk 는 붙었는지만 말하고, 표본이 살아 있는지는 여기서 본다.
+static uint8_t  gMagPrev[6]  = {0};
+static bool     gMagHavePrev = false;
+static mag::Freshness gMagFreshness;    // 정상 읽기 시각 · 값이 바뀐 시각 (mag_sample.h)
+static uint32_t gMagCount[5] = {0};     // mag::Check 별 셈 (새·반복·짧음·넘침·0벡터)
+// 헤딩(두 함수 모두)·BLE·기록에 자력을 써도 되나 — 붙어 있고, 400 ms 안에 정상 읽기가
+// 있었고, 5초 안에 값이 바뀐 적이 있다.
+static bool magFresh() {
+    return gMagOk && gMagFreshness.usable(millis());
+}
 
 // 마지막으로 읽은 9축 값 (로그와 표시에 쓴다)
 static xyzFloat gAcc, gGyr, gMag;
@@ -172,7 +232,10 @@ static uint8_t gHdgAxisA = 1;       // atan2 의 첫 인자 (기본 Y)
 static uint8_t gHdgAxisB = 0;       // 두 번째 인자 (기본 X)
 static float   gHdgSignA = 1.0f;
 static float   gHdgSignB = 1.0f;
-static float   gHdgOffsetDeg = 0.0f;
+static float   gHdgOffsetDeg = 0.0f;   // 장착 오프셋 (보드가 뱃머리에서 돌아앉은 각)
+// 자기 편각 (동편 +). 진북 = 자북 + 편각. 장착 오프셋과 뜻이 달라서 따로 둔다.
+// 기본 0 — 짐작으로 넣지 않는다 (한국은 약 8° 서편이라고 문서에 적혀 있지만 위치마다 다르다).
+static float   gHdgDeclDeg = 0.0f;
 
 // "지금 이 자세가 평형" 이라고 알려주는 기준각. 배를 물에 띄우고 평형일 때
 // `level` 을 치면 그때 각도를 0 으로 삼는다. NVS 에 저장되므로 재부팅해도,
@@ -181,11 +244,8 @@ static float gHeelOffsetDeg  = 0.0f;
 static float gPitchOffsetDeg = 0.0f;
 
 // 각도를 -180 ~ +180 안으로 접는다.
-static float wrap180(float deg) {
-    while (deg > 180.0f) deg -= 360.0f;
-    while (deg < -180.0f) deg += 360.0f;
-    return deg;
-}
+// ★ while 로 360 을 빼면 inf·아주 큰 수에서 끝나지 않는다. fmod 로 접는다 (heading_math.h).
+static float wrap180(float deg) { return hdg::wrap180(deg); }
 
 // "+Y" 처럼 부호와 축 이름을 담는다. 부르는 쪽이 버퍼를 준다 —
 // 한 printf 안에서 힐과 피치를 같이 찍는 곳이 있어서 공용 버퍼를 쓰면 겹친다.
@@ -300,6 +360,9 @@ static void applyIdentity(const char* userName) {
     gLatest.moduleID = gModuleID;
 }
 
+static bool gGyrNeedSave = false;   // NVS 에 옛 단위로 적힌 자이로 0점을 옮겼다 → 새 단위로 다시 적는다
+static bool saveGyrOffsets();
+
 static void loadSettings() {
     gPrefs.begin("sail", /*readOnly=*/true);
     String saved    = gPrefs.getString("name", "");
@@ -324,13 +387,47 @@ static void loadSettings() {
     gHdgSignA       = gPrefs.getChar("hdg_sa", 1) < 0 ? -1.0f : 1.0f;
     gHdgSignB       = gPrefs.getChar("hdg_sb", 1) < 0 ? -1.0f : 1.0f;
     gHdgOffsetDeg   = gPrefs.getFloat("hdg_off", 0.0f);
+    gHdgDeclDeg     = gPrefs.getFloat("hdg_decl", 0.0f);
     // gGpsDynWant 는 kGpsBoatMode 로 고정. NVS 의 gps_dyn 은 더 이상 안 읽는다.
     gDampLevel      = gPrefs.getUChar("damp", 2);
     gDeadbandKn     = gPrefs.getFloat("dead_kn", 0.10f);
     gGyrOffX        = gPrefs.getFloat("gyr_x", 0.0f);
     gGyrOffY        = gPrefs.getFloat("gyr_y", 0.0f);
     gGyrOffZ        = gPrefs.getFloat("gyr_z", 0.0f);
+    // 옛 단위(±1000 범위 원시값)로 적힌 0점을 ±250 원시 단위로 옮긴다. 저장은 setup 에서.
+    if (gPrefs.getUChar("gyr_u", 0) != 2 &&
+        (gGyrOffX != 0.0f || gGyrOffY != 0.0f || gGyrOffZ != 0.0f)) {
+        gGyrOffX = imu::migrateLegacyOffset(gGyrOffX);
+        gGyrOffY = imu::migrateLegacyOffset(gGyrOffY);
+        gGyrOffZ = imu::migrateLegacyOffset(gGyrOffZ);
+        gGyrNeedSave = true;
+    }
     gPrefs.end();
+
+    // ★ NVS 에서 읽은 값을 쓰기 전에 검사한다. 옛 코드는 hdg off 에 1e10·inf 가 저장되면
+    //   방위 정규화가 끝나지 않아 루프가 멎었고, 켤 때마다 같은 값을 다시 읽었다.
+    {
+        int fixed = 0;
+        fixed += hdg::sanitizeFloat(&gHeelOffsetDeg,  -180.0f, 180.0f, 0.0f);
+        fixed += hdg::sanitizeFloat(&gPitchOffsetDeg, -180.0f, 180.0f, 0.0f);
+        fixed += hdg::sanitizeFloat(&gHdgOffsetDeg,   -360.0f, 360.0f, 0.0f);
+        fixed += hdg::sanitizeFloat(&gHdgDeclDeg,      -30.0f,  30.0f, 0.0f);
+        gHdgOffsetDeg = hdg::wrap180(gHdgOffsetDeg);
+        bool magBad = false;
+        for (int i = 0; i < 3; ++i) magBad |= hdg::sanitizeFloat(&gMagOff[i], -500.0f, 500.0f, 0.0f);
+        if (magBad) { gMagOff[0] = gMagOff[1] = gMagOff[2] = 0.0f; gMagRadius = gMagResid = 0.0f; ++fixed; }
+        fixed += hdg::sanitizeFloat(&gMagRadius, 0.0f, 500.0f, 0.0f);
+        fixed += hdg::sanitizeFloat(&gMagResid,  0.0f, 500.0f, 0.0f);
+        fixed += hdg::sanitizeAxes(&gHdgAxisA, &gHdgAxisB);
+        if (gHeelAxis > 2)  { gHeelAxis = 1;  ++fixed; }
+        if (gPitchAxis > 2) { gPitchAxis = 2; ++fixed; }
+        if (gDampLevel > 5) { gDampLevel = 2; ++fixed; }
+        fixed += hdg::sanitizeFloat(&gDeadbandKn, 0.0f, 2.0f, 0.10f);
+        fixed += hdg::sanitizeFloat(&gGyrOffX, -32768.0f, 32768.0f, 0.0f);
+        fixed += hdg::sanitizeFloat(&gGyrOffY, -32768.0f, 32768.0f, 0.0f);
+        fixed += hdg::sanitizeFloat(&gGyrOffZ, -32768.0f, 32768.0f, 0.0f);
+        if (fixed) Serial.printf("[SET] ★ 보드에 저장된 설정 %d개가 범위 밖이라 기본값으로 씁니다\n", fixed);
+    }
 
     if (gNotifyPeriodMs < 10 || gNotifyPeriodMs > 2000) {
         gNotifyPeriodMs = sail::kNotifyPeriodMs;
@@ -800,6 +897,8 @@ static bool     gPvVelValid = false;           // gPvVelFlag >= 4 일 때만 참
 static uint32_t gPvAtMs     = 0;
 static float    gPvVelN     = 0.0f;            // 북쪽 속도 m/s
 static float    gPvVelE     = 0.0f;            // 동쪽 속도 m/s
+// 체크섬·길이·숫자 범위에서 걸러 버린 바이너리 프레임 수 (진단용)
+static uint32_t gCasicRejected = 0;
 
 static void sogShownUpdate(uint32_t nowMs);    // 아래 "화면 속도" 항목
 
@@ -810,59 +909,40 @@ static void gpsPoll() {
     // ── 바이너리 프레임 골라내기 ─────────────────────────────────────────
     // NMEA 는 전부 아스키(0x80 미만)라 0xBA 가 나올 수 없다. 그래서 0xBA 를
     // 만나면 바이너리 프레임이 시작된 것으로 봐도 안전하다.
-    static int      bs = 0;   // 0=NMEA 읽는 중
-    static uint16_t blen = 0, bneed = 0, bn = 0;
-    static uint8_t  bcls = 0, bid = 0;
-    static uint8_t  bbody[96];
+    // ★ 체크섬·길이·NaN 까지 본다 (casic.h). 옛 코드는 체크섬 4바이트를 세기만 하고
+    //   버려서 깨진 NAV-PV 를 정상 속도로 받았다. 넘치는 길이는 경계를 잃었다.
+    static casic::Parser ps;
 
     while (Serial1.available()) {
         const uint8_t u = (uint8_t)Serial1.read();
         const char    c = (char)u;
 
-        if (bs != 0) {
-            switch (bs) {
-                case 1: bs = (u == 0xCE) ? 2 : (u == 0xBA ? 1 : 0); break;
-                case 2: blen = u;                  bs = 3; break;
-                case 3: blen |= (uint16_t)u << 8;  bs = 4; break;
-                case 4: bcls = u;                  bs = 5; break;
-                case 5:
-                    bid   = u;
-                    bneed = (blen > sizeof(bbody)) ? sizeof(bbody) : blen;
-                    bn    = 0;
-                    bs    = (bneed > 0) ? 6 : 7;
-                    break;
-                case 6:
-                    bbody[bn++] = u;
-                    if (bn >= bneed) { bn = 0; bs = 7; }
-                    break;
-                case 7:
-                    if (++bn >= 4) { // 체크섬까지 다 받았다
-                        if (bcls == 0x01 && bid == 0x03 && bneed >= 80) {
-                            float sp, hd, ac, ha, ca;
-                            memcpy(&gPvVelN, bbody + 48, 4);
-                            memcpy(&gPvVelE, bbody + 52, 4);
-                            memcpy(&ha, bbody + 40, 4); // 수평 위치 정확도 (m²)
-                            memcpy(&sp, bbody + 64, 4);
-                            memcpy(&hd, bbody + 68, 4);
-                            memcpy(&ac, bbody + 72, 4);
-                            memcpy(&ca, bbody + 76, 4); // 침로 정확도 (도²)
-                            gPvHAccM    = (ha > 0.0f) ? sqrtf(ha) : -1.0f;
-                            gPvCogAccDeg= (ca > 0.0f) ? sqrtf(ca) : -1.0f;
-                            gPvVelFlag  = bbody[5];
-                            gPvVelValid = (gPvVelFlag >= kPvVelMeasured);
-                            gPvSpeedKn  = sp * 1.943844f;
-                            gPvCogDeg   = hd;
-                            gPvAccKn    = (ac > 0.0f) ? sqrtf(ac) * 1.943844f : -1.0f;
-                            gPvAtMs     = millis();
-                            if (gPvVelValid && gPvSpeedKn > gMaxSogPv) gMaxSogPv = gPvSpeedKn;
-                        }
-                        bs = 0;
-                    }
-                    break;
+        bool pass = false;
+        const casic::Result fr = ps.feed(u, millis(), &pass);
+        if (fr == casic::Result::Frame) {
+            const casic::Frame& f = ps.frame();
+            if (f.cls == 0x01 && f.id == 0x03) {
+                casic::NavPv pv;
+                if (casic::parseNavPv(f, &pv)) {
+                    gPvVelN      = pv.velN;
+                    gPvVelE      = pv.velE;
+                    gPvHAccM     = pv.hAccM;
+                    gPvCogAccDeg = pv.cogAccDeg;
+                    gPvVelFlag   = pv.velValid;
+                    gPvVelValid  = (gPvVelFlag >= kPvVelMeasured);
+                    gPvSpeedKn   = pv.speed2D * 1.943844f;
+                    gPvCogDeg    = pv.heading;
+                    gPvAccKn     = (pv.sAccMs > 0.0f) ? pv.sAccMs * 1.943844f : -1.0f;
+                    gPvAtMs      = millis();
+                    if (gPvVelValid && gPvSpeedKn > gMaxSogPv) gMaxSogPv = gPvSpeedKn;
+                } else {
+                    ++gCasicRejected;
+                }
             }
-            continue;
+        } else if (fr != casic::Result::None) {
+            ++gCasicRejected;
         }
-        if (u == 0xBA) { bs = 1; continue; }
+        if (!pass) continue;       // 바이너리 프레임 안의 바이트는 NMEA 파서에 안 먹인다
 
         gGps.encode(c);
 
@@ -1077,6 +1157,7 @@ static void sogStatusPrint() {
                   gSlowMode ? "느린" : "빠른", gSogShownOk ? "" : "(--.--)", gSogShownKn,
                   gSogShortKn, gSogLongKn, gPvSpeedKn, gPvAccKn, gPvVelFlag,
                   (unsigned long)gSogBadCount);
+    Serial.printf("[GPS] CASIC 프레임 거름 %lu (체크섬·길이·숫자 범위)\n", (unsigned long)gCasicRejected);
 }
 
 // 지금 GPS 값을 믿어도 되는지 판정한다.
@@ -1263,14 +1344,7 @@ static void casicSend(uint8_t cls, uint8_t id, const uint8_t* payload, uint16_t 
                             (uint8_t)(len & 0xFF), (uint8_t)(len >> 8),
                             cls, id};
 
-    const uint8_t hi = gCasicIdFirst ? id  : cls;
-    const uint8_t lo = gCasicIdFirst ? cls : id;
-    uint32_t ck = ((uint32_t)hi << 24) + ((uint32_t)lo << 16) + len;
-    for (uint16_t i = 0; i + 3 < len; i += 4) {
-        uint32_t w;
-        memcpy(&w, payload + i, 4); // ESP32 도 리틀엔디안이라 그대로 맞는다
-        ck += w;
-    }
+    const uint32_t ck = casic::checksum(cls, id, len, payload, gCasicIdFirst);
 
     Serial1.write(hdr, 6);
     if (len > 0) Serial1.write(payload, len);
@@ -1284,52 +1358,58 @@ static void casicSend(uint8_t cls, uint8_t id, const uint8_t* payload, uint16_t 
 //
 // NMEA 문장이 초당 2000바이트씩 같이 흘러들어오므로 0xBA 0xCE 를 찾아가며 읽는다.
 // 지나가는 NMEA 는 버리지 않고 파서에 먹인다 — 기다리는 동안 위치가 멎으면 안 된다.
+static void imuDrainFifo();   // 아래 IMU 항목. 기다리는 동안에도 FIFO 를 비운다
+
 static bool casicWait(uint32_t waitMs, uint8_t wantCls, uint8_t wantId,
                       uint8_t* out, uint16_t outCap, uint16_t* outLen,
                       uint8_t* gotId) {
     const uint32_t start = millis();
-    int      state = 0;
-    uint16_t len = 0, need = 0, n = 0;
-    uint8_t  cls = 0, id = 0;
-    uint8_t  body[128];
+    casic::Parser ps;       // 체크섬·길이 검증은 gpsPoll 과 같은 파서가 한다
 
     while (millis() - start < waitMs) {
         while (Serial1.available()) {
             const uint8_t c = (uint8_t)Serial1.read();
-            switch (state) {
-                case 0: if (c == 0xBA) state = 1; else gGps.encode((char)c); break;
-                case 1: state = (c == 0xCE) ? 2 : (c == 0xBA ? 1 : 0); break;
-                case 2: len = c;                 state = 3; break;
-                case 3: len |= (uint16_t)c << 8; state = 4; break;
-                case 4: cls = c;                 state = 5; break;
-                case 5:
-                    id   = c;
-                    need = (len > sizeof(body)) ? sizeof(body) : len;
-                    n    = 0;
-                    state = (need > 0) ? 6 : 7;
-                    break;
-                case 6:
-                    body[n++] = c;
-                    if (n >= need) { n = 0; state = 7; }
-                    break;
-                case 7: // 체크섬 4바이트를 다 받으면 한 개 완성
-                    if (++n >= 4) {
-                        if (cls == wantCls && (wantId == 0xFF || id == wantId)) {
-                            if (gotId)  *gotId  = id;
-                            const uint16_t cp = (need > outCap) ? outCap : need;
-                            if (out && cp) memcpy(out, body, cp);
-                            if (outLen) *outLen = cp;
-                            return true;
-                        }
-                        state = 0;
-                    }
-                    break;
+            bool pass = false;
+            const casic::Result r = ps.feed(c, millis(), &pass);
+            if (pass) { gGps.encode((char)c); continue; }
+            if (r == casic::Result::None) continue;
+            if (r != casic::Result::Frame) { ++gCasicRejected; continue; }
+            const casic::Frame& f = ps.frame();
+            if (f.cls == wantCls && (wantId == 0xFF || f.id == wantId)) {
+                if (gotId)  *gotId  = f.id;
+                const uint16_t cp = (f.len > outCap) ? outCap : f.len;
+                if (out && cp) memcpy(out, f.payload, cp);
+                if (outLen) *outLen = cp;
+                return true;
             }
         }
         feedWatchdog();
+        imuDrainFifo();     // 몇 초씩 기다리는 동안 IMU FIFO 가 넘치지 않게
         delay(2);
     }
     return false;
+}
+
+// 요청(cls, id)에 대한 ACK/NACK 을 기다린다. 다른 요청의 ACK 는 우리 것으로 안 본다.
+static casic::Ack casicWaitAck(uint32_t waitMs, uint8_t reqCls, uint8_t reqId) {
+    const uint32_t start = millis();
+    casic::Parser ps;
+    while (millis() - start < waitMs) {
+        while (Serial1.available()) {
+            const uint8_t c = (uint8_t)Serial1.read();
+            bool pass = false;
+            const casic::Result r = ps.feed(c, millis(), &pass);
+            if (pass) { gGps.encode((char)c); continue; }
+            if (r == casic::Result::None) continue;
+            if (r != casic::Result::Frame) { ++gCasicRejected; continue; }
+            const casic::Ack a = casic::ackFor(ps.frame(), reqCls, reqId);
+            if (a != casic::Ack::NotMine) return a;
+        }
+        feedWatchdog();
+        imuDrainFifo();
+        delay(2);
+    }
+    return casic::Ack::NotMine;
 }
 
 // 설정을 보내고 ACK 를 확인한다. 짐작하지 않는다.
@@ -1338,12 +1418,12 @@ static bool casicSetAcked(uint8_t cls, uint8_t id,
     while (Serial1.available()) gGps.encode((char)Serial1.read()); // 밀린 것 비우기
     casicSend(cls, id, payload, len);
 
-    uint8_t ackId = 0;
-    if (!casicWait(2000, 0x05, 0xFF, nullptr, 0, nullptr, &ackId)) {
+    const casic::Ack ack = casicWaitAck(2000, cls, id);
+    if (ack == casic::Ack::NotMine) {
         Serial.printf("  %s — 응답 없음. 이 칩이 모르는 설정입니다\n", what);
         return false;
     }
-    if (ackId == 0x01) {
+    if (ack == casic::Ack::Ack) {
         Serial.printf("  %s — ACK. 받아들였습니다\n", what);
         return true;
     }
@@ -1726,6 +1806,12 @@ static bool imuBegin() {
     gImu.setSampleRateDivider(9);    // 1000/(1+9) = 100 Hz (FIFO 주기)
 
     gMagOk = gImu.initMagnetometer();
+    gMagHavePrev = false;
+    gMagFreshness.reset();
+    if (gMagOk && !gImu.loadAsa()) {
+        Serial.printf("[IMU] ★ 자력계 공장 감도값(ASA)을 못 읽었습니다 (%02X %02X %02X) — 계수 1 로 씁니다\n",
+                      gImu.asaRaw(0), gImu.asaRaw(1), gImu.asaRaw(2));
+    }
     return true;
 }
 
@@ -1743,17 +1829,40 @@ static bool imuBegin() {
 //   그래서 라이브러리의 autoOffsets() 는 쓰지 않는다. 그건 가속도까지
 //   건드려서 배 위에서 부르면 힐이 통째로 어긋난다.)
 //
-// setGyrOffsets() 가 받는 값은 °/s 가 아니라 원시값이다.
-//   °/s = 원시값 x 250 / 32768   (±250°/s 범위) → 1 °/s 가 약 131
-// 재는 동안 이 폭보다 크게 흔들렸으면 못 믿는다. 원시값 500 은 약 3.8 °/s.
-static constexpr float kGyrCalMaxSpreadRaw = 500.0f;
+// ★ setGyrOffsets() 가 받는 값은 **±250°/s 범위의 원시값 단위**다.
+//   라이브러리가 offset / gyrRangeFactor 를 빼기 때문이다 (imu_math.h 주석).
+//   우리는 ±1000 으로 재므로 잰 원시 평균에 4 를 곱해 넣어야 한다.
+//   옛 코드는 곱하지 않아서 영점의 1/4 만 빠졌다 (원시 100 이면 75 가 남음).
+//
+// 판정은 °/s 로 한다. 원시 폭으로 적어 두면 범위를 바꿀 때마다 뜻이 바뀐다.
+//   흔들림 폭 3.8 °/s   옛 한계(±250 원시 500)가 뜻하던 값
+//   영점 크기  5 °/s    이보다 큰 평균은 영점이 아니라 **돌고 있던 것**으로 본다
+//                       [추측: MPU-9250 의 초기 영점 허용치가 이 수준. 데이터시트로 확인할 것]
+//   부팅 때 뛴 폭 1 °/s 저장값과 이만큼 넘게 다르면 부팅 값을 안 쓴다
+static constexpr float kGyrCalMaxSpreadDps = 3.8f;
+static constexpr float kGyrCalMaxBiasDps   = 5.0f;
+static constexpr float kGyrBootMaxJumpDps  = 1.0f;
 
 static void applyGyrOffsets() {
     if (gImuOk) gImu.setGyrOffsets(gGyrOffX, gGyrOffY, gGyrOffZ);
 }
 
+static bool saveGyrOffsets() {
+    return prefs::writeWith(gPrefs, "sail", [](Preferences& p) {
+        return prefs::wrote(p.putFloat("gyr_x", gGyrOffX), sizeof(float)) &&
+               prefs::wrote(p.putFloat("gyr_y", gGyrOffY), sizeof(float)) &&
+               prefs::wrote(p.putFloat("gyr_z", gGyrOffZ), sizeof(float)) &&
+               prefs::wrote(p.putUChar("gyr_u", 2), 1);   // 2 = ±250 원시 단위
+    });
+}
+
 // 지금 자이로 값을 0 으로 삼는다. 보드가 멈춰 있어야 한다.
-static bool calibrateGyro() {
+//
+//   persist = true   `calib` 명령. 받으면 NVS 에 적는다
+//   persist = false  부팅. 램에만 쓴다. 저장값이 있는데 크게 다르면 안 쓴다
+//                    — 부팅하는 동안 배가 **고르게 돌고** 있으면 흔들림은 작은데
+//                    평균이 회전 속도가 된다. 그걸 영점으로 저장하면 안 된다.
+static bool calibrateGyro(bool persist) {
     if (!gImuOk) return false;
 
     gImu.setGyrOffsets(0.0f, 0.0f, 0.0f); // 보정을 지우고 날값을 본다
@@ -1773,35 +1882,51 @@ static bool calibrateGyro() {
         delay(5);
     }
 
+    const int rf = imu::kGyrRangeFactor1000;
     float spread = mxx - mnx;
     if (mxy - mny > spread) spread = mxy - mny;
     if (mxz - mnz > spread) spread = mxz - mnz;
+    const float spreadDps = imu::rawToDps(spread, rf);
+    const float mx = sx / kN, my = sy / kN, mz = sz / kN;
+    float biasDps = fabsf(imu::rawToDps(mx, rf));
+    if (fabsf(imu::rawToDps(my, rf)) > biasDps) biasDps = fabsf(imu::rawToDps(my, rf));
+    if (fabsf(imu::rawToDps(mz, rf)) > biasDps) biasDps = fabsf(imu::rawToDps(mz, rf));
 
-    if (spread > kGyrCalMaxSpreadRaw) {
-        // 흔들리는 동안 잰 값은 쓰면 안 된다. 이전 보정을 되돌린다.
-        applyGyrOffsets();
-        Serial.printf("[IMU] 자이로 0점 실패 — 재는 동안 흔들렸습니다 "
-                      "(폭 %.0f, 한계 %.0f)\n", spread, kGyrCalMaxSpreadRaw);
+    if (!imu::gyrCalAcceptable(spreadDps, biasDps, kGyrCalMaxSpreadDps, kGyrCalMaxBiasDps)) {
+        applyGyrOffsets();   // 이전 보정을 되돌린다
+        Serial.printf("[IMU] 자이로 0점 안 씀 — 흔들림 %.2f °/s (한계 %.1f) · 평균 %.2f °/s (한계 %.1f)\n",
+                      spreadDps, kGyrCalMaxSpreadDps, biasDps, kGyrCalMaxBiasDps);
         return false;
     }
 
-    gGyrOffX = sx / kN;
-    gGyrOffY = sy / kN;
-    gGyrOffZ = sz / kN;
+    const float ox = imu::gyrOffsetForLib(mx, rf);
+    const float oy = imu::gyrOffsetForLib(my, rf);
+    const float oz = imu::gyrOffsetForLib(mz, rf);
+
+    if (!persist && (gGyrOffX != 0.0f || gGyrOffY != 0.0f || gGyrOffZ != 0.0f)) {
+        float jump = fabsf(imu::libOffsetToDps(ox - gGyrOffX));
+        if (fabsf(imu::libOffsetToDps(oy - gGyrOffY)) > jump) jump = fabsf(imu::libOffsetToDps(oy - gGyrOffY));
+        if (fabsf(imu::libOffsetToDps(oz - gGyrOffZ)) > jump) jump = fabsf(imu::libOffsetToDps(oz - gGyrOffZ));
+        if (jump > kGyrBootMaxJumpDps) {
+            applyGyrOffsets();
+            Serial.printf("[IMU] 부팅 때 잰 자이로 0점이 저장값과 %.2f °/s 다릅니다 — 저장값을 씁니다 "
+                          "(돌고 있었을 수 있음. 멈춘 뒤 calib)\n", jump);
+            return false;
+        }
+    }
+
+    gGyrOffX = ox; gGyrOffY = oy; gGyrOffZ = oz;
     applyGyrOffsets();
 
-    gPrefs.begin("sail", false);
-    gPrefs.putFloat("gyr_x", gGyrOffX);
-    gPrefs.putFloat("gyr_y", gGyrOffY);
-    gPrefs.putFloat("gyr_z", gGyrOffZ);
-    gPrefs.end();
-
-    Serial.printf("[IMU] 자이로 0점 잡음 — 원시 %.0f %.0f %.0f "
-                  "(= %.2f %.2f %.2f °/s) 만큼 빼둡니다\n",
-                  gGyrOffX, gGyrOffY, gGyrOffZ,
-                  gGyrOffX * 250.0f / 32768.0f,
-                  gGyrOffY * 250.0f / 32768.0f,
-                  gGyrOffZ * 250.0f / 32768.0f);
+    bool saved = false;
+    if (persist) {
+        saved = saveGyrOffsets();
+        if (!saved) Serial.println("[IMU] ★ 자이로 0점을 보드에 못 적었습니다 — 껐다 켜면 옛 값");
+    }
+    Serial.printf("[IMU] 자이로 0점 %s — %.2f %.2f %.2f °/s 만큼 빼둡니다 (흔들림 %.2f °/s)\n",
+                  persist ? (saved ? "잡고 저장" : "잡음(저장 실패)") : "잡음(이번 부팅만)",
+                  imu::libOffsetToDps(ox), imu::libOffsetToDps(oy), imu::libOffsetToDps(oz),
+                  spreadDps);
     return true;
 }
 
@@ -1850,21 +1975,34 @@ static void imuFifoBegin() {
     Serial.println("[IMU] FIFO 켜짐 — 칩이 100 Hz 로 떠서 쌓습니다 (등간격)");
 }
 
-// FIFO 를 퍼 온다. 20 ms 마다 부르면 보통 두 벌씩 나온다.
-// 뱃머리가 도는 속도 (°/s). 진짜 수직에 투영해서 구한다.
+// IMU 를 (다시) 붙인다. 부팅·재연결·imu 명령이 모두 여기를 탄다.
 //
-// ★ 몸통의 축이 아니라 **가속도계가 알려주는 수직**을 쓴다. 배가 기울면
-//   몸통 축은 이미 수직이 아니라서 그 축을 도는 각속도는 뱃머리가 도는
-//   속도가 아니다.
-static float yawRateNow() {
-    if (!gImuOk) return 0.0f;
-    // 자이로·가속을 자력계 좌표로 (한 칩인데 축이 다르다 — accInMagFrame 주석)
-    const float g[3] = {  gGyr.y,  gGyr.x, -gGyr.z };
-    const float a[3] = {  gAcc.y,  gAcc.x, -gAcc.z };
-    const float n = sqrtf(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]);
-    if (n < 0.2f) return 0.0f;                 // 자유낙하 수준. 아래를 모른다
-    return -(g[0]*a[0] + g[1]*a[1] + g[2]*a[2]) / n;   // 가속은 위를 가리키니 뒤집는다
+// ★ 옛 재연결은 imuBegin() 만 불렀다. 그건 칩을 리셋해서 FIFO 설정이 날아가는데,
+//   gFifoOn 은 참으로 남아 직접 읽기도 건너뛰었다. 그래서 imuOk 는 참인데 힐·9축이
+//   마지막 값에 멈춰 있었다. 부팅 때 없다가 나중에 꽂혀도 100 Hz 기록이 안 시작됐다.
+//
+// 범위·필터(imuBegin) → 자이로 0점 → FIFO·시각 → 첫 표본이 말이 되는지 순서로 한다.
+static bool imuAttach(const char* why) {
+    gFifoOn = false;
+    if (!imuBegin()) return false;
+    applyGyrOffsets();
+    imuFifoBegin();
+    delay(30);                                  // 100 Hz 로 두세 벌 쌓일 시간
+    const xyzFloat a = gImu.getGValues();
+    const float n = sqrtf(a.x * a.x + a.y * a.y + a.z * a.z);
+    if (!isfinite(n) || n < 0.3f || n > 4.0f) {
+        gImuOk = false; gMagOk = false; gFifoOn = false;
+        Serial.printf("[IMU] ★ 붙었지만 첫 값이 이상합니다 (|a| = %.2f g) — 다음에 다시 봅니다\n", n);
+        return false;
+    }
+    gImu.resetFifo();
+    gImuTickMs = millis();
+    Serial.printf("[IMU] 붙음 (%s) — 자력계 %s, |a| %.2f g\n", why, gMagOk ? "OK" : "응답 없음", n);
+    return true;
 }
+
+// FIFO 를 퍼 온다. 20 ms 마다 부르면 보통 두 벌씩 나온다.
+static float yawRateNow();   // 아래 "뱃머리 방위 변화율" — 방위 축 설정과 중력을 쓴다
 
 // 켠 뒤로 뱃머리가 돈 각의 합 (°). 100 Hz 로 쌓인다.
 // 자이로 치우침 때문에 오래 두면 흘러간다. **차이로만 쓴다.**
@@ -1883,6 +2021,8 @@ static void imuDrainFifo() {
         gImu.resetFifo();
         gImuTickMs = nowMs;
         ++gFifoOverrun;
+        // 버린 벌 수를 기록 머리글 dropped 에 더한다. 조용히 구멍을 내지 않는다.
+        hlog::noteDropped((uint32_t)sets);
         return;
     }
 
@@ -1964,83 +2104,30 @@ static void magCalCollect() {
     gMagCalN++;
 }
 
-/** 4x4 연립방정식을 푼다 (가우스 소거, 부분 피벗). 못 풀면 false. */
-static bool solve4(float A[4][4], float b[4], float out[4]) {
-    for (int c = 0; c < 4; c++) {
-        int piv = c;
-        for (int r = c + 1; r < 4; r++)
-            if (fabsf(A[r][c]) > fabsf(A[piv][c])) piv = r;
-        if (fabsf(A[piv][c]) < 1e-9f) return false;
-        if (piv != c) {
-            for (int k = 0; k < 4; k++) { const float t = A[c][k]; A[c][k] = A[piv][k]; A[piv][k] = t; }
-            const float t = b[c]; b[c] = b[piv]; b[piv] = t;
-        }
-        for (int r = c + 1; r < 4; r++) {
-            const float f = A[r][c] / A[c][c];
-            for (int k = c; k < 4; k++) A[r][k] -= f * A[c][k];
-            b[r] -= f * b[c];
-        }
-    }
-    for (int r = 3; r >= 0; r--) {
-        float v = b[r];
-        for (int k = r + 1; k < 4; k++) v -= A[r][k] * out[k];
-        out[r] = v / A[r][r];
-    }
-    return true;
-}
-
-/** 모은 점들에 공을 맞춘다. 중심이 곧 치우침이다.
- *
- *  x²+y²+z² = 2ax + 2by + 2cz + d  를 최소제곱으로 푼다.
- *  중심 (a,b,c), 반지름 = sqrt(d + a²+b²+c²).
- *  ★ 선형이라 반복이 없다. 못 도는 경우가 없어서 실시간에 안전하다.
- */
-static bool magCalSolve() {
-    if (gMagCalN < 20) return false;
-    float A[4][4] = {{0}}, b[4] = {0};
-    for (int i = 0; i < gMagCalN; i++) {
-        const float x = gMagCalPts[i][0] * 0.1f;
-        const float y = gMagCalPts[i][1] * 0.1f;
-        const float z = gMagCalPts[i][2] * 0.1f;
-        const float row[4] = { 2*x, 2*y, 2*z, 1.0f };
-        const float rhs = x*x + y*y + z*z;
-        for (int r = 0; r < 4; r++) {
-            for (int c = 0; c < 4; c++) A[r][c] += row[r] * row[c];
-            b[r] += row[r] * rhs;
-        }
-    }
-    float sol[4];
-    if (!solve4(A, b, sol)) return false;
-    const float r2 = sol[3] + sol[0]*sol[0] + sol[1]*sol[1] + sol[2]*sol[2];
-    if (!(r2 > 1.0f) || !isfinite(r2)) return false;
-
-    gMagOff[0] = sol[0]; gMagOff[1] = sol[1]; gMagOff[2] = sol[2];
-    gMagRadius = sqrtf(r2);
-
-    // 맞추고 나서 얼마나 남았나. 이 숫자가 좋아졌을 때만 쓴다.
-    float sum = 0.0f;
-    for (int i = 0; i < gMagCalN; i++) {
-        const float x = gMagCalPts[i][0] * 0.1f - gMagOff[0];
-        const float y = gMagCalPts[i][1] * 0.1f - gMagOff[1];
-        const float z = gMagCalPts[i][2] * 0.1f - gMagOff[2];
-        const float d = sqrtf(x*x + y*y + z*z) - gMagRadius;
-        sum += d * d;
-    }
-    gMagResid = sqrtf(sum / gMagCalN);
-    return true;
-}
-
 static void imuUpdate() {
     if (!gImuOk) return;
     if (!gFifoOn) imuFast();   // FIFO 가 켜져 있으면 가속·자이로는 거기서 온다
     if (gMagOk) {
-        gMagRaw = gImu.getMagValues();
-        // 치우침을 여기서 뺀다. 아래로 가는 모든 것(방위·화면·기록)이 뺀 값을 쓴다.
-        // ★ 보정 전에는 gMagOff 가 0 이라 지금까지와 값이 똑같다.
-        gMag.x = gMagRaw.x - gMagOff[0];
-        gMag.y = gMagRaw.y - gMagOff[1];
-        gMag.z = gMagRaw.z - gMagOff[2];
-        magCalCollect();
+        // 거울 8바이트를 한 번에 읽고 검사한다. 값이 바뀌었을 때만 값을 다시 계산한다.
+        // ★ 같은 값도 정상 읽기다 (자기장이 고르면 새 측정도 같다). 짧은 읽기·넘침·0벡터만
+        //   정상이 아니다. 400 ms 동안 정상 읽기가 없거나 5초 동안 값이 안 바뀌면 무효.
+        uint8_t b[8] = {0};
+        const uint8_t got = gImu.readMagMirror(b);
+        const mag::Check ck = mag::check(got, b, gMagPrev, gMagHavePrev);
+        ++gMagCount[(int)ck];
+        gMagFreshness.update(ck, millis());
+        if (ck == mag::Check::New) {
+            memcpy(gMagPrev, b, 6);
+            gMagHavePrev = true;
+            gMagRaw.x = mag::toMicroTesla(mag::le16(b),     gImu.asa(0));
+            gMagRaw.y = mag::toMicroTesla(mag::le16(b + 2), gImu.asa(1));
+            gMagRaw.z = mag::toMicroTesla(mag::le16(b + 4), gImu.asa(2));
+            // 치우침을 여기서 뺀다. 아래로 가는 모든 것(방위·화면·기록)이 뺀 값을 쓴다.
+            gMag.x = gMagRaw.x - gMagOff[0];
+            gMag.y = gMagRaw.y - gMagOff[1];
+            gMag.z = gMagRaw.z - gMagOff[2];
+            magCalCollect();
+        }
     }
     // 라이브러리의 getRoll()/getPitch() 는 안 쓴다. 보드를 세워 달아서
     // 그 각도는 힐·피치와 다른 회전을 잰다. 아래 "힐과 피치" 항목 참고.
@@ -2062,13 +2149,12 @@ static float magAxis(uint8_t axis) {
 }
 
 static float headingDeg() {
-    if (!gMagOk) return -1.0f;
+    if (!magFresh()) return -1.0f;           // 새 표본이 없으면 방위도 없다
     const float a = magAxis(gHdgAxisA) * gHdgSignA;
     const float b = magAxis(gHdgAxisB) * gHdgSignB;
-    float h = atan2f(a, b) * 180.0f / (float)M_PI + gHdgOffsetDeg;
-    while (h < 0.0f)    h += 360.0f;
-    while (h >= 360.0f) h -= 360.0f;
-    return h;
+    // 방위 = 자력 atan2 + 장착 오프셋 + 자기 편각 (편각 기본 0)
+    const float h = hdg::wrap360(atan2f(a, b) * 180.0f / (float)M_PI + gHdgOffsetDeg + gHdgDeclDeg);
+    return isfinite(h) ? h : -1.0f;
 }
 
 // ── 기울기를 보정한 방위 (INSLIB 에서 가져온 식) ─────────────────────────
@@ -2099,9 +2185,10 @@ static float headingDeg() {
 //
 // 남은 축이 아래고, 부호는 오른손 법칙으로 정해진다 (아래 = 앞 × 오른쪽).
 //
-// ★ 이 부호가 맞는지는 **손으로 기울여 봐야 안다.** `hdgtilt` 명령이 두 방위를
-//   나란히 찍는다. 보드를 좌우로 기울일 때 보정한 쪽이 안 움직이면 맞는 것이고,
-//   반대로 두 배로 흔들리면 아래 축 부호가 뒤집힌 것이다.
+// ★ 이 부호는 오른손 법칙으로 정한 것이고, 24가지 축 설정 모두 물리 오른손과 같다
+//   (2026-09-14 독립 회전행렬 검산). 그런데 **기울여서 흔들림 폭을 보는 것으로는 확인이
+//   안 된다.** 부호가 틀리면 방위가 뱃머리 방향에 따라 40~180° 틀리는데, 기울여도 폭은
+//   0 이다. 확인은 아는 방위 네 곳에서 `hdg ref <참 방위>` 로 한다.
 //
 // ★ 힐·피치는 **보정 전 값(raw)** 을 쓴다. currentHeelDeg 는 사람이 잡아 둔
 //   평형 기준을 뺀 값이라 "배가 평평한가" 를 말하지, "센서가 중력에 대해 얼마나
@@ -2149,33 +2236,20 @@ static void gyrInMagFrame(float out[3]) {
 //   (보드를 세워 달아서 평형에서 raw 피치가 86° 로 나온다) 그걸 넣으면 보정이
 //   엉뚱해진다. 대신 **가속도계로 중력 방향을 직접 재서** 쓴다.
 //   그러면 보드를 어떻게 달았든 상관없다.
-static float headingTiltDeg() {
-    if (!gMagOk || !gImuOk) return -1.0f;
+static bool magFrameToFRD(const float v[3], float* f, float* r, float* d);
+static bool gravityRollPitch(float* roll, float* pitch);
 
-    const uint8_t dAx = magDownAxis();
-    const float   dSg = magDownSign();
-    if (dSg == 0.0f) return -1.0f;              // 앞뒤 축이 같게 설정됐다
+static float headingTiltDeg() {
+    // ★ headingDeg() 와 같은 기준을 쓴다 (magFresh). 힐·피치와 1 g 검사는 gravityRollPitch 하나에 있다 —
+    //   hdgtilt 의 힐 칸·자이로 적분이 여기와 다른 표본을 받지 않게.
+    if (!magFresh() || !gImuOk) return -1.0f;
+    float roll, pitch;
+    if (!gravityRollPitch(&roll, &pitch)) return -1.0f;
 
     // 자력을 (앞, 오른쪽, 아래) 로 옮긴다
-    const float mf =  magAxis(gHdgAxisB) * gHdgSignB;
-    const float mr = -magAxis(gHdgAxisA) * gHdgSignA;
-    const float md =  magAxis(dAx) * dSg;
-
-    // 가속을 같은 자리로 옮긴다. 쉬고 있을 때 가속도계는 **위쪽**을 가리키므로
-    // 부호를 뒤집어야 중력(아래) 방향이 된다.
-    float a[3];
-    accInMagFrame(a);
-    const float pick[3] = { a[gHdgAxisB], a[gHdgAxisA], a[dAx] };
-    const float gf = -pick[0] * gHdgSignB;
-    const float gr =  pick[1] * gHdgSignA;      // (-1) x (-1)
-    const float gd = -pick[2] * dSg;
-
-    const float gn = sqrtf(gf * gf + gr * gr + gd * gd);
-    if (gn < 0.2f) return -1.0f;                // 자유낙하 수준. 아래를 모른다
-
-    // 중력에서 힐과 피치를 뽑는다 (Tait-Bryan ZYX)
-    const float roll  = atan2f(gr, gd);
-    const float pitch = atan2f(-gf, sqrtf(gr * gr + gd * gd));
+    const float m[3] = { gMag.x, gMag.y, gMag.z };
+    float mf, mr, md;
+    if (!magFrameToFRD(m, &mf, &mr, &md)) return -1.0f;
 
     // INSLIB 의 ahrs_mag_detilt 를 그대로 옮긴 부분
     const float cr = cosf(roll),  sr = sinf(roll);
@@ -2185,10 +2259,53 @@ static float headingTiltDeg() {
     const float hx = ct * mf + st * tz;
     const float hy = ty;
 
-    float h = atan2f(-hy, hx) * 180.0f / (float)M_PI + gHdgOffsetDeg;
-    while (h < 0.0f)    h += 360.0f;
-    while (h >= 360.0f) h -= 360.0f;
-    return h;
+    const float h = hdg::wrap360(atan2f(-hy, hx) * 180.0f / (float)M_PI + gHdgOffsetDeg + gHdgDeclDeg);
+    return isfinite(h) ? h : -1.0f;
+}
+
+// 자력 좌표 벡터 → (앞, 오른쪽, 아래). 방위 축 설정을 쓴다. 설정이 잘못이면 false.
+static bool magFrameToFRD(const float v[3], float* f, float* r, float* d) {
+    const float dSg = magDownSign();
+    if (dSg == 0.0f) return false;
+    *f =  v[gHdgAxisB] * gHdgSignB;
+    *r = -v[gHdgAxisA] * gHdgSignA;
+    *d =  v[magDownAxis()] * dSg;
+    return true;
+}
+
+// 가속으로 잰 힐(φ)·피치(θ), 라디안. headingTiltDeg 와 같은 기준이다.
+static bool gravityRollPitch(float* roll, float* pitch) {
+    float a[3];
+    accInMagFrame(a);
+    float f, r, d;
+    if (!magFrameToFRD(a, &f, &r, &d)) return false;
+    const float gf = -f, gr = -r, gd = -d;          // 가속은 위를 가리킨다 → 뒤집어 중력
+    const float gn = sqrtf(gf * gf + gr * gr + gd * gd);
+    // ★ 가속도계가 중력만 잰다고 가정하는 식이다. 크기가 1 g 에서 0.15 g 넘게 벗어나면
+    //   운동 가속이 섞인 것이라 기울기를 못 믿는다. (크기가 1 g 여도 방향이 틀릴 수 있다 —
+    //   옆가속 0.2 g 면 15° 틀린다. 이 문턱은 명백한 경우만 거른다.)
+    if (gn < 0.2f || fabsf(gn - 1.0f) > 0.15f) return false;
+    *roll  = atan2f(gr, gd);
+    *pitch = atan2f(-gf, sqrtf(gr * gr + gd * gd));
+    return true;
+}
+
+// ── 뱃머리 방위 변화율 (°/s) ────────────────────────────────────────────
+//
+// ★ 옛 식은 "측정한 수직 둘레의 각속도" 였다. 그건 ψ̇ − φ̇·sinθ 라서 피치가 있으면
+//   힐이 바뀌는 것도 방위가 도는 것처럼 나왔다 (피치 20°, 힐 30°/s → −10.3°/s,
+//   실제 방위 변화 0. 2026-09-14 검산). 지금은 ZYX 오일러 방위 변화율을 쓴다.
+//     ψ̇ = (q·sinφ + r·cosφ) / cosθ        p·q·r = 앞·오른쪽·아래 둘레 각속도
+static float yawRateNow() {
+    if (!gImuOk) return 0.0f;
+    float roll, pitch;
+    if (!gravityRollPitch(&roll, &pitch)) return 0.0f;
+    float g[3];
+    gyrInMagFrame(g);
+    float p, q, r;
+    if (!magFrameToFRD(g, &p, &q, &r)) return 0.0f;
+    const float rate = hdg::eulerYawRate(p, q, r, roll, pitch);
+    return isfinite(rate) ? rate : 0.0f;
 }
 
 // 9축 한 줄 요약
@@ -2209,10 +2326,15 @@ static void printImuLine() {
                   currentHeelDeg(), hAx.text, currentPitchDeg(), pAx.text);
     // 두 방위를 나란히 찍는다. 어느 쪽을 쓸지 정하기 전까지는 재기만 한다.
     // (속도의 도플러 대 위치차분과 같은 방식이다)
-    if (gMagOk) {
+    if (magFresh()) {
         const float flat = headingDeg(), tilt = headingTiltDeg();
-        Serial.printf("   방위 비교  평평 %5.1f°  |  기울기보정 %5.1f°  |  차이 %+5.1f°\n",
-                      flat, tilt, wrap180(tilt - flat));
+        if (tilt >= 0.0f)
+            Serial.printf("   방위 비교  평평 %5.1f°  |  기울기보정 %5.1f°  |  차이 %+5.1f°\n",
+                          flat, tilt, wrap180(tilt - flat));
+        else
+            Serial.printf("   방위 비교  평평 %5.1f°  |  기울기보정 ---  (가속이 1 g 에서 벗어남)\n", flat);
+    } else if (gMagOk) {
+        Serial.println("   방위 비교  --- (자력 새 표본 없음)");
     }
 }
 
@@ -2225,10 +2347,10 @@ static void doLevel() {
     imuUpdate();
     gHeelOffsetDeg  = rawHeelDeg();
     gPitchOffsetDeg = rawPitchDeg();
-    gPrefs.begin("sail", false);
-    gPrefs.putFloat("heel_off2", gHeelOffsetDeg);
-    gPrefs.putFloat("pitch_off", gPitchOffsetDeg);
-    gPrefs.end();
+    const bool saved = prefs::writeWith(gPrefs, "sail", [](Preferences& p) {
+        return prefs::wrote(p.putFloat("heel_off2", gHeelOffsetDeg), sizeof(float)) &&
+               prefs::wrote(p.putFloat("pitch_off", gPitchOffsetDeg), sizeof(float));
+    });
 
     const AxisName hAx(gHeelAxis, gHeelSign), pAx(gPitchAxis, gPitchSign);
     Serial.println("──────────────────────────────────────────");
@@ -2237,7 +2359,8 @@ static void doLevel() {
                   hAx.text, gHeelOffsetDeg, currentHeelDeg());
     Serial.printf("  피치 가속 %s  기준각 %+.1f°  →  지금 %+.1f°\n",
                   pAx.text, gPitchOffsetDeg, currentPitchDeg());
-    Serial.println("  NVS 에 저장했습니다. 다시 구워도 남습니다.");
+    Serial.println(saved ? "  NVS 에 저장했습니다. 다시 구워도 남습니다."
+                         : "  ★ NVS 에 못 적었습니다 — 껐다 켜면 옛 기준각");
     Serial.println("──────────────────────────────────────────");
     Serial.println("  ★ 배를 물에 띄우고 평형일 때 다시 한 번 잡으세요.");
     Serial.println("    책상에서 잡은 기준은 배 위에서 맞지 않습니다.");
@@ -2249,7 +2372,7 @@ static void doImu() {
 
     if (!gImuOk) {
         Serial.println("  아직 안 붙었습니다. 다시 붙여 봅니다...");
-        if (!imuBegin()) {
+        if (!imuAttach("imu 명령")) {
             Serial.println("  여전히 응답 없음. 모듈이 덜 꽂혔는지 보세요.");
             Serial.println("──────────────────────────────────────────");
             return;
@@ -2263,12 +2386,19 @@ static void doImu() {
     Serial.println("  5초 동안 값을 보여줍니다. 보드를 좌우로 기울여 보세요.");
     Serial.println("  ─────────────────────────────────────");
 
+    // ★ FIFO 를 계속 비운다. imuUpdate() 만 부르면 FIFO 가 켜져 있을 때 가속·자이로를
+    //   안 읽어서 값이 멈춰 보이고, 그동안 FIFO 는 넘친다.
     uint32_t start = millis();
     while (millis() - start < 5000) {
+        const uint32_t t1 = millis();
+        while (millis() - t1 < 400) {
+            imuDrainFifo();
+            gpsPoll();
+            feedWatchdog();
+            delay(10);
+        }
         imuUpdate();
         printImuLine();
-        feedWatchdog();
-        delay(400);
     }
 
     Serial.println("──────────────────────────────────────────");
@@ -2290,7 +2420,7 @@ static void doCalib() {
     Serial.println("──────────────────────────────────────────");
     Serial.println("  자이로 0점을 다시 잡습니다. 보드를 움직이지 마세요.");
     Serial.println("  (기울어 있어도 괜찮습니다. 멈춰 있기만 하면 됩니다)");
-    if (calibrateGyro()) {
+    if (calibrateGyro(/*persist=*/true)) {
         Serial.println("  됐습니다. 이제 가만히 두면 자이로가 0 근처로 나옵니다.");
     } else {
         Serial.println("  다시 해보세요. 손을 떼고 보드가 멈춘 뒤에 치면 됩니다.");
@@ -2657,6 +2787,9 @@ static void controlSay(const char* line);          // 아래 "BLE 제어" 항목
 static void doSleepStat();                         // 아래 "잠자기 기록" 항목
 static void sleepLogToCard();
 static bool logStartNow(uint32_t prevSession = 0);  // 아래 "기록 (hlog)" 항목
+// 버튼·시리얼·켤 때 이어 시작·쓰기 실패 뒤 다시 걸기가 **모두** 이것으로 시작한다.
+// 결과를 같은 말로 찍고, 실패면 gRecFailed 를 세운다 (앱 배경 빨강).
+static bool recStartFrom(const char* who, uint32_t prev = 0);
 static void feedWatchdog();                        // 아래 "워치독" 항목
 
 static void buttonBegin() {
@@ -2727,6 +2860,7 @@ static void buttonPoll(uint32_t nowMs) {
             gBtnOwnsScreen = true;
             sail::displayHoldBar(btnPct(nowMs - gBtnDownAt), "기록 종료", "저장 중");
             Serial.println("[BTN] 길게 — 기록 종료");
+            gRecRestartAt = 0;       // 사람이 멈췄다
             hlog::stop();
         } else {
             // 아직 시작하지 않는다. 5초를 넘기면 끄기로 갈 사람일 수 있다.
@@ -2773,13 +2907,13 @@ static void buttonPoll(uint32_t nowMs) {
         if (gBtnStartOnUp) {
             gBtnStartOnUp = false;
             Serial.printf("[BTN] 놓음(%ums) — 기록 시작\n", (unsigned)held);
-            const uint32_t tS = millis();
-            const bool okS = logStartNow();
-            Serial.printf("[BTN] 기록 시작 %s — %ums 걸림\n",
-                          okS ? "됨" : "실패", (unsigned)(millis() - tS));
+            const bool okS = recStartFrom("단추");
             gBtnOwnsScreen = true;
-            gBtnScreenTill = nowMs + kBtnHintMs;
-            sail::displayNotice("기록 시작", nullptr);
+            // ★ 결과대로 보여준다. 옛 코드는 실패해도 "기록 시작" 을 띄웠다.
+            //   실패는 3초 보여준다. 물 위에서 한 번에 읽혀야 한다.
+            gBtnScreenTill = millis() + (okS ? kBtnHintMs : 3000);
+            sail::displayNotice(okS ? "기록 시작" : "기록 실패",
+                                okS ? nullptr : (gRecStartErrShort ? gRecStartErrShort : "원인 모름"));
             return;
         }
         if (gBtnLongDone) {                       // 2초에 이미 멈췄다
@@ -2830,15 +2964,36 @@ static void sleepLogToCard() {
 //
 // **화면이 필요한 작업이라 버튼으로 안 만들었다.** 몇 점 모았는지, 어디가
 // 비었는지, 끝나고 좋아졌는지를 봐야 한다. 그리고 버튼은 이미 셋이 차 있다.
-static void magCalSave() {
-    gPrefs.begin("sail", false);
-    gPrefs.putFloat("mag_ox", gMagOff[0]);
-    gPrefs.putFloat("mag_oy", gMagOff[1]);
-    gPrefs.putFloat("mag_oz", gMagOff[2]);
+// TXT 머리에 적을 방위 설정. 저장된 HLG 의 자력으로 당시 방위를 다시 구하려면 이게 필요하다.
+static char gSessNote[420];
+static void buildHeadingNote(char* out, size_t n) {
+    const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
+    snprintf(out, n,
+             "# 방위(화면·BLE·TXT): 평평 — atan2(자력 %s, 자력 %s) + 장착 오프셋 %+.2f° + 자기 편각 %+.2f°. 기울기 보정 없음\n"
+             "# 자력: HLG 의 mag 는 하드아이언을 뺀 값 — 뺀 오프셋 %.2f %.2f %.2f uT (반지름 %.1f, 잔차 %.2f)\n"
+             "# 가속→자력 축: 자력 X=가속 Y, Y=가속 X, Z=−가속 Z\n",
+             aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg,
+             gMagOff[0], gMagOff[1], gMagOff[2], gMagRadius, gMagResid);
+}
+// 기록 중 방위·자력 설정이 바뀌면 TXT 에 한 줄 남긴다. 옛 코드는 아무 흔적이 없었다.
+static void noteHeadingConfigChanged(const char* what) {
+    if (!hlog::recording()) return;
+    char line[240];
+    const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
+    snprintf(line, sizeof(line), "%s → 축 %s %s, 오프셋 %+.2f°, 편각 %+.2f°, 자력 오프셋 %.2f %.2f %.2f uT",
+             what, aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg, gMagOff[0], gMagOff[1], gMagOff[2]);
+    hlog::noteEvent(line);
+}
+
+static bool magCalSave() {
     // 반지름과 남은 흔들림도 남긴다. 다시 구워도 "얼마나 잘 맞췄나" 를 알아야 한다.
-    gPrefs.putFloat("mag_r",  gMagRadius);
-    gPrefs.putFloat("mag_res", gMagResid);
-    gPrefs.end();
+    return prefs::writeWith(gPrefs, "sail", [](Preferences& p) {
+        return prefs::wrote(p.putFloat("mag_ox", gMagOff[0]), sizeof(float)) &&
+               prefs::wrote(p.putFloat("mag_oy", gMagOff[1]), sizeof(float)) &&
+               prefs::wrote(p.putFloat("mag_oz", gMagOff[2]), sizeof(float)) &&
+               prefs::wrote(p.putFloat("mag_r",  gMagRadius), sizeof(float)) &&
+               prefs::wrote(p.putFloat("mag_res", gMagResid), sizeof(float));
+    });
 }
 
 /** 모은 점이 세 축으로 얼마나 퍼져 있나. 좁은 축이 덜 돌린 쪽이다. */
@@ -2897,8 +3052,9 @@ static void magCalCmd(const String& arg, char* out, size_t n) {
     if (arg == "clear") {
         gMagOff[0] = gMagOff[1] = gMagOff[2] = 0.0f;
         gMagRadius = gMagResid = 0.0f;
-        magCalSave();
-        snprintf(out, n, "magcal 지웠습니다 (치우침 0)");
+        const bool ok = magCalSave();
+        noteHeadingConfigChanged("magcal clear");
+        snprintf(out, n, ok ? "magcal 지웠습니다 (치우침 0)" : "magcal 지웠지만 보드에 못 적었습니다");
         return;
     }
     if (arg == "stop") {
@@ -2912,23 +3068,29 @@ static void magCalCmd(const String& arg, char* out, size_t n) {
                              "계속 돌리세요", gMagCalN);
             return;
         }
-        gMagCalOn = false;
-        // 맞추기 전 크기가 얼마나 흔들렸나. 이것과 뒤의 값을 견줘야 뜻이 있다.
-        float lo = 1e9f, hi = -1e9f;
-        for (int i = 0; i < gMagCalN; i++) {
-            const float x = gMagCalPts[i][0]*0.1f, y = gMagCalPts[i][1]*0.1f, z = gMagCalPts[i][2]*0.1f;
-            const float m = sqrtf(x*x + y*y + z*z);
-            if (m < lo) lo = m;   if (m > hi) hi = m;
-        }
-        if (!magCalSolve()) {
-            snprintf(out, n, "magcal 실패 — 점 %d개로는 부족합니다 (스무 개 넘게, 사방으로)",
-                     gMagCalN);
+        // ★ 후보를 따로 풀고 조건을 **모두** 통과해야만 쓴다 (magcal.h).
+        //   옛 코드는 풀리기만 하면 기존 보정을 덮어썼다. 수평으로 뱃머리만 돌린 점으로
+        //   z 중심이 38 µT 틀린 후보가 잔차 0.54 로 저장됐다 (2026-09-14 검산).
+        magcal::Fit fit;
+        const magcal::Verdict v =
+            magcal::fitAndJudge((const int16_t (*)[3])gMagCalPts, gMagCalN, &fit);
+        if (v != magcal::Verdict::Ok) {
+            snprintf(out, n, "magcal 안 씀 — %s | 후보 반지름 %.1f 잔차 %.2f 두께 %.1f uT | "
+                             "점 %d | 기존 보정 그대로%s",
+                     magcal::verdictText(v), fit.r, fit.resid, fit.thickness, gMagCalN,
+                     gMagCalN >= kMagCalMax ? " — magcal reset 뒤 사방으로 다시" : " — 계속 돌리세요");
             return;
         }
-        magCalSave();
-        snprintf(out, n, "magcal 저장 — 치우침 %.1f %.1f %.1f uT | "
-                         "크기 %.0f~%.0f → %.1f±%.2f uT | 점 %d",
-                 gMagOff[0], gMagOff[1], gMagOff[2], lo, hi, gMagRadius, gMagResid, gMagCalN);
+        gMagCalOn = false;
+        gMagOff[0] = fit.c[0]; gMagOff[1] = fit.c[1]; gMagOff[2] = fit.c[2];
+        gMagRadius = fit.r;
+        gMagResid  = fit.resid;
+        const bool saved = magCalSave();
+        noteHeadingConfigChanged("magcal stop");
+        snprintf(out, n, "magcal %s — 치우침 %.1f %.1f %.1f uT | 반지름 %.1f±%.2f uT | 두께 %.1f | 점 %d",
+                 saved ? "저장" : "적용(보드에 못 적음)",
+                 gMagOff[0], gMagOff[1], gMagOff[2], gMagRadius, gMagResid,
+                 fit.thickness, gMagCalN);
         return;
     }
     magCalStatus(out, n);
@@ -3018,9 +3180,12 @@ static void doSleepStat() {
 //
 // 5초 동안 두 방위를 계속 찍는다. 보드를 좌우로 기울이면서 본다.
 //
-//   보정한 쪽이 거의 안 움직인다        → 맞다
-//   보정한 쪽이 오히려 두 배로 흔들린다  → 아래 축 부호가 뒤집혔다
-//   둘이 똑같이 움직인다                → 보정이 안 들어가고 있다
+//   보정한 쪽이 덜 흔들린다  → 기울기 영향이 줄었다
+//
+// ★ 이 명령으로 **축·부호가 맞다고 확정할 수는 없다.** 아래 축 부호가 틀려도 기울여서
+//   생기는 흔들림은 0 이고, 대신 방위가 뱃머리 방향마다 틀린다 (2026-09-14 검산).
+//   축·부호 확인은 아는 방위에서 `hdg ref <참 방위>` 로 한다.
+// ★ 폭은 원형으로 잰다. max − min 은 359° 와 1° 사이를 358° 로 셌다.
 //
 // 뱃머리 방향은 그대로 두고 **기울이기만** 해야 한다. 돌리면서 기울이면
 // 무엇 때문에 바뀐 건지 못 가른다.
@@ -3034,14 +3199,15 @@ static void doHeadingTilt() {
                   gHdgSignB < 0 ? "-" : "+", nm[gHdgAxisB],
                   gHdgSignA > 0 ? "-" : "+", nm[gHdgAxisA],
                   magDownSign() < 0 ? "-" : "+", nm[d]);
-    Serial.println("  ※ 아래 축 부호는 오른손 법칙으로 정한 것이라 확인이 필요합니다.");
+    Serial.println("  ※ 힐은 보정에 쓰는 중력 기준입니다 (heel 축 설정이 아님).");
     Serial.println("  ──────────────────────────────────────");
     Serial.println("      힐     피치     평평     보정     차이    자력크기");
     const uint32_t t0 = millis();
-    float flatMin = 999, flatMax = -999, tiltMin = 999, tiltMax = -999;
+    float flatS[32], tiltS[32];
+    int flatN = 0, tiltN = 0, rows = 0;
     float magMin = 9999, magMax = -9999;
     const float yaw0 = gYawIntDeg;        // 100 Hz 로 쌓인 값을 읽기만 한다
-    float heelMin = 999, heelMax = -999;
+    float rollMin = 999, rollMax = -999;
     while (millis() - t0 < 5000) {
         // ★ FIFO 가 켜져 있으면 imuUpdate() 는 자력계만 갱신한다. 가속·자이로는
         //   FIFO 에서 오는데 그건 메인 루프가 퍼 온다. 여기서 안 퍼 오면
@@ -3050,53 +3216,43 @@ static void doHeadingTilt() {
         imuDrainFifo();
         imuUpdate();
         const float flat = headingDeg(), tilt = headingTiltDeg();
-        if (flat < flatMin) flatMin = flat;   if (flat > flatMax) flatMax = flat;
-        if (tilt < tiltMin) tiltMin = tilt;   if (tilt > tiltMax) tiltMax = tilt;
-        const float hh = currentHeelDeg();
-        if (hh < heelMin) heelMin = hh;   if (hh > heelMax) heelMax = hh;
+        if (flat >= 0.0f && flatN < 32) flatS[flatN++] = flat;
+        if (tilt >= 0.0f && tiltN < 32) tiltS[tiltN++] = tilt;
+        float roll = NAN, pitch = NAN;
+        if (gravityRollPitch(&roll, &pitch)) {
+            const float rd = roll * 180.0f / (float)M_PI;
+            if (rd < rollMin) rollMin = rd;
+            if (rd > rollMax) rollMax = rd;
+        }
         const float mm = sqrtf(gMag.x*gMag.x + gMag.y*gMag.y + gMag.z*gMag.z);
         if (mm < magMin) magMin = mm;   if (mm > magMax) magMax = mm;
         Serial.printf("  %+6.1f  %+6.1f   %5.1f°   %5.1f°   %+5.1f°   %5.1f\n",
-                      currentHeelDeg(), currentPitchDeg(), flat, tilt,
-                      wrap180(tilt - flat), mm);
-
+                      roll * 180.0f / (float)M_PI, pitch * 180.0f / (float)M_PI, flat, tilt,
+                      (flat >= 0.0f && tilt >= 0.0f) ? wrap180(tilt - flat) : NAN, mm);
+        ++rows;
         delay(250);
         feedWatchdog();
     }
+    const float flatSp = hdg::circularSpread(flatS, flatN);
+    const float tiltSp = hdg::circularSpread(tiltS, tiltN);
     Serial.println("  ──────────────────────────────────────");
-    Serial.printf("  흔들린 폭   평평 %.1f°   보정 %.1f°\n",
-                  flatMax - flatMin, tiltMax - tiltMin);
-    // ★ 충분히 기울이지 않았으면 판정하지 않는다.
-    //   기울기가 작으면 두 값이 원래 비슷하다. 그걸 보고 "부호가 뒤집혔다" 고
-    //   단정한 적이 있다 (2026-09-09). 조건 없는 판정은 판정이 아니다.
+    Serial.printf("  흔들린 폭(원형)   평평 %.1f° (%d/%d줄)   보정 %.1f° (%d/%d줄)\n",
+                  flatSp, flatN, rows, tiltSp, tiltN, rows);
     Serial.printf("  기울인 폭   %.0f°  (%.0f° 에서 %.0f° 까지)\n",
-                  heelMax - heelMin, heelMin, heelMax);
-    if (heelMax - heelMin < 40.0f) {
-        Serial.println("  ※ 기울기가 모자랍니다. 좌우로 40° 넘게 흔들어야 판정할 수 있습니다.");
-    } else if (tiltMax - tiltMin < (flatMax - flatMin) * 0.6f) {
-        Serial.println("  ★ 보정한 쪽이 훨씬 덜 흔들립니다 — 잘 되고 있습니다.");
-    } else if (tiltMax - tiltMin > (flatMax - flatMin) * 1.5f) {
-        Serial.println("  ★ 보정한 쪽이 더 흔들립니다 — 아래 축 부호를 의심하세요.");
+                  rollMax - rollMin, rollMin, rollMax);
+    if (rollMax - rollMin < 40.0f) {
+        Serial.println("  ※ 기울기가 모자랍니다. 좌우로 40° 넘게 흔들어야 비교할 수 있습니다.");
+    } else if (tiltN < rows / 2) {
+        Serial.println("  ※ 보정 방위가 절반 넘게 무효입니다 — 흔들 때 가속이 1 g 에서 0.15 g 넘게 벗어났습니다. 천천히.");
+    } else if (tiltSp < flatSp * 0.6f) {
+        Serial.println("  보정한 쪽이 덜 흔들립니다 — 기울기 영향은 줄었습니다.");
     } else {
-        Serial.println("  ※ 차이가 뚜렷하지 않습니다.");
+        Serial.println("  ※ 보정한 쪽이 덜 흔들리지 않습니다 — 축·치우침을 확인하세요.");
     }
+    Serial.println("  ★ 흔들림 폭으로는 축 부호를 확정할 수 없습니다. 아는 방위 네 곳에서 hdg ref <참 방위>.");
     // ── 손으로 기울이다 같이 돌지 않았나 ────────────────────────────────
-    //
-    // 사람 손으로 기울이면 살짝 돌기도 한다. 그러면 방위가 **진짜로** 바뀐 것이라
-    // 보정한 값이 움직이는 게 맞다. 그걸 오차로 세면 안 된다.
-    // 자이로로 아래 축을 도는 각을 모아서 얼마나 돌았는지 재 둔다.
+    // 자이로 100 Hz 적분 (뱃머리 방위 변화율 ψ̇ 를 모은 것 — yawRateNow).
     Serial.printf("  돌아간 각   %+.1f°  (자이로 100 Hz 적분)\n", gYawIntDeg - yaw0);
-    // ★ "자이로로 회전을 빼고 남은 오차" 를 찍었었는데 **없앴다.**
-    //
-    //   빼면 오히려 커졌다 (21.0° → 30.8°). 빼서 나빠지면 빼는 방법이 틀린 것이다.
-    //   이유는 표본 속도다. 이 명령은 자이로를 4 Hz 로 읽어 적분하는데, 손으로
-    //   흔들면 각속도가 그보다 훨씬 빨리 변한다. 0.25초에 한 번 찍은 값으로는
-    //   그 사이 움직임을 통째로 놓친다. 제대로 하려면 100 Hz 로 적분해야 하고
-    //   그건 이 명령 구조로는 안 된다.
-    //
-    //   ★ 그리고 뺄 필요도 없다. **평평 대 보정 비교는 손으로 돌려도 성립한다.**
-    //     배가 진짜로 X° 돌면 두 값이 똑같이 X° 움직인다. 그러니 흔들림 폭의
-    //     차이는 여전히 기울기 탓이다. 위의 비교 하나로 충분하다.
 
     // ── 자력계 크기가 일정한가 ──────────────────────────────────────────
     //
@@ -3226,13 +3382,23 @@ static void goToSleep(uint32_t testWakeSec) {
         hlog::stop();
         feedWatchdog();
     }
-
-    // 1b) SD 카드를 놓아준다.
+    // 사람이 껐다. 기록 중이 아니었어도 이어 시작 표시를 지운다.
+    // 저절로 멈춘 뒤 끄면 표시가 남아서, 다음에 켤 때 기록이 제멋대로 시작됐다.
     //
-    // ★ 카드는 3V3_S 가 아니라 VDD 에 물려 있다. 3V3_S 를 내려도 안 꺼진다.
-    //   [확인: 2026-09-08, `power off` 뒤에도 `sd` 가 카드를 찾고 글씨까지 썼다]
-    //   SPI 를 안 놓아주면 칩셀렉트가 눌린 채로 남아 카드가 계속 깨어 있다.
-    SD.end();
+    // ★ 단, 닫기가 아직 안 끝났으면(카드가 답이 없어 15초 초과) 표시를 남기고 카드도 안 뗀다.
+    //   파일이 열린 채라 끊긴 세션이 맞고, 일꾼이 쓰는 중에 SD.end() 를 부르면 해제된
+    //   메모리를 만질 수 있다 (2026-09-14 리뷰).
+    if (hlog::busy()) {
+        Serial.println("[SLEEP] ★ 기록 파일이 아직 안 닫혔습니다 — 이어 시작 표시를 남기고 카드는 안 뗍니다");
+    } else {
+        hlog::clearCutFlag();
+        // 1b) SD 카드를 놓아준다.
+        //
+        // ★ 카드는 3V3_S 가 아니라 VDD 에 물려 있다. 3V3_S 를 내려도 안 꺼진다.
+        //   [확인: 2026-09-08, `power off` 뒤에도 `sd` 가 카드를 찾고 글씨까지 썼다]
+        //   SPI 를 안 놓아주면 칩셀렉트가 눌린 채로 남아 카드가 계속 깨어 있다.
+        SD.end();
+    }
 
     // 2) 무전기. 안 재우면 자는 동안 혼자 듣느라 수 mA 를 먹는다.
     lora::sleep();
@@ -3572,8 +3738,10 @@ static hlog::NavSample buildNav(uint32_t nowMs) {
 
     a.battMv = (uint16_t)lroundf(gBattVolts * 1000.0f);
 
-    // 자력계 원본. 0.1 µT/LSB (헤더 mag_scale = 1)
-    if (gMagOk) {
+    // 자력. 0.1 µT/LSB (헤더 mag_scale = 1).
+    // ★ "원본" 이 아니다 — 하드아이언 오프셋을 뺀 값이다. 뺀 오프셋은 TXT 머리에 적는다.
+    //   새 표본이 없으면(400 ms) 0 으로 둔다.
+    if (magFresh()) {
         a.mag[0] = (int16_t)lroundf(gMag.x * 10.0f);
         a.mag[1] = (int16_t)lroundf(gMag.y * 10.0f);
         a.mag[2] = (int16_t)lroundf(gMag.z * 10.0f);
@@ -3609,11 +3777,29 @@ static void logWriteText(uint32_t nowMs) {
     t.sogPosKn = gSogFromPos;
     t.pvFlag   = (gPvAtMs && millis() - gPvAtMs < 3000) ? gPvVelFlag : 255;
     t.cogAccDeg = gPvCogAccDeg;
-    t.sogAccKn  = (gPvAtMs && millis() - gPvAtMs < 3000) ? gPvAccKn : -1.0f;
+    // 방금 잰 값(표식 4 이상)일 때만. 위성이 없으면 칩이 194 kn 같은 수를 채워 보낸다.
+    t.sogAccKn  = (gPvAtMs && millis() - gPvAtMs < 3000 && gPvVelValid) ? gPvAccKn : -1.0f;
     hlog::writeText(buildNav(nowMs), t);
 }
 
 bool logStartNow(uint32_t prevSession) {
+    gRecStartErr = nullptr;
+    gRecStartErrShort = nullptr;
+    // ★ SD 는 한 번에 한 주인만 쓴다.
+    //   WiFi 가 켜져 있으면 파일 서버가 카드를 붙인다 (netsrv sdUp). 그 상태에서 기록을
+    //   시작하면 WiFi 가 저절로 꺼질 때 SD.end() 가 기록 중인 카드를 내린다.
+    //   반대 방향(기록 중 WiFi 켜기)은 netsrv::startAP / startJoin 이 막는다.
+    //   기록이 WiFi 를 이긴다. 파일을 보내는 중만 아니면 WiFi 를 끄고 시작한다 — 앱이
+    //   4초마다 살아 있다고 알리는 동안은 보드가 WiFi 를 스스로 못 끄기 때문이다.
+    if (netsrv::mode() != netsrv::Mode::Off) {
+        if (netsrv::transferring()) {
+            gRecStartErr = "파일을 보내는 중입니다 — 끝나면 다시";
+            gRecStartErrShort = "파일 보내는 중";
+            return false;
+        }
+        Serial.println("[REC] WiFi 가 켜져 있어 끕니다 — 기록이 먼저다");
+        netsrv::stop();
+    }
     hlog::Header h;
     h.prevSession = prevSession;
     esp_read_mac(h.mac, ESP_MAC_WIFI_STA);
@@ -3637,7 +3823,14 @@ bool logStartNow(uint32_t prevSession) {
     h.pitchOff  = gPitchOffsetDeg;
     // 모듈에서 실제로 읽은 값만 적는다. 못 읽었으면 255(모름). NVS 는 안 본다.
     h.gnssDyn = gGpsDyModel;
-    if (!hlog::start(h)) return false;
+    buildHeadingNote(gSessNote, sizeof(gSessNote));
+    hlog::setSessionNote(gSessNote);
+    if (!hlog::start(h)) {
+        hlog::Status st; hlog::getStatus(&st);
+        gRecStartErr      = st.lastError      ? st.lastError      : "알 수 없음";
+        gRecStartErrShort = st.lastErrorShort ? st.lastErrorShort : "시작 실패";
+        return false;
+    }
 
     // 카드를 마운트하는 동안 FIFO 에 옛 값이 쌓인다. 그걸 그대로 쓰면
     // 세션 첫머리에 "기록 시작 전" 값이 섞여 들어간다. 비우고 시작한다.
@@ -3647,6 +3840,23 @@ bool logStartNow(uint32_t prevSession) {
         gFifoOverrun = 0;
     }
     return true;
+}
+
+static bool recStartFrom(const char* who, uint32_t prev) {
+    const uint32_t t0 = millis();
+    const bool ok = logStartNow(prev);
+    if (ok) {
+        hlog::Status st; hlog::getStatus(&st);
+        Serial.printf("[REC] 시작 (%s) — %s  %lums\n", who, st.path,
+                      (unsigned long)(millis() - t0));
+        gRecFailed = false;
+    } else {
+        Serial.printf("[REC] ★ 시작 못 함 (%s) — %s\n", who,
+                      gRecStartErr ? gRecStartErr : "알 수 없음");
+        gRecFailed = true;
+        if (prev) gRecFailSession = prev;
+    }
+    return ok;
 }
 
 // ── 한 바퀴에 얼마나 걸리나 (probe) ──────────────────────────────────────
@@ -3757,15 +3967,25 @@ static bool i2cPing(uint8_t addr) {
 
 // 1 Hz 로 부른다. 사라진 센서는 끄고, 돌아온 센서는 다시 붙인다.
 static void checkSensors() {
+    static uint32_t lostAt = 0, lastTry = 0;
     const bool imuNow = i2cPing(rak::kAddrImu);
     if (gImuOk && !imuNow) {
         gImuOk = false;
         gMagOk = false;
-        Serial.println("[IMU] 응답이 끊겼습니다 — 힐을 시뮬레이터 값으로 돌립니다");
-    } else if (!gImuOk && imuNow) {
-        Serial.println("[IMU] 다시 보입니다 — 붙입니다");
-        imuBegin();
-        applyGyrOffsets();
+        gFifoOn = false;                        // 칩이 사라졌다. FIFO 도 없다
+        lostAt = millis();
+        Serial.println("[IMU] 응답이 끊겼습니다 — 힐·9축은 무효로 내보냅니다");
+    } else if (!gImuOk && imuNow && millis() - lastTry >= 5000) {
+        lastTry = millis();        // 붙이기가 0.3초 루프를 잡으니 5초에 한 번만
+        if (imuAttach("다시 연결")) {
+            // 끊겨 있던 동안의 100 Hz 표본은 기록에 없다. 머리글 dropped 에 어림으로 더한다.
+            //   기록 시작 전에 끊긴 시간은 세지 않는다.
+            if (lostAt && hlog::recording()) {
+                const uint32_t from = (int32_t)(lostAt - hlog::recStartedMs()) > 0 ? lostAt : hlog::recStartedMs();
+                hlog::noteDropped((millis() - from) / 10);
+            }
+            lostAt = 0;
+        }
     }
 
     sail::displayHealthCheck();
@@ -3793,7 +4013,7 @@ static sail::TelemetryExtra buildExtra() {
     sail::TelemetryExtra e;
     e.gpsFix       = gGpsFix;
     e.imuOk        = gImuOk;
-    e.magOk        = gMagOk;
+    e.magOk        = magFresh();   // 붙어 있고 새 표본이 온다
     e.recording    = hlog::recording();
     e.recFailed    = gRecFailed;
     e.satellites   = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
@@ -3974,7 +4194,9 @@ static void controlLine(const char* raw) {
     String line(raw);
     line.trim();
     if (line.length() == 0) return;
-    Serial.printf("[CTL] ← %s\n", line.c_str());
+    // WiFi 비밀번호는 로그에 안 남긴다.
+    if (line.startsWith("wifi pass ")) Serial.println("[CTL] ← wifi pass ****");
+    else Serial.printf("[CTL] ← %s\n", line.c_str());
 
     char out[240];
 
@@ -4017,7 +4239,7 @@ static void controlLine(const char* raw) {
     // 시리얼에서 그냥 "wifi on" 이라고 쳐도 된다. 그때는 아무도 안 뺀다.
     if (line == "wifi on" || line == "wifi join" ||
         line.startsWith("wifi on ") || line.startsWith("wifi join ")) {
-        if (hlog::recording()) { controlSay("err wifi recording"); return; }
+        if (hlog::busy()) { controlSay("err wifi recording"); return; }
         String appId = "";
         {
             const int sp = line.indexOf(' ', 5);   // "wifi on" 의 두 번째 빈칸
@@ -4051,7 +4273,7 @@ static void controlLine(const char* raw) {
         return;
     }
     if (line == "wifi ap" || line.startsWith("wifi ap ")) {
-        if (hlog::recording()) { controlSay("err wifi recording"); return; }
+        if (hlog::busy()) { controlSay("err wifi recording"); return; }
         String apId = line.length() > 8 ? line.substring(8) : String("");
         apId.trim();
         // AP 는 이름도 주소도 미리 안다. 그대로 알려준다.
@@ -4257,9 +4479,29 @@ static void printHelp() {
     Serial.println("  help          이 도움말  (전체 목록은 저장소 COMMANDS.md)");
     Serial.println("──────────────────────────────────────────");
     Serial.println("  붙어 있는 것:  GPS 슬롯A · IMU 슬롯C · 화면 J12 · SD IO슬롯");
-    Serial.println("  값 뒤의 (GPS)(IMU)(SIM) 이 그 값의 출처입니다.");
-    Serial.println("    SIM = 위성을 못 잡아 시뮬레이터로 채운 값");
+    Serial.println("  값이 없으면 --- 로 나옵니다. 지어낸 값(시뮬레이터)은 없습니다.");
     Serial.println("──────────────────────────────────────────");
+}
+
+// SD 를 따로 붙이는 진단·목록 명령. 기록기나 파일 서버가 카드를 쥐고 있으면 안 된다.
+// 둘 다 같은 SD 객체를 쓰고, 누가 SD.end() 를 부르면 남의 파일이 끊긴다.
+static bool sdFreeFor(const char* what) {
+    if (hlog::busy()) {
+        Serial.printf("[SD] %s — 기록 중에는 못 합니다. rec off 먼저.\n", what);
+        return false;
+    }
+    if (netsrv::mode() != netsrv::Mode::Off) {
+        Serial.printf("[SD] %s — WiFi 가 켜져 있어 파일 서버가 카드를 씁니다. wifi off 먼저.\n", what);
+        return false;
+    }
+    return true;
+}
+
+// 몇 초씩 루프를 붙잡는 진단. 기록 중에는 막는다 — 그동안 NAV·텍스트가 밀린다.
+static bool blockingDiagOk(const char* what) {
+    if (!hlog::busy()) return true;
+    Serial.printf("[진단] %s — 기록 중에는 몇 초씩 루프를 붙잡는 진단을 막습니다. rec off 먼저.\n", what);
+    return false;
 }
 
 static void handleCommand(String line) {
@@ -4271,7 +4513,7 @@ static void handleCommand(String line) {
     if (line == "scan")                { doScan();     return; }
     if (line == "batt")                { printBattery(); return; }
     if (line == "oledw")               { doOledWidth(); return; }
-    if (line == "hdgtilt")             { doHeadingTilt(); return; }
+    if (line == "hdgtilt")             { if (blockingDiagOk("hdgtilt")) doHeadingTilt(); return; }
     if (line == "sleepstat")           { doSleepStat(); return; }
     if (line == "magcal" || line.startsWith("magcal ")) {
         char msg[200];
@@ -4355,8 +4597,8 @@ static void handleCommand(String line) {
         }
         return;
     }
-    if (line == "imu")                 { doImu();      return; }
-    if (line == "sd")                  { doSd();       return; }
+    if (line == "imu")                 { if (blockingDiagOk("imu")) doImu(); return; }
+    if (line == "sd")                  { if (sdFreeFor("sd")) doSd(); return; }
     // 어떤 핀에 버튼을 달 수 있나. 그 핀을 누가 이미 쓰고 있는지 재 본다.
     // 짐작하지 않는다 — GPS 가 슬롯 A 의 IO1 로 PPS 를 낼 수도 있다.
     if (line.startsWith("pin ")) {
@@ -4445,7 +4687,7 @@ static void handleCommand(String line) {
         arg.trim(); arg.toLowerCase();
 
         if (arg == "join") {
-            if (hlog::recording()) {
+            if (hlog::busy()) {
                 Serial.println("[NET] 기록 중입니다. rec off 먼저 하세요.");
                 return;
             }
@@ -4517,18 +4759,16 @@ static void handleCommand(String line) {
         arg.toLowerCase();
 
         if (arg == "on" || arg == "start") {
-            if (logStartNow()) {
-                hlog::Status st; hlog::getStatus(&st);
-                Serial.printf("[REC] 시작 — %s\n", st.path);
-            } else {
-                hlog::Status st; hlog::getStatus(&st);
-                Serial.printf("[REC] 시작 못 함 — %s\n",
-                              st.lastError ? st.lastError : "알 수 없음");
-            }
+            recStartFrom("rec on");
             return;
         }
         if (arg == "off" || arg == "stop") {
-            hlog::stop();
+            gRecRestartAt = 0;       // 사람이 멈췄다. 예약된 다시 걸기를 버린다
+            if (!hlog::stop()) {
+                hlog::Status st; hlog::getStatus(&st);
+                Serial.printf("[REC] ★ 정상 종료 아님 — %s\n",
+                              st.lastError ? st.lastError : "알 수 없음");
+            }
             // 사람이 멈췄다. 저절로 멈춘 표시(앱 빨간 배경)와 다시 걸기 계획을 내린다.
             gRecFailed = false; gRecRestartAt = 0;
             return;
@@ -4547,6 +4787,7 @@ static void handleCommand(String line) {
             gRecFailLine[0] = '\0';
             hlog::noteLastFail(nullptr);
             gRecFailed = false; gRecRestartAt = 0; gRecRestarts = 0;
+            if (!hlog::busy()) hlog::clearCutFlag();
             Serial.println("[REC] 멈춤 기록을 지웠습니다");
             return;
         }
@@ -4556,10 +4797,10 @@ static void handleCommand(String line) {
             Serial.printf("[REC] 시험 — 다음 %ld번 쓰기를 실패로 흉내 냅니다\n", n);
             return;
         }
-        if (arg == "ls" || arg == "list")  { hlog::listFiles(); return; }
+        if (arg == "ls" || arg == "list")  { if (sdFreeFor("rec ls")) hlog::listFiles(); return; }
         if (arg.startsWith("rm ")) {
             const long n = arg.substring(3).toInt();
-            hlog::removeSession((uint32_t)(n < 0 ? 0 : n));
+            if (sdFreeFor("rec rm")) hlog::removeSession((uint32_t)(n < 0 ? 0 : n));
             return;
         }
         if (arg.startsWith("tail") || arg.startsWith("head")) {
@@ -4577,12 +4818,12 @@ static void handleCommand(String line) {
             }
             if (n < 1) n = 1;
             if (n > 400) n = 400;
-            hlog::tail((uint32_t)(sess < 0 ? 0 : sess), (uint16_t)n, head);
+            if (sdFreeFor("rec tail")) hlog::tail((uint32_t)(sess < 0 ? 0 : sess), (uint16_t)n, head);
             return;
         }
         if (arg == "check" || arg.startsWith("check ")) {
             const long n = (arg.length() > 6) ? arg.substring(6).toInt() : 0;
-            hlog::verify((uint32_t)(n < 0 ? 0 : n));
+            if (sdFreeFor("rec check")) hlog::verify((uint32_t)(n < 0 ? 0 : n));
             return;
         }
 
@@ -4643,7 +4884,7 @@ static void handleCommand(String line) {
         long n = (line.length() > 8) ? line.substring(8).toInt() : 3600;
         if (n < 100) n = 100;
         if (n > 2000000) n = 2000000;
-        doSdBench((uint32_t)n);
+        if (sdFreeFor("sdbench")) doSdBench((uint32_t)n);
         return;
     }
     if (line == "fix")                 { doFix();      return; }
@@ -4675,13 +4916,47 @@ static void handleCommand(String line) {
             return false;
         };
 
-        if (arg.startsWith("off")) {
+        if (arg.startsWith("off") || arg.startsWith("decl")) {
+            // ★ 숫자만 받고 범위를 본다. 옛 코드는 "abc" 를 0 으로, 1e10 을 그대로 저장했고
+            //   1e10 이면 방위 정규화가 끝나지 않아 루프가 멎었다 (켤 때마다 되풀이).
+            const bool isDecl = arg.startsWith("decl");
+            String v = arg.substring(isDecl ? 4 : 3); v.trim();
+            float deg = 0.0f;
+            const float lim = isDecl ? 30.0f : 360.0f;
+            if (!hdg::parseNumber(v.c_str(), &deg) || deg < -lim || deg > lim) {
+                if (isDecl) Serial.println("  hdg decl <도>   자기 편각, 동편 +·서편 − (-30~30). 예) hdg decl -8.5");
+                else        Serial.println("  hdg off <도>    장착 오프셋 (-360~360). 예) hdg off 12.5");
+                return;
+            }
+            if (!isDecl) deg = hdg::wrap180(deg);
+            (isDecl ? gHdgDeclDeg : gHdgOffsetDeg) = deg;
+            const bool ok = prefs::writeWith(gPrefs, "sail", [&](Preferences& p) {
+                return prefs::wrote(p.putFloat(isDecl ? "hdg_decl" : "hdg_off", deg), sizeof(float));
+            });
+            noteHeadingConfigChanged(isDecl ? "hdg decl" : "hdg off");
+            Serial.printf("[IMU] %s %+.2f°%s\n", isDecl ? "자기 편각" : "장착 오프셋", deg,
+                          ok ? "" : " — ★ 보드에 못 적었습니다");
+        } else if (arg.startsWith("ref")) {
+            // 아는 방위(참 방위)에 대고 두 방위의 오차를 본다. 네 방향에서 해야 뜻이 있다.
             String v = arg.substring(3); v.trim();
-            gHdgOffsetDeg = v.length() ? v.toFloat() : 0.0f;
-            gPrefs.begin("sail", false);
-            gPrefs.putFloat("hdg_off", gHdgOffsetDeg);
-            gPrefs.end();
-            Serial.printf("[IMU] 방위 0점 보정 %+.1f°\n", gHdgOffsetDeg);
+            float ref = 0.0f;
+            if (!hdg::parseNumber(v.c_str(), &ref) || ref < 0.0f || ref >= 360.0f) {
+                Serial.println("  hdg ref <참 방위 0~359>   예) 부두 방향이 045° 면 hdg ref 45");
+                return;
+            }
+            imuDrainFifo();
+            imuUpdate();
+            const float flat = headingDeg(), tilt = headingTiltDeg();
+            Serial.println("──────────────────────────────────────────");
+            if (flat >= 0.0f) Serial.printf("  기준 %.1f°   평평 %.1f° (오차 %+.1f°)\n", ref, flat, wrap180(flat - ref));
+            else              Serial.printf("  기준 %.1f°   평평 --- (자력 새 표본 없음)\n", ref);
+            if (tilt >= 0.0f) Serial.printf("               보정 %.1f° (오차 %+.1f°)\n", tilt, wrap180(tilt - ref));
+            else              Serial.println("               보정 --- (자력 없음 또는 가속이 1 g 에서 벗어남)");
+            Serial.println("  수평으로 두고 0°·90°·180°·270° 네 방향에서 해 보세요.");
+            Serial.println("    오차가 네 방향 모두 비슷하다   → 상수다. hdg off / hdg decl 로 뺀다");
+            Serial.println("    방향마다 다르다 (특히 부호가 바뀐다) → 축·부호·자력 치우침 문제다");
+            Serial.println("──────────────────────────────────────────");
+            return;
         } else if (arg.length() > 0) {
             const int sp = arg.indexOf(' ');
             if (sp <= 0) {
@@ -4701,19 +4976,32 @@ static void handleCommand(String line) {
                 return;
             }
             gHdgAxisA = a; gHdgAxisB = b; gHdgSignA = sa; gHdgSignB = sb;
-            gPrefs.begin("sail", false);
-            gPrefs.putUChar("hdg_a", a);  gPrefs.putUChar("hdg_b", b);
-            gPrefs.putChar("hdg_sa", sa < 0 ? -1 : 1);
-            gPrefs.putChar("hdg_sb", sb < 0 ? -1 : 1);
-            gPrefs.end();
+            const bool ok = prefs::writeWith(gPrefs, "sail", [&](Preferences& p) {
+                return prefs::wrote(p.putUChar("hdg_a", a), 1) && prefs::wrote(p.putUChar("hdg_b", b), 1) &&
+                       prefs::wrote(p.putChar("hdg_sa", sa < 0 ? -1 : 1), 1) &&
+                       prefs::wrote(p.putChar("hdg_sb", sb < 0 ? -1 : 1), 1);
+            });
+            if (!ok) Serial.println("  ★ 보드에 못 적었습니다 — 껐다 켜면 옛 축");
+            noteHeadingConfigChanged("hdg 축");
         }
 
         imuUpdate();
         const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
         Serial.println("──────────────────────────────────────────");
         Serial.printf("  지금 자력  %+.1f %+.1f %+.1f µT\n", gMag.x, gMag.y, gMag.z);
-        Serial.printf("  방위  atan2(자력 %s, 자력 %s) %+.1f°  →  %.1f°\n",
-                      aAx.text, bAx.text, gHdgOffsetDeg, headingDeg());
+        const float hNow = headingDeg();
+        if (hNow >= 0.0f)
+            Serial.printf("  방위  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  %.1f°\n",
+                          aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg, hNow);
+        else
+            Serial.printf("  방위  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  --- (자력 새 표본 없음)\n",
+                          aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg);
+        Serial.printf("  자력 표본  새 %lu · 반복 %lu · 짧음 %lu · 넘침 %lu · 0벡터 %lu · 마지막 새 표본 %s\n",
+                      (unsigned long)gMagCount[0], (unsigned long)gMagCount[1], (unsigned long)gMagCount[2],
+                      (unsigned long)gMagCount[3], (unsigned long)gMagCount[4],
+                      gMagFreshness.lastChangeMs ? (String(millis() - gMagFreshness.lastChangeMs) + " ms 전 바뀜").c_str() : "없음");
+        Serial.printf("  공장 감도값 ASA %02X %02X %02X  →  계수 %.4f %.4f %.4f\n",
+                      gImu.asaRaw(0), gImu.asaRaw(1), gImu.asaRaw(2), gImu.asa(0), gImu.asa(1), gImu.asa(2));
         Serial.println("──────────────────────────────────────────");
         Serial.println("  케이스를 평평하게 두고 제자리에서 한 바퀴 돌려 보세요.");
         Serial.println("  수평인 두 축은 크게 오르내리고, 위아래 축은 거의 그대로입니다.");
@@ -4777,6 +5065,7 @@ static void handleCommand(String line) {
 
     // GPS 갱신율. 밖에서 값이 굼뜨면 올리고, 문장이 깨지면 내린다.
     if (line.startsWith("gpshz ")) {
+        if (!blockingDiagOk("gpshz")) return;
         long hz = line.substring(6).toInt();
         if (hz != 1 && hz != 2 && hz != 5 && hz != 10) {
             Serial.println("[GPS] 1, 2, 5, 10 중에서 고르세요. 예) gpshz 5");
@@ -4831,21 +5120,29 @@ static void handleCommand(String line) {
         return;
     }
 
-    if (line == "gps")                 { peekGps(5, /*slotD=*/false); return; }
-    if (line == "gps d" || line == "gps D") { peekGps(5, /*slotD=*/true); return; }
+    if (line == "gps")                 { if (blockingDiagOk("gps")) peekGps(5, /*slotD=*/false); return; }
+    if (line == "gps d" || line == "gps D") { if (blockingDiagOk("gps d")) peekGps(5, /*slotD=*/true); return; }
 
     // gpscfg      — 모듈에 실제로 걸린 설정을 되물어본다
     // gpscfg sea  — 요트용으로 바꾼다 (움직임=선박, 정지 문턱=0)
-    if (line == "gpscfg") { gpsCfgDump(); return; }
+    if (line == "gpscfg") { if (blockingDiagOk("gpscfg")) gpsCfgDump(); return; }
     // navpv  — NMEA 거치기 전 속도를 RMC 와 나란히 본다
     // dead <kn>  잡음 바닥. 이보다 작은 속도는 0 으로 보여준다.
     if (line.startsWith("dead")) {
         String a = line.substring(4); a.trim();
         if (a.length() > 0) {
+            // toFloat() 은 글자가 아니어도 0 을 돌려준다. 숫자로 시작하는지 먼저 본다.
+            const bool numeric = isdigit((unsigned char)a[0]) || a[0] == '.';
             const float v = a.toFloat();
-            if (v < 0.0f || v > 2.0f) { Serial.println("  0 ~ 2.0 kn 사이로 주세요"); return; }
+            if (!numeric || !isfinite(v) || !prefs::inRange(v, 0.0f, 2.0f)) {
+                Serial.println("  0 ~ 2.0 kn 사이 숫자로 주세요"); return;
+            }
             gDeadbandKn = v;
-            gPrefs.putFloat("dead_kn", gDeadbandKn);
+            // ★ 여닫고 쓰고 되는지 본다. 옛 코드는 begin 없이 put 해서 재부팅하면 돌아갔다.
+            if (!prefs::writeWith(gPrefs, "sail", [v](Preferences& p) {
+                    return prefs::wrote(p.putFloat("dead_kn", v), sizeof(float)); })) {
+                Serial.println("  ★ 보드에 못 적었습니다 — 껐다 켜면 옛 값으로 돌아갑니다");
+            }
         }
         Serial.println("──────────────────────────────────────────");
         Serial.printf("  잡음 바닥  %.2f kn — 이보다 작으면 0 으로 보여줍니다\n", gDeadbandKn);
@@ -4861,11 +5158,15 @@ static void handleCommand(String line) {
     if (line.startsWith("smooth")) {
         String a = line.substring(6); a.trim();
         if (a.length() > 0) {
+            if (a.length() != 1 || !isdigit((unsigned char)a[0])) { Serial.println("  0~5 중에서 고르세요"); return; }
             const int lv = a.toInt();
-            if (lv < 0 || lv > 5) { Serial.println("  0~5 중에서 고르세요"); return; }
+            if (!prefs::inRange(lv, 0, 5)) { Serial.println("  0~5 중에서 고르세요"); return; }
             gDampLevel = (uint8_t)lv;
-            gPrefs.putUChar("damp", gDampLevel);
             dampingReset();
+            if (!prefs::writeWith(gPrefs, "sail", [lv](Preferences& p) {
+                    return prefs::wrote(p.putUChar("damp", (uint8_t)lv), 1); })) {
+                Serial.println("  ★ 보드에 못 적었습니다 — 껐다 켜면 옛 값으로 돌아갑니다");
+            }
         }
         Serial.println("──────────────────────────────────────────");
         Serial.printf("  다듬기 세기  %u단계  (시상수 %.1f초)\n",
@@ -4881,11 +5182,12 @@ static void handleCommand(String line) {
     }
 
     if (line == "sog")     { sogStatusPrint(); return; }
-    if (line == "navpv")   { gpsNavPv(8);  return; }
-    if (line == "navpv l") { gpsNavPv(40); return; }
+    if (line == "navpv")   { if (blockingDiagOk("navpv")) gpsNavPv(8);  return; }
+    if (line == "navpv l") { if (blockingDiagOk("navpv l")) gpsNavPv(40); return; }
 
     // gpscfg mode <0~7>   움직임 종류를 바꾼다 (4=선박, 2=보행, 0=휴대)
     if (line.startsWith("gpscfg mode ")) {
+        if (!blockingDiagOk("gpscfg mode")) return;
         const int m = line.substring(12).toInt();
         if (m < 0 || m > 7) { Serial.println("  0~7 중에서 고르세요"); return; }
         gpsCfgSetNavx(true, (uint8_t)m, false, 0.0f);
@@ -4912,6 +5214,7 @@ static void handleCommand(String line) {
 
     // 붙어 있는 것을 한 번에 훑는다. 보드를 처음 구웠을 때 이것부터 친다.
     if (line == "check") {
+        if (!sdFreeFor("check") || !blockingDiagOk("check")) return;
         Serial.println();
         Serial.println("════ 모듈 전체 점검 ════");
         printIdentity();
@@ -5181,14 +5484,7 @@ static void resumeRecordingIfCut() {
 
     Serial.printf("[REC] 지난 세션 %u 가 못 닫히고 끊겼습니다 — 이어서 시작합니다 (%u번째)\n",
                   (unsigned)prev, tries);
-    if (logStartNow(prev)) {
-        gResumeTries = tries;
-    } else {
-        hlog::Status st; hlog::getStatus(&st);
-        Serial.printf("[REC] 이어 시작 못 함 — %s\n", st.lastError ? st.lastError : "알 수 없음");
-        gRecFailed = true;          // 기록할 줄 알았는데 안 돌고 있다 → 앱에 알린다
-        gRecFailSession = prev;
-    }
+    if (recStartFrom("켤 때 이어 시작", prev)) gResumeTries = tries;
 }
 
 // ── 기록이 저절로 멈췄을 때 (2026-09-13) ─────────────────────────────────
@@ -5205,14 +5501,16 @@ static constexpr uint32_t kRecRestartOkMs  = 600000;
 static void recFailTick(uint32_t now) {
     hlog::FailInfo f;
     if (hlog::takeFailure(&f)) {
+        static const char* kKind[] = {"?", "쓰기 실패", "카드 빠짐", "닫으면서 다 못 씀", "닫기 시간 초과", "머리글 못 고침"};
+        const char* kind = (f.kind >= 1 && f.kind <= 5) ? kKind[f.kind] : "?";
         snprintf(gRecFailLine, sizeof(gRecFailLine),
-                 "세션 %u %u분%u초째 %s%s | 쓸것 %u 쓴것 %u | errno %d %s | 다시쓰기 %u번 | 카드 %s | %.2fV | 누적 %.1fMB",
+                 "세션 %u %u분%u초째 %s%s | 쓸것 %u 쓴것 %u | errno %d %s | 다시쓰기 %u번 | 카드 %s | %.2fV | 누적 %.1fMB | 못 쓰고 버림 %lu바이트",
                  (unsigned)f.session, (unsigned)(f.recSec / 60), (unsigned)(f.recSec % 60),
-                 f.kind == 2 ? "카드 빠짐" : "쓰기 실패", f.fake ? "(시험)" : "",
+                 kind, f.fake ? "(시험)" : "",
                  (unsigned)f.want, (unsigned)f.wrote,
                  f.err, f.err ? strerror(f.err) : "(이유 안 줌)",
                  (unsigned)f.tries, f.card ? "있음" : "없음",
-                 gBattVolts, f.bytes / 1048576.0f);
+                 gBattVolts, f.bytes / 1048576.0f, (unsigned long)f.lost);
         Serial.printf("[REC] ★ 기록이 저절로 멈췄습니다 — %s\n", gRecFailLine);
 
         Preferences p;
@@ -5222,9 +5520,14 @@ static void recFailTick(uint32_t now) {
         p.end();
         hlog::noteLastFail(gRecFailLine);
 
-        gRecFailed      = true;
-        gRecFailSession = f.session;
-        gRecRestartAt   = now + kRecRestartGapMs;
+        // 다시 거는 건 기록 중에 저절로 끊긴 경우(쓰기 실패·카드 빠짐)뿐이다.
+        // 닫으면서 난 실패(3·4·5)와 사람이 이미 rec off 를 친 경우는 기록만 남긴다.
+        const bool autoStop = (f.kind == 1 || f.kind == 2) && !f.userStopped;
+        if (autoStop && !hlog::recording()) {
+            gRecFailed      = true;
+            gRecFailSession = f.session;
+            gRecRestartAt   = now + kRecRestartGapMs;
+        }
         return;
     }
 
@@ -5237,18 +5540,19 @@ static void recFailTick(uint32_t now) {
     if (!gRecFailed || gRecRestartAt == 0 || now < gRecRestartAt) return;
     if (gRecRestarts >= kRecRestartMax) {
         gRecRestartAt = 0;
+        // ★ 켜면 이어 시작 표시도 지운다. 안 지우면 다음에 켜는 순간 느닷없이
+        //   REC 가 뜬다 (2026-09-14 세션 58 — 시험 세션 57 을 이어받았다).
+        //   멈춘 사실은 화면 REC FAIL · 앱 빨강 · NVS rec_fail 로 이미 알렸다.
+        hlog::clearCutFlag();
         Serial.printf("[REC] ★ 다시 걸기를 %u번 했는데 안 됩니다 — 멈춘 채로 둡니다\n", gRecRestarts);
         return;
     }
     ++gRecRestarts;
     Serial.printf("[REC] 새 파일로 다시 겁니다 (%u번째, 앞 세션 %u)\n",
                   gRecRestarts, (unsigned)gRecFailSession);
-    if (logStartNow(gRecFailSession)) {
+    if (recStartFrom("쓰기 실패 뒤 다시 걸기", gRecFailSession)) {
         gRecRestartAt = 0;
-        gRecFailed    = false;
     } else {
-        hlog::Status st; hlog::getStatus(&st);
-        Serial.printf("[REC] 다시 걸기 실패 — %s\n", st.lastError ? st.lastError : "알 수 없음");
         gRecRestartAt = now + kRecRestartGapMs;
     }
 }
@@ -5362,14 +5666,16 @@ void setup() {
 
     buttonBegin();
 
-    if (imuBegin()) {
-        imuFifoBegin();
-        Serial.printf("[IMU] MPU-9250 붙음 | 자력계 %s\n",
-                      gMagOk ? "OK" : "응답 없음");
-        applyGyrOffsets();   // 지난번에 잡아둔 0점을 먼저 넣고
-        calibrateGyro();     // 지금 다시 잡아본다 (흔들리면 지난 값 그대로)
+    if (gGyrNeedSave) {
+        const bool ok = saveGyrOffsets();
+        Serial.printf("[IMU] 저장된 자이로 0점을 새 단위(±250 원시)로 옮겼습니다%s\n",
+                      ok ? "" : " — ★ 다시 적기 실패 (다음 부팅에 또 옮깁니다)");
+        gGyrNeedSave = !ok;
+    }
+    if (imuAttach("부팅")) {
+        calibrateGyro(/*persist=*/false);   // 이번 부팅만. 저장값과 크게 다르면 안 쓴다
     } else {
-        Serial.println("[IMU] !! 응답 없음 — 힐은 시뮬레이터 값을 씁니다");
+        Serial.println("[IMU] !! 응답 없음 — 힐·9축은 무효로 보냅니다. 꽂히면 저절로 붙입니다");
     }
 
     // 버스가 물려도 오래 붙들려 있지 않게 한다. 기본값도 50 ms 지만
@@ -5389,8 +5695,8 @@ void setup() {
     // 무전기가 없거나 실패해도 보드는 그대로 돌아간다.
     lora::begin();
 
-    Serial.println("[SRC] SOG/COG 는 GPS 가 위성을 잡으면 실측, 못 잡으면 시뮬레이터");
-    Serial.println("      HEEL 은 IMU 가 붙어 있으면 언제나 실측");
+    Serial.println("[SRC] SOG/COG 는 GPS 가 위성을 잡았을 때만 값이 있습니다 (못 잡으면 무효)");
+    Serial.println("      HEEL·9축은 IMU 가 붙어 있을 때만 값이 있습니다");
 
     gLatest = buildTelemetry(millis());
 
@@ -5503,6 +5809,20 @@ void loop() {
         secDone(gStLog, micros() - t);
     }
 
+    // 2b) 항법 10 Hz — GNSS 갱신과 SD NAV 기록. BLE 주기(hz 명령)와 따로 돈다.
+    //   ★ 전에는 notify 타이머 안에 있어서 hz 1 이면 NAV 도 1 Hz 로 적히는데 머리글에는
+    //     늘 10 Hz(kRateNav) 라고 적혔다. 이제 머리글 값과 실제 주기가 같다.
+    {
+        static uint32_t lastNav = 0;
+        const uint32_t navMs = 1000u / hlog::kRateNav;
+        if (now - lastNav >= navMs) {
+            lastNav += navMs;
+            if (now - lastNav >= navMs * 5) lastNav = now;
+            gpsUpdateFix();
+            if (hlog::recording()) logWriteNav(now);
+        }
+    }
+
     // 3) gNotifyPeriodMs 주기 — 값 조립 + characteristic 갱신 + notify
     // ★ 칸을 더해 나간다. `lastNotify = now` 로 두면 한 바퀴(2.8 ms)만큼씩
     //   밀려서 9.85 Hz 가 나왔다 (실측). 많이 밀렸으면 지금부터 다시 센다.
@@ -5510,8 +5830,6 @@ void loop() {
         const uint32_t tN = micros();
         lastNotify += gNotifyPeriodMs;
         if (now - lastNotify >= gNotifyPeriodMs * 5) lastNotify = now;
-        gpsUpdateFix();
-        if (hlog::recording()) logWriteNav(now);
         gLatest = buildTelemetry(now);
 
         // 12바이트 뒤에 9축과 GPS 상태를 덧붙여 보낸다. 옛 앱은 앞 12바이트만

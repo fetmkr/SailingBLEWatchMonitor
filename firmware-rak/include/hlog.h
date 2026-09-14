@@ -14,6 +14,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "hlog_write.h"
+
 namespace hlog {
 
 // ── 크기와 표식 ──────────────────────────────────────────────────────────
@@ -240,6 +242,9 @@ struct Status {
     uint32_t maxFillPct  = 0;
     uint64_t freeBytes   = 0;
     const char* lastError = nullptr;
+    const char* lastErrorShort = nullptr;  // 화면 한 줄용 ("카드 없음" 등)
+    uint8_t  state       = 0;     // RecState
+    uint32_t lostBytes   = 0;     // 마지막으로 닫을 때 못 쓰고 버린 바이트
 };
 
 // ── 끊겼는지 표시 ────────────────────────────────────────────────────────
@@ -257,7 +262,9 @@ void begin();                        // setup() 에서 한 번. 쓰기 작업을
 // 램과 함께 날아가므로, **다음 세션 파일에 남겨서** 나중에 찾을 수 있게 한다.
 void noteBootReason(const char* why);
 bool start(const Header& h);
-void stop();
+// 멈추고 **다 쓰고 닫힌 것까지 확인**한다. 참이면 정상 종료가 확정된 것.
+// 거짓이면 이유가 Status.lastError 에 있다 (닫기 시간 초과·못 쓴 바이트·머리글 실패).
+bool stop();
 void writeNav(const NavSample& s);   // 10 Hz
 void writeImu(const ImuSample& s);   // 100 Hz
 void writeText(const NavSample& s, const TextSample& t); // 10초에 한 번
@@ -266,6 +273,11 @@ void mark();                         // 다음 NAV 줄에 마킹 표식
 // 첫 fix 때 한 번 부른다. 세션을 닫을 때 머리글에 박는다.
 void noteUtcStart(uint32_t epochSec, uint16_t ms);
 bool recording();
+// 기록기가 카드를 쥐고 있나 (쓰는 중이거나 닫는 중). 이때는 다른 누구도 SD 를 만지면 안 된다.
+bool busy();
+RecState state();
+// 기록에 못 들어간 표본 수를 더한다 (IMU FIFO 넘침 등). 머리글 dropped 에 들어간다.
+void noteDropped(uint32_t rows);
 void getStatus(Status* out);
 void healthCheck();                  // 1 Hz. 카드가 빠졌는지 본다
 
@@ -275,7 +287,9 @@ void healthCheck();                  // 1 Hz. 카드가 빠졌는지 본다
 // 멈추는 길이었는데, 이유를 램에만 들고 있다가 재부팅에 날렸다.
 // 이제 일꾼이 여기에 담고, 루프가 꺼내서 NVS 와 다음 세션 TXT 에 남긴다.
 struct FailInfo {
-    uint8_t  kind    = 0;   // 1 쓰기 실패 · 2 기록 중 카드 빠짐
+    // 1 쓰기 실패 · 2 기록 중 카드 빠짐            → 루프가 새 파일로 다시 건다
+    // 3 닫으면서 다 못 씀 · 4 닫기 시간 초과 · 5 머리글 못 고침 → 사람이 멈춘 것. 기록만 남긴다
+    uint8_t  kind    = 0;
     uint32_t session = 0;
     uint32_t recSec  = 0;   // 기록 시작부터 몇 초째
     uint32_t want    = 0;   // 쓰려던 바이트
@@ -285,11 +299,18 @@ struct FailInfo {
     bool     card    = false; // 그 순간 카드 감지 핀
     uint32_t bytes   = 0;   // 그때까지 쓴 양
     bool     fake    = false; // rec fail 시험으로 흉내 낸 실패
+    uint32_t lost    = 0;     // 버퍼에 남아 있다가 못 쓰고 버린 바이트
+    bool     userStopped = false; // 루프가 꺼내기 전에 사람이 rec off 를 쳤다 → 다시 걸지 않는다
 };
 // 새로 멈춘 게 있고 파일 닫기가 끝났으면 true. 한 번 꺼내면 지워진다.
 bool takeFailure(FailInfo* out);
 // 다음 세션 TXT 머리에 "지난 기록 실패" 줄로 적는다. 부팅 때 NVS 에서 읽어 넘긴다.
 void noteLastFail(const char* line);
+// TXT 머리에 그대로 적을 여러 줄 (방위 알고리즘·축·오프셋·자력 보정값). 시작 전에 부른다.
+// HLG 형식은 안 바꾼다 — 재현에 필요한 설정을 사람이 읽는 사본에 남긴다.
+void setSessionNote(const char* text);
+// 기록 중 설정이 바뀌면 TXT 에 "# 시각 설정 바뀜 — ..." 한 줄을 넣는다. 기록 중이 아니면 무시.
+void noteEvent(const char* line);
 // 시험용. 다음 n 번의 카드 쓰기를 "0 바이트 씀, EIO" 로 흉내 낸다.
 void testFailWrites(uint8_t n);
 uint32_t writeRetries();             // 다시 써서 살린 횟수 (이 부팅)

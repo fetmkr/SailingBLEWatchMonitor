@@ -51,6 +51,19 @@ bool gUp = false;
 // ISR 은 세마포어만 준다. SPI 로 짐을 꺼내는 것은 일꾼이 한다 —
 // ISR 안에서 SPI 를 돌리면 안 된다.
 SemaphoreHandle_t gRxSem = nullptr;
+
+// ★ 무전기 객체는 한 번에 한 작업만 만진다.
+//   코어 0 받기 일꾼(rxWorker)이 readData·startReceive·getRSSI 를 부르는데, 메인 루프의
+//   lora tx / rssi / regs / sleep 도 같은 gRadio 로 SPI 를 돌린다. 잠금이 없으면 두 SPI
+//   거래가 섞인다 (2026-09-14 검토). RadioLock 으로 감싼다.
+SemaphoreHandle_t gRadioMux = nullptr;
+struct RadioLock {
+    bool ok = false;
+    explicit RadioLock(uint32_t waitMs = 1000) {
+        ok = gRadioMux && xSemaphoreTake(gRadioMux, pdMS_TO_TICKS(waitMs)) == pdTRUE;
+    }
+    ~RadioLock() { if (ok) xSemaphoreGive(gRadioMux); }
+};
 TaskHandle_t      gRxTask = nullptr;
 
 Rx       gRing[kRingLen];
@@ -88,6 +101,14 @@ void rxWorker(void*) {
     for (;;) {
         if (xSemaphoreTake(gRxSem, portMAX_DELAY) != pdTRUE) continue;
 
+        RadioLock lk;
+        if (!lk.ok) {
+            // 잠금을 못 잡았다고 깨움을 버리면 readData 가 안 불려 IRQ 가 안 지워지고,
+            // 다음 짐이 새 에지를 못 만들어 수신이 조용히 죽는다 [추측]. 깨움을 되돌려 다시 한다.
+            xSemaphoreGive(gRxSem);
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
         const uint32_t at = millis();
         const int16_t  st = gRadio.readData(buf, kPayloadLen);
 
@@ -140,6 +161,8 @@ bool begin() {
 
     gRxSem = xSemaphoreCreateBinary();
     if (!gRxSem) { Serial.println("[LORA] 세마포어를 못 만들었습니다"); return false; }
+    gRadioMux = xSemaphoreCreateMutex();
+    if (!gRadioMux) { Serial.println("[LORA] 무전기 잠금을 못 만들었습니다"); return false; }
 
     gRadio.setPacketReceivedAction(onDio1);
     gRadio.startReceive();
@@ -163,7 +186,8 @@ bool up() { return gUp; }
 
 void sleep() {
     if (!gUp) return;
-    const int16_t st = gRadio.sleep();
+    RadioLock lk;
+    const int16_t st = lk.ok ? gRadio.sleep() : (int16_t)-1;
     Serial.printf("[LORA] 재웁니다 (st=%d)\n", (int)st);
 }
 
@@ -208,6 +232,8 @@ void report() {
 /// 한 번 보내는 것은 듀티 사이클(20초 중 2%)에 견줘 무시할 양이다 (§10.7).
 void txTest() {
     if (!gUp) { Serial.println("[LORA] 안 올라와 있습니다"); return; }
+    RadioLock lk;
+    if (!lk.ok) { Serial.println("[LORA] 무전기가 바쁩니다"); return; }
     uint8_t pkt[kPayloadLen] = {0};
     pkt[0] = 0xAA; // 시험용이라는 표. 실제 짐 배치(§10.4)는 아직 안 붙였다
 
@@ -240,6 +266,8 @@ void txTest() {
 /// 시끄러우면 남이 이 채널을 쓰고 있다는 뜻이라 함대 번호를 옮겨야 한다.
 void reportNoise(uint16_t samples) {
     if (!gUp) { Serial.println("[LORA] 안 올라와 있습니다"); return; }
+    RadioLock lk;
+    if (!lk.ok) { Serial.println("[LORA] 무전기가 바쁩니다"); return; }
     float mn = 999.0f, mx = -999.0f, sum = 0.0f;
     for (uint16_t i = 0; i < samples; ++i) {
         const float r = gRadio.getRSSI(/*packet=*/false); // 지금 이 순간의 세기
@@ -291,6 +319,8 @@ void pump() {
 void reportRegs() {
     if (!gUp) { Serial.println("[LORA] 안 올라와 있습니다"); return; }
 
+    RadioLock lk;
+    if (!lk.ok) { Serial.println("[LORA] 무전기가 바쁩니다"); return; }
     const uint8_t sens  = gRadio.peek(RADIOLIB_SX126X_REG_SENSITIVITY_CONFIG); // 0x0889
     const uint8_t clamp = gRadio.peek(RADIOLIB_SX126X_REG_TX_CLAMP_CONFIG);    // 0x08D8
     const uint8_t gain  = gRadio.peek(RADIOLIB_SX126X_REG_RX_GAIN);            // 0x08AC

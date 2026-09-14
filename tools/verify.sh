@@ -6,7 +6,7 @@
 #    ./tools/verify.sh quick      펌웨어 컴파일/Xcode 빌드는 건너뛰고 로직만
 #
 #  검사 항목
-#    1. 펌웨어 호스트 검증 (인코딩 / 시뮬레이션 궤적 / 범위)
+#    1. 펌웨어 호스트 검증 (인코딩 / 범위 / SD·CASIC·자이로·설정·Range 로직)
 #    2. C++ 인코더 → Swift 디코더 교차 검증  ★ 두 구현이 어긋나면 여기서 잡힘
 #    3. 펌웨어 실제 컴파일 (PlatformIO, ESP32-S3)
 #    4. iOS + watchOS 앱 빌드 (시뮬레이터)
@@ -32,6 +32,12 @@ c++ -std=c++17 -Wall -Wextra -O2 -I"$ROOT/firmware-rak/include" \
     -o "$BUILD/proto_test" "$ROOT/firmware-rak/tools/proto_test.cpp"
 "$BUILD/proto_test" "$BUILD/vectors.tsv"
 ok "펌웨어 로직 통과 — 벡터 $(grep -vc '^#' "$BUILD/vectors.tsv")줄 생성"
+
+# SD 부분 쓰기·CASIC 프레임·자이로 단위·설정 저장·HTTP Range 회귀 시험 (2026-09-14)
+c++ -std=c++17 -Wall -Wextra -O2 -I"$ROOT/firmware-rak/include" \
+    -o "$BUILD/fw_logic_test" "$ROOT/firmware-rak/tools/fw_logic_test.cpp"
+"$BUILD/fw_logic_test" > "$BUILD/fw_logic_test.log"
+ok "펌웨어 순수 로직 회귀 시험 통과 ($(grep -c '\[ OK \]' "$BUILD/fw_logic_test.log")개)"
 
 # ── 2. C++ ↔ Swift 교차 검증 ─────────────────────────────────────────────
 bar "2/4  펌웨어 인코더 ↔ 앱 디코더 교차 검증"

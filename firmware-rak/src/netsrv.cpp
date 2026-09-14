@@ -7,9 +7,12 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Preferences.h>
+#include <lwip/sockets.h>
+#include <errno.h>
 
 #include "board_rak.h"
 #include "hlog.h"
+#include "http_range.h"
 #include "secrets.h"
 
 // main.cpp 가 준다. 헤더를 서로 물게 하지 않으려고 함수 하나로 받는다.
@@ -314,7 +317,11 @@ void loadCreds() {
     String ss = gWifiPrefs.getString("ssid", "");
     String pw = gWifiPrefs.getString("pass", "");
     gWifiPrefs.end();
-    if (ss.length() == 0) { ss = SAIL_WIFI_SSID; pw = SAIL_WIFI_PASS; }
+    // ★ 코드에 박힌 기본 WiFi 로 물러서지 않는다 (2026-09-14).
+    //   예전에는 저장된 이름이 없으면 secrets.h 의 집 WiFi 를 썼다. 그래서 앱이
+    //   `wifi on` 을 보내면 집 밖에서는 늘 없는 WiFi 에 붙으려다 막혔다.
+    //   붙기는 사람이 `wifi ssid` / `wifi pass` 로 **직접 저장했을 때만** 한다.
+    //   평소 길은 AP 다 — 보드가 스스로 WiFi 를 연다. 어디서나 된다.
     snprintf(gStaSsid, sizeof(gStaSsid), "%s", ss.c_str());
     snprintf(gStaPass, sizeof(gStaPass), "%s", pw.c_str());
 }
@@ -330,6 +337,8 @@ void loadCreds() {
 // 기록기(hlog)와 이 서버가 같은 카드를 쓴다. 둘 다 필요할 때 올리고 안 쓰면
 // 내린다. 서로 붙잡고 있으면 안 되니 짧게 쓰고 놓는다.
 bool sdUp() {
+    // 기록기가 카드를 쥐고 있으면 안 붙인다. 둘이 같은 SD 객체를 쓴다.
+    if (hlog::busy()) return false;
     if (gSdUp) return true;
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
     gSdUp = SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5);
@@ -401,6 +410,11 @@ void handleStatus() {
 // 순식간이고, 코치는 이것만 보고 뭘 받을지 정할 수 있다.
 void handleFiles() {
     cors();
+    if (hlog::busy()) {
+        gServer.send(409, "application/json",
+                     "{\"ok\":false,\"error\":\"기록 중에는 카드를 못 읽습니다\"}");
+        return;
+    }
     if (!sdUp()) {
         gServer.send(503, "application/json",
                      "{\"ok\":false,\"error\":\"카드를 못 읽습니다\"}");
@@ -484,13 +498,120 @@ void handleFiles() {
     gServer.sendContent("");
 }
 
+// ── 보내기는 루프를 붙잡지 않는다 ───────────────────────────────────────
+//
+// ★ 옛 코드는 핸들러 안에서 파일 전체를 다 보낼 때까지 돌았다. 메인 루프가 그동안
+//   멈춰서 버튼·화면·센서가 서고, 느린 연결에서 90 MB 면 30초 워치독이 보드를
+//   다시 켤 수 있었다. 워치독만 먹이면 멈춘 UI·센서 문제가 그대로 남는다.
+//
+//   지금은 핸들러가 머리만 보내고 파일·소켓을 gX 에 맡긴다. poll() 이 한 번에
+//   kXferBudgetMs 동안만 보내고 루프로 돌아간다.
+//   ★ 소켓에는 WiFiClient::write 가 아니라 MSG_DONTWAIT 로 직접 보낸다. write 는
+//     select 1초 × 10번을 돌아서 받는 쪽 TCP 창이 닫히면 한 조각에 10초를 붙잡았다
+//     [확인: WiFiClient.cpp#L389-L443]. 지금은 못 보내면 바로 돌아와 다음 poll 에 이어 보낸다.
+//   소켓과 파일은 복사해 들고 있어도 된다 — 둘 다 shared_ptr 로 잡혀 있다
+//   [확인: WiFiClient.h#L42 clientSocketHandle, FS.h#L37 FileImplPtr].
+//   WebServer 는 핸들러가 끝나면 제 사본만 놓는다 (WebServer.cpp handleClient).
+//
+// ★ 실제로 보낸 바이트로만 센다. write() 가 덜 보냈으면 파일 위치를 되돌려 다음에
+//   이어서 보낸다. 끝까지 못 보낸 전송은 "받았다" 로 치지 않는다.
+struct Xfer {
+    bool       active = false;
+    bool       synthetic = false;   // /api/speed — 파일 없이 램에서 보낸다
+    File       f;
+    WiFiClient c;
+    uint32_t   pos = 0;
+    uint32_t   sent = 0, len = 0;
+    uint32_t   t0 = 0, lastProgress = 0;
+    uint32_t   usRead = 0, usWrite = 0;
+    char       what[64] = {0};
+};
+Xfer gX;
+constexpr uint32_t kXferStallMs  = 10000;  // 이만큼 한 바이트도 못 보내면 끊는다
+constexpr uint32_t kXferBudgetMs = 20;     // poll 한 번에 보내는 시간
+uint8_t gXBuf[4096];                       // ★ 스택에 안 올린다 (아래 handleFile 주석)
+
+void xferFinish(bool ok, const char* why) {
+    const uint32_t dt = millis() - gX.t0;
+    if (!gX.synthetic) gX.f.close();
+    gX.c.stop();
+    if (!gX.synthetic) {
+        gServedBytes += gX.sent;
+        if (ok) {
+            gLastIpDone = gBusyIp;
+            snprintf(gLastFileDone, sizeof(gLastFileDone), "%s", gBusyFile);
+            gLastDoneAt = millis();
+            gLastDoneMs = dt;
+            ++gServedFiles;
+        }
+        gBusyIp = 0;
+        gBusyFile[0] = 0;
+    }
+    Serial.printf("[NET] %s %s  %lu/%lu 바이트  %.1f초  %.0f KB/초"
+                  "  (읽기 %.2f초  WiFi 쓰기 %.2f초)%s%s\n",
+                  ok ? "보냄" : "★ 중단", gX.what,
+                  (unsigned long)gX.sent, (unsigned long)gX.len, dt / 1000.0f,
+                  dt ? gX.sent / 1.024f / dt : 0.0f,
+                  gX.usRead / 1e6f, gX.usWrite / 1e6f,
+                  why ? " — " : "", why ? why : "");
+    gX = Xfer();
+}
+
+void xferPump() {
+    if (!gX.active) return;
+    const uint32_t start = millis();
+    while (millis() - start < kXferBudgetMs) {
+        if (gX.sent >= gX.len) { xferFinish(true, nullptr); return; }
+        if (!gX.c.connected()) { xferFinish(false, "받는 기기가 끊었습니다"); return; }
+        const uint32_t left = gX.len - gX.sent;
+        const size_t want = left > sizeof(gXBuf) ? sizeof(gXBuf) : (size_t)left;
+        uint32_t t = micros();
+        const int got = gX.synthetic ? (int)want : gX.f.read(gXBuf, want);
+        gX.usRead += micros() - t;
+        if (got <= 0) { xferFinish(false, "SD 읽기 실패"); return; }
+        t = micros();
+        size_t w = 0;
+        const int fd = gX.c.fd();
+        if (fd < 0) { xferFinish(false, "소켓이 없습니다"); return; }
+        errno = 0;
+        const int res = send(fd, gXBuf, (size_t)got, MSG_DONTWAIT);
+        if (res > 0) w = (size_t)res;
+        else if (res < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            gX.usWrite += micros() - t;
+            xferFinish(false, "소켓 쓰기 오류");
+            return;
+        }
+        gX.usWrite += micros() - t;
+        if (w > 0) {
+            gX.pos += (uint32_t)w;
+            gX.sent += (uint32_t)w;
+            gX.lastProgress = millis();
+            used();          // 보내는 중에 저절로 꺼지면 안 된다
+            fastOn();
+        }
+        if (w < (size_t)got) {
+            // 덜 보냈다. 못 보낸 부분을 다음에 다시 읽도록 파일 위치를 되돌린다.
+            if (!gX.synthetic) gX.f.seek(gX.pos);
+            if (millis() - gX.lastProgress > kXferStallMs) {
+                xferFinish(false, "10초 동안 한 바이트도 못 보냈습니다");
+            }
+            return;
+        }
+    }
+}
+
 // 파일 하나 보내기.
 //
 // Range 를 받는다. 90 MB 를 보내다가 끊기면 처음부터 다시 받는 건 낭비다.
 // 데스크탑 앱이 받다 만 지점부터 이어받을 수 있어야 한다.
 void handleFile() {
     cors();
-    if (hlog::recording()) {
+    if (gX.active) {
+        gServer.send(409, "application/json",
+                     "{\"ok\":false,\"error\":\"이미 보내는 중입니다\"}");
+        return;
+    }
+    if (hlog::busy()) {
         gServer.send(409, "application/json",
                      "{\"ok\":false,\"error\":\"기록 중에는 못 보냅니다\"}");
         return;
@@ -541,108 +662,68 @@ void handleFile() {
     }
 
     const uint32_t total = f.size();
-    uint32_t from = 0, to = total - 1;
 
-    if (gServer.hasHeader("Range")) {
-        const String r = gServer.header("Range");   // "bytes=1000-"
-        const int eq = r.indexOf('=');
-        const int dash = r.indexOf('-');
-        if (eq >= 0 && dash > eq) {
-            from = (uint32_t)r.substring(eq + 1, dash).toInt();
-            const String tail = r.substring(dash + 1);
-            if (tail.length()) to = (uint32_t)tail.toInt();
-        }
-        if (from >= total) {
-            f.close();
-            gServer.send(416, "text/plain", "");
-            return;
-        }
-        if (to >= total) to = total - 1;
+    // ── Range ──
+    // 모양이 틀리면 400, 파일 밖이면 416 (빈 파일 포함). 머리가 없으면 전체 200.
+    uint64_t from64 = 0, to64 = 0;
+    String rh = gServer.hasHeader("Range") ? gServer.header("Range") : String();
+    const http::RangeResult rr =
+        http::parseRange(rh.length() ? rh.c_str() : nullptr, total, &from64, &to64);
+    if (rr == http::RangeResult::Malformed) {
+        f.close();
+        gServer.send(400, "application/json",
+                     "{\"ok\":false,\"error\":\"Range 모양이 틀립니다\"}");
+        return;
+    }
+    if (rr == http::RangeResult::Unsatisfiable) {
+        f.close();
+        char cr[40];
+        snprintf(cr, sizeof(cr), "bytes */%lu", (unsigned long)total);
+        gServer.sendHeader("Content-Range", cr);
+        gServer.send(416, "text/plain", "");
+        return;
+    }
+    const bool partial = (rr == http::RangeResult::Ok);
+    const uint32_t from = partial ? (uint32_t)from64 : 0;
+    const uint32_t to   = partial ? (uint32_t)to64 : (total ? total - 1 : 0);
+    const uint32_t len  = total ? (to - from + 1) : 0;
+
+    gServer.sendHeader("Accept-Ranges", "bytes");
+    if (partial) {
+        char cr[64];
+        snprintf(cr, sizeof(cr), "bytes %lu-%lu/%lu",
+                 (unsigned long)from, (unsigned long)to, (unsigned long)total);
+        gServer.sendHeader("Content-Range", cr);
     }
 
-    const uint32_t len = to - from + 1;
-    f.seek(from);
-
-    char cr[64];
-    snprintf(cr, sizeof(cr), "bytes %lu-%lu/%lu",
-             (unsigned long)from, (unsigned long)to, (unsigned long)total);
-    gServer.sendHeader("Accept-Ranges", "bytes");
-    if (from != 0 || to != total - 1) gServer.sendHeader("Content-Range", cr);
+    if (len == 0) {                 // 빈 파일 — 머리만 보내면 끝이다
+        f.close();
+        gServer.setContentLength(0);
+        gServer.send(200, "application/octet-stream", "");
+        return;
+    }
+    if (!f.seek(from)) {
+        f.close();
+        gServer.send(500, "application/json",
+                     "{\"ok\":false,\"error\":\"파일 자리를 못 옮겼습니다\"}");
+        return;
+    }
 
     fastOn();          // 보내는 동안만 BLE 를 내리고 절전을 끈다
-    gBusyIp = meIp;                      // 여기서 잠근다. 위 갈래로 빠지면 안 잠긴다
+    gBusyIp = meIp;    // 여기서 잠근다. 위 갈래로 빠지면 안 잠긴다
     snprintf(gBusyFile, sizeof(gBusyFile), "%s", name.c_str());
-    const uint32_t t0 = millis();
     gServer.setContentLength(len);
-    gServer.send((from == 0 && to == total - 1) ? 200 : 206,
-                 "application/octet-stream", "");
+    gServer.send(partial ? 206 : 200, "application/octet-stream", "");
 
-    // 4 KB 씩 흘려보낸다. SD 읽기와 WiFi 보내기가 같은 크기라 편하다.
-    //
-    // ★ static 이어야 한다. 그냥 두면 보드가 죽는다.
-    //   loop() 를 도는 자리의 스택이 8 KB 인데 여기서 4 KB 를 차지한다.
-    //   컴파일러는 이 자리를 함수에 들어서는 순간 잡아 두므로, 아래 while 에
-    //   닿기 전인 SD.open() 에서 이미 넘친다. 실제로 이렇게 죽었다.
-    //     Stack canary watchpoint triggered (loopTask)
-    //     netsrv.cpp:317  SD.open → vfs_fat_stat → snprintf
-    //   [확인: 2026-08-27, addr2line 으로 위 주소를 풀어 봤다]
-    //
-    //   이 자리는 loop() 하나에서만 부르니 여럿이 같이 쓸 걱정은 없다.
-    //   바로 아래 handleSpeed() 도 같은 이유로 static 이다.
-    //
-    //   한동안 멀쩡했던 이유도 적어 둔다. 처음 만들 때는 loop() 가 스택을
-    //   320 바이트만 썼다. 그 뒤로 loop() 가 커져서 2032 바이트가 됐고,
-    //   남아 있던 여유 1472 바이트를 다 먹고 240 바이트를 더 넘겼다.
-    //   [확인: objdump 로 두 판의 entry 명령을 읽어 견줬다.
-    //          a66ce0a 는 loop 0x140 / handleFile 0x1160,
-    //          지금은  loop 0x7f0 / handleFile 0x170]
-    //
-    //   교훈은 하나다. **스택에 KB 단위를 올리지 않는다.** 남은 자리는
-    //   내 함수가 아니라 부르는 쪽이 정하므로, 오늘 되는 것이 내일 죽는다.
-    static uint8_t buf[4096];
-    uint32_t left = len;
-    uint32_t usRead = 0, usWrite = 0;    // 어디서 시간을 쓰는지 갈라 본다
-    while (left > 0) {
-        const size_t want = (left > sizeof(buf)) ? sizeof(buf) : left;
-        uint32_t t = micros();
-        const int got = f.read(buf, want);
-        usRead += micros() - t;
-        if (got <= 0) break;
-        // 받아 가던 기기가 사라졌으면 그만둔다.
-        //
-        // 이게 없으면 90 MB 를 허공에 다 읽어 보낸다. write() 는 실패해도
-        // left 는 줄어드니 언젠가 끝나긴 하지만, 그동안 자물쇠가 잡혀 있어서
-        // 다음 사람이 그만큼 기다린다.
-        if (!gServer.client().connected()) {
-            Serial.println("[NET] 받아 가던 기기가 사라져서 그만둡니다.");
-            break;
-        }
-        t = micros();
-        gServer.client().write(buf, (size_t)got);
-        usWrite += micros() - t;
-        left -= (uint32_t)got;
-        used();          // 90 MB 를 보내는 중에 저절로 꺼지면 안 된다
-        fastOn();        // 보내는 내내 빠른 구간을 붙잡아 둔다
-    }
-    f.close();
-
-    const uint32_t dt = millis() - t0;
-    // 방금 누가 무엇을 받았는지 남긴다. 줄 서서 기다린 앱이 이걸 보고
-    // 왜 기다렸는지 사람에게 말해 준다.
-    gLastIpDone = gBusyIp;
-    snprintf(gLastFileDone, sizeof(gLastFileDone), "%s", gBusyFile);
-    gLastDoneAt = millis();
-    gLastDoneMs = dt;
-    gBusyIp = 0;
-    gBusyFile[0] = 0;
-
-    ++gServedFiles;
-    gServedBytes += (len - left);
-    Serial.printf("[NET] %s  %lu 바이트  %.1f초  %.0f KB/초"
-                  "  (SD 읽기 %.2f초  WiFi 쓰기 %.2f초)\n",
-                  path, (unsigned long)(len - left), dt / 1000.0f,
-                  dt ? (len - left) / 1.024f / dt : 0.0f,
-                  usRead / 1e6f, usWrite / 1e6f);
+    // 몸통은 poll() 이 나눠 보낸다 (xferPump).
+    gX = Xfer();
+    gX.active = true;
+    gX.f = f;
+    gX.c = gServer.client();
+    gX.pos = from;
+    gX.len = len;
+    gX.t0 = gX.lastProgress = millis();
+    snprintf(gX.what, sizeof(gX.what), "%s", path);
 }
 
 // 지우기. **파일 안의 세션 번호를 확인 값으로 받는다.**
@@ -651,9 +732,10 @@ void handleFile() {
 // 데스크탑 앱은 받아서 CRC 검사까지 끝난 뒤에만 이걸 부른다 (TRANSFER.md §4).
 void handleDelete() {
     cors();
-    if (hlog::recording()) {
+    if (hlog::busy() || gX.active) {
         gServer.send(409, "application/json",
-                     "{\"ok\":false,\"error\":\"기록 중에는 못 지웁니다\"}");
+                     gX.active ? "{\"ok\":false,\"error\":\"파일을 보내는 중에는 못 지웁니다\"}"
+                               : "{\"ok\":false,\"error\":\"기록 중에는 못 지웁니다\"}");
         return;
     }
     if (!sdUp()) { gServer.send(503, "application/json", "{\"ok\":false}"); return; }
@@ -787,28 +869,35 @@ void startMdns() {
 //   curl -o /dev/null http://<주소>/api/speed?mb=2
 void handleSpeed() {
     cors();
+    // 기록 중이면 무선·CPU 를 몇 초씩 붙잡는 시험을 하지 않는다.
+    if (hlog::busy()) {
+        gServer.send(409, "application/json",
+                     "{\"ok\":false,\"error\":\"기록 중에는 속도시험을 못 합니다\"}");
+        return;
+    }
+    if (gX.active) {
+        gServer.send(409, "application/json",
+                     "{\"ok\":false,\"error\":\"이미 보내는 중입니다\"}");
+        return;
+    }
     uint32_t mb = 2;
     if (gServer.hasArg("mb")) mb = (uint32_t)gServer.arg("mb").toInt();
     if (mb < 1) mb = 1;
     if (mb > 32) mb = 32;
 
     fastOn();
-    static uint8_t buf[4096];
-    memset(buf, 0x5A, sizeof(buf));
-
+    memset(gXBuf, 0x5A, sizeof(gXBuf));
     const uint32_t total = mb * 1024UL * 1024UL;
-    const uint32_t t0 = millis();
     gServer.setContentLength(total);
     gServer.send(200, "application/octet-stream", "");
-    for (uint32_t left = total; left; ) {
-        const size_t want = left > sizeof(buf) ? sizeof(buf) : left;
-        gServer.client().write(buf, want);
-        left -= want;
-    }
-    const uint32_t dt = millis() - t0;
-    Serial.printf("[NET] 속도시험 %lu MB  %.1f초  %.0f KB/초\n",
-                  (unsigned long)mb, dt / 1000.0f,
-                  dt ? total / 1.024f / dt : 0.0f);
+
+    gX = Xfer();
+    gX.active = true;
+    gX.synthetic = true;
+    gX.c = gServer.client();
+    gX.len = total;
+    gX.t0 = gX.lastProgress = millis();
+    snprintf(gX.what, sizeof(gX.what), "속도시험 %lu MB", (unsigned long)mb);
 }
 
 // 앱이 살아 있다고 알리는 자리.
@@ -910,6 +999,12 @@ void routes() {
 // ★ 라디오를 재우지 않는다. ESP32-S3 기본값이 절전이라 비컨 사이에 라디오를
 //   꺼 버리는데, 그동안은 파일이 안 나간다.
 bool startAP() {
+    // ★ 기록 중에는 켜지 않는다. 파일 서버가 SD 를 붙이고, 끌 때 SD.end() 가
+    //   기록 중인 카드를 내린다. 모든 켜기 길(BLE·시리얼·앱)이 여기를 지난다.
+    if (hlog::busy()) {
+        Serial.println("[NET] 기록 중에는 WiFi 를 안 켭니다 — rec off 먼저");
+        return false;
+    }
     stop();
     snprintf(gSsid, sizeof(gSsid), "%s", ::sailFullName());
 
@@ -956,6 +1051,10 @@ bool startAP() {
 // AP 모드보다 이쪽이 낫다. 노트북이 인터넷을 안 잃고, 여러 배를 한 망에서
 // 같이 볼 수 있다. 못 들어가면 부르는 쪽이 AP 로 물러선다.
 bool startJoin(uint32_t timeoutMs) {
+    if (hlog::busy()) {
+        Serial.println("[NET] 기록 중에는 WiFi 를 안 켭니다 — rec off 먼저");
+        return false;
+    }
     loadCreds();
     if (strlen(gStaSsid) == 0) {
         Serial.println("[NET] 붙을 WiFi 이름이 없습니다.");
@@ -1002,6 +1101,7 @@ bool startJoin(uint32_t timeoutMs) {
 // 먹고 BLE 를 방해한다. 파일 받을 때만 켰다가 끝나면 끈다.
 void stop() {
     const bool wasUp = (gMode != Mode::Off);
+    if (gX.active) xferFinish(false, "WiFi 를 끕니다");
     if (wasUp) {
         gServer.stop();
         sdDown();
@@ -1040,6 +1140,7 @@ void stop() {
 void poll() {
     if (gMode == Mode::Off) return;
     gServer.handleClient();
+    xferPump();          // 보내는 중이면 한 조각만 보내고 돌아온다
 
     // 다 보내고 5초가 지났으면 BLE 를 되살린다.
     if (gFast && millis() - gFastAt > kFastHoldMs) fastOff();
@@ -1137,6 +1238,7 @@ int othersThan(const char* id) { return usersExcept(id); }
 // 그 나머지 중 하나를 사람이 알아볼 이름으로.
 const char* otherIpText(const char* id) { return otherName(id); }
 Mode        mode()        { return gMode; }
+bool        transferring(){ return gX.active; }
 const char* ipText()      { return gIp; }
 const char* ssidText()    { return gSsid; }
 uint32_t    servedFiles() { return gServedFiles; }

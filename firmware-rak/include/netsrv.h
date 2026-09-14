@@ -27,7 +27,8 @@ enum class Mode : uint8_t { Off, AP, Join };
 // 보드가 스스로 WiFi 를 만든다. 비밀번호는 secrets.h 에 있다.
 bool startAP();
 
-// 아는 WiFi 에 붙는다. secrets.h 의 SAIL_WIFI_SSID / PASS 를 쓴다.
+// 아는 WiFi 에 붙는다. 사람이 wifi ssid / wifi pass 로 저장한 것만 쓴다.
+// 코드에 박힌 기본값은 없다. 평소 길은 startAP() 다.
 bool startJoin(uint32_t timeoutMs = 15000);
 
 void stop();
@@ -77,6 +78,8 @@ int         othersThan(const char* id);
 const char* otherIpText(const char* id);
 
 Mode        mode();
+// 지금 파일(또는 속도시험)을 보내는 중인가. 이때는 WiFi 를 끄면 안 된다.
+bool        transferring();
 const char* ipText();     // "192.168.4.1". 안 켜져 있으면 빈 문자열
 const char* ssidText();
 uint32_t    servedFiles();

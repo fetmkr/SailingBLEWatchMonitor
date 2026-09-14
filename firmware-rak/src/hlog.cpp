@@ -60,8 +60,23 @@ uint32_t gTextLastRow   = 0;
 
 // ── 상태 ─────────────────────────────────────────────────────────────────
 
-volatile bool gRecording  = false;
-volatile bool gStopWanted = false;
+// ★ 상태 하나로 모았다 (hlog_write.h RecState). 옛 코드는 gRecording / gStopWanted
+//   두 깃발이라 "닫는 중" 과 "닫혔다" 를 가를 수 없었다. 그래서 stop() 이 15초를
+//   기다린 뒤 **닫혔는지 확인도 안 하고** 카드를 다시 붙이고 머리글을 고쳤다.
+//   지금은 일꾼이 Draining → Closed / Failed 로 끝을 알린다.
+volatile RecState gState = RecState::Closed;
+bool isRec() { return gState == RecState::Recording; }
+
+// 텍스트 버퍼는 메인 루프가 채우고 일꾼이 비운다. 짧게 잠근다.
+portMUX_TYPE gTextMux = portMUX_INITIALIZER_UNLOCKED;
+volatile bool gTextFlushWanted = false;
+char gTxtOut[kTextBufSize];                 // 일꾼이 잠금 밖에서 쓰는 사본
+uint32_t gLostBytes = 0;            // 마지막으로 닫을 때 못 쓴 바이트
+// stop() 이 15초 안에 답을 못 받고 돌아온 뒤 일꾼이 혼자 닫으면, 머리글 고치기와 표시 지우기가
+// 아직 안 된 채다. 이 표식을 세워 두고 healthCheck 나 다음 stop() 이 마무리한다.
+volatile bool gNeedFinalize = false;
+uint32_t gDurS = 0;                 // 닫기 시작 때 잰 세션 길이 (마무리가 늦어져도 그때 값)
+const char* gLastErrorShort = nullptr;
 
 File     gBin, gTxt;
 uint32_t gSession = 0;
@@ -87,6 +102,7 @@ const char* gBootWhy = "?";
 volatile bool gFailedStop = false;
 FailInfo gFail;                       // 일꾼이 채우고 gFailedStop 을 세운다
 const char* gLastFailLine = nullptr;  // 다음 세션 TXT 머리에 적는다
+const char* gSessionNote  = nullptr;  // 방위 설정 등 (main.cpp buildHeadingNote)
 volatile uint8_t gTestFailN = 0;      // 시험용 가짜 실패 남은 횟수
 uint32_t gWriteRetries = 0;           // 다시 써서 살린 횟수
 constexpr uint8_t kWriteRetries = 3;
@@ -157,90 +173,146 @@ inline void put32(uint8_t* p, size_t& o, uint32_t v) {
 // 쓰기가 모자라게 들어가면(w != n) 카드가 죽은 것으로 보고 스스로 멈춘다.
 // 코어 0 에서는 NVS 를 안 만지기로 했으므로 표식(gFailedStop)만 세우고,
 // 메인 루프의 healthCheck 가 그걸 보고 뒷정리를 한다.
+// 파일을 닫고 카드를 놓는다. 일꾼만 부른다.
+void closeFiles() {
+    if (gBin) { gBin.flush(); gBin.close(); }
+    if (gTxt) { gTxt.flush(); gTxt.close(); }
+    gFreeBytes = SD.totalBytes() - SD.usedBytes();
+    SD.end();
+}
+
+// 메인 루프가 모은 텍스트를 옮겨 쓴다. 잠금 안에서는 복사만 한다.
+void writerFlushText(bool force) {
+    if (!gTxt) return;
+    size_t n = 0;
+    portENTER_CRITICAL(&gTextMux);
+    if (gTextUsed && (force || gTextFlushWanted)) {
+        memcpy(gTxtOut, gTextBuf, gTextUsed);
+        n = gTextUsed;
+        gTextUsed = 0;
+        gTextFlushWanted = false;
+    }
+    portEXIT_CRITICAL(&gTextMux);
+    if (n) {
+        gTxt.write((const uint8_t*)gTxtOut, n);
+        gTxt.flush();
+    }
+}
+
+// 링버퍼 꼬리에서 최대 maxBytes 를 쓴다. 다 썼으면 true.
+// 쓴 만큼 꼬리를 바로 넘긴다 — 다시 시도할 때 앞부분을 또 쓰지 않는다 (writeAll).
+struct WriteReport { uint8_t tries = 0; int err = 0; bool faked = false; size_t wrote = 0; size_t asked = 0; };
+bool writeFromRing(size_t maxBytes, WriteReport* r) {
+    while (r->wrote < maxBytes) {
+        const size_t used = bufUsed();
+        if (!used) break;
+        const size_t t = gTail;
+        size_t n = used;
+        if (n > maxBytes - r->wrote) n = maxBytes - r->wrote;
+        if (t + n > kBufSize) n = kBufSize - t;
+        r->asked += n;
+        uint8_t tries = 0;
+        const size_t done = writeAll(
+            (const uint8_t*)(gBuf + t), n,
+            [&](const uint8_t* p, size_t len) -> size_t {
+                if (gTestFailN) { --gTestFailN; r->faked = true; r->err = EIO; return 0; }
+                errno = 0;
+                const size_t got = gBin.write(p, len);
+                if (got != len && errno) r->err = errno;
+                return got;
+            },
+            [&](size_t k) { gTail = (gTail + k) % kBufSize; gBytes += k; },
+            [&](uint8_t k) { vTaskDelay(pdMS_TO_TICKS(50 * k)); },
+            kWriteRetries, &tries);
+        r->tries += tries;
+        r->wrote += done;
+        if (done < n) return false;
+    }
+    return true;
+}
+
+void fillFail(uint8_t kind, const WriteReport& r) {
+    gFail = FailInfo();       // ★ 지난 실패의 userStopped 가 남아 다음 실패까지 "사람이 멈춤" 이 됐다
+    gFail.kind    = kind;
+    gFail.session = gSession;
+    gFail.recSec  = (millis() - gStartedMs) / 1000;
+    gFail.want    = (uint32_t)r.asked;
+    gFail.wrote   = (uint32_t)r.wrote;
+    gFail.err     = r.err;
+    gFail.tries   = r.tries;
+    gFail.card    = cardPresent();
+    gFail.bytes   = (uint32_t)gBytes;
+    gFail.fake    = r.faked;
+    gFail.lost    = (uint32_t)bufUsed();
+}
+
+// 카드에 실제로 쓰는 일꾼. **코어 0 에서 혼자 돈다.**
+//
+//   Recording  4 KB 가 차거나 0.5초가 지나면 쓴다. 못 쓰면 닫고 Failed.
+//              남은 버퍼는 **다시 안 쓴다** — 이미 쓴 앞부분이 겹치기 때문이다.
+//   Draining   남은 것을 다 쓰고 텍스트도 쏟고 닫는다. 다 썼으면 Closed, 아니면 Failed.
+//   그 밖      쉰다.
+//
+// 상태를 Closed/Failed 로 바꾸는 것이 곧 "끝났다" 는 답이다. stop() 은 그걸 기다린다.
 void writerTask(void*) {
     uint32_t lastWrite = millis(), lastFlush = millis();
     for (;;) {
-        if (!gRecording) {
-            if (gStopWanted) {
-                while (bufUsed() > 0 && gBin) {
-                    size_t t = gTail, n = bufUsed();
-                    if (t + n > kBufSize) n = kBufSize - t;
-                    gBin.write((const uint8_t*)(gBuf + t), n);
-                    gTail = (t + n) % kBufSize;
+        const RecState st = gState;
+
+        if (st == RecState::Recording) {
+            const size_t used = bufUsed();
+            const bool due = (used >= kChunk) || (used > 0 && millis() - lastWrite >= 500);
+            if (due) {
+                const uint32_t a = millis();
+                WriteReport r;
+                const bool ok = writeFromRing(kChunk, &r);
+                const uint32_t dt = millis() - a;
+                if (dt > gMaxStall) gMaxStall = dt;
+                lastWrite = millis();
+                if (!ok) {
+                    fillFail(1, r);
+                    gLostBytes = gFail.lost;
+                    gLastError = "카드 쓰기 실패";
+                    gLastErrorShort = "쓰기 실패";
+                    closeFiles();
+                    gFailedStop = true;
+                    gState = RecState::Failed;
+                    continue;
                 }
-                if (gBin) { gBin.flush(); gBin.close(); }
-                if (gTxt) { gTxt.flush(); gTxt.close(); }
-                gFreeBytes = SD.totalBytes() - SD.usedBytes();
-                SD.end();
-                gStopWanted = false;
+                if (r.tries) ++gWriteRetries;
             }
-            vTaskDelay(pdMS_TO_TICKS(50));
+            writerFlushText(false);
+            if (millis() - lastFlush >= kFlushMs) {
+                const uint32_t b = millis();
+                gBin.flush();
+                const uint32_t df = millis() - b;
+                if (df > gMaxStall) gMaxStall = df;
+                lastFlush = millis();
+            }
+            if (!due) vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
 
-        const size_t used = bufUsed();
-        const bool due = (used >= kChunk) || (used > 0 && millis() - lastWrite >= 500);
-        if (!due) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
-
-        size_t t = gTail;
-        size_t n = used > kChunk ? kChunk : used;
-        if (t + n > kBufSize) n = kBufSize - t;
-
-        // 한 번 쓴다. 시험 중이면 실패를 흉내 낸다 (쓰지 않고 0, EIO).
-        bool faked = false;
-        auto writeOnce = [&](const uint8_t* p, size_t len, int* errOut) -> size_t {
-            if (gTestFailN) { --gTestFailN; faked = true; *errOut = EIO; return 0; }
-            errno = 0;
-            const size_t got = gBin.write(p, len);
-            *errOut = (got != len) ? errno : 0;
-            return got;
-        };
-
-        const uint32_t a = millis();
-        int    err  = 0;
-        size_t done = writeOnce((const uint8_t*)(gBuf + t), n, &err);
-
-        // ★ 덜 써졌으면 남은 만큼 다시 쓴다. 3번까지 (SDLOG.md §6).
-        //   전에는 한 번 실패에 곧바로 멈췄다. 세션 46 은 2시간 53분에 그렇게
-        //   끊겨서 나머지 항해를 잃었다 (추정 — 이유를 안 남겨서 확정 못 함).
-        uint8_t tries = 0;
-        while (done < n && tries < kWriteRetries) {
-            ++tries;
-            vTaskDelay(pdMS_TO_TICKS(50 * tries));
-            int e2 = 0;
-            done += writeOnce((const uint8_t*)(gBuf + t + done), n - done, &e2);
-            if (e2) err = e2;
-        }
-        const uint32_t dt = millis() - a;
-        if (dt > gMaxStall) gMaxStall = dt;
-        lastWrite = millis();
-
-        if (done != n) {
-            gFail.kind    = 1;
-            gFail.session = gSession;
-            gFail.recSec  = (millis() - gStartedMs) / 1000;
-            gFail.want    = (uint32_t)n;
-            gFail.wrote   = (uint32_t)done;
-            gFail.err     = err;
-            gFail.tries   = tries;
-            gFail.card    = cardPresent();
-            gFail.bytes   = (uint32_t)gBytes;
-            gFail.fake    = faked;
-            gLastError = "카드 쓰기 실패";
-            gRecording = false; gStopWanted = true; gFailedStop = true;
+        if (st == RecState::Draining) {
+            WriteReport r;
+            const bool ok = writeFromRing((size_t)-1, &r);
+            gLostBytes = (uint32_t)bufUsed();
+            const bool complete = ok && gLostBytes == 0;
+            if (!complete) {
+                // 닫으면서 못 쓴 것도 NVS 에 남긴다 (CLAUDE.md: 이유는 램에 두지 않는다).
+                fillFail(3, r);
+                gLastError = "닫으면서 다 못 썼습니다";
+                gLastErrorShort = "저장 실패";
+                gFailedStop = true;
+            }
+            writerFlushText(true);
+            closeFiles();
+            lastWrite = lastFlush = millis();
+            gState = afterWrite(RecState::Draining, complete);
             continue;
         }
-        if (tries) ++gWriteRetries;
-        gTail = (t + n) % kBufSize;
-        gBytes += done;
 
-        if (millis() - lastFlush >= kFlushMs) {
-            const uint32_t b = millis();
-            gBin.flush();
-            const uint32_t df = millis() - b;
-            if (df > gMaxStall) gMaxStall = df;
-            lastFlush = millis();
-        }
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -288,6 +360,8 @@ void clearCutFlag() { setCutFlag(0); }
 
 void noteBootReason(const char* why) { if (why) gBootWhy = why; }
 
+bool finalizeClosed();   // 아래 stop() 옆에 정의
+
 // 링버퍼를 잡고 코어 0 에 일꾼을 띄운다. setup() 에서 한 번만 부른다.
 //
 // ★ PSRAM 을 먼저 쓴다. 내부 RAM 은 BLE 스택이 크게 쓰는데 64 KB 를 거기서
@@ -296,13 +370,23 @@ void noteBootReason(const char* why) { if (why) gBootWhy = why; }
 //   카드가 없다고 배가 계기를 통째로 잃으면 안 된다.
 void begin() {
     if (gBuf) return;
+    Serial.printf("[LOG] PSRAM %u 바이트 (남은 %u) · 내부 힙 남은 %u\n",
+                  (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram(),
+                  (unsigned)ESP.getFreeHeap());
     gBuf = (char*)ps_malloc(kBufSize);          // PSRAM 먼저. 내부 RAM 은 BLE 가 쓴다
     if (!gBuf) gBuf = (char*)malloc(kBufSize);
     if (!gBuf) {
         Serial.println("[LOG] 버퍼를 못 잡았습니다 — 기록 기능이 꺼집니다");
         return;
     }
-    xTaskCreatePinnedToCore(writerTask, "hlog", 4096, nullptr, 1, &gWriter, 0);
+    if (xTaskCreatePinnedToCore(writerTask, "hlog", 4096, nullptr, 1, &gWriter, 0) != pdPASS) {
+        // 일꾼이 없으면 버퍼에 쌓기만 하고 영영 안 쓴다. 기록 기능을 끈다.
+        Serial.println("[LOG] ★ 쓰기 작업을 못 띄웠습니다 — 기록 기능이 꺼집니다");
+        free(gBuf);
+        gBuf = nullptr;
+        gWriter = nullptr;
+        return;
+    }
     Serial.printf("[LOG] 쓰기 작업 코어 0 (버퍼 %u KB = 초당 3.1KB 기준 %.0f초치)\n",
                   (unsigned)(kBufSize / 1024), kBufSize / 3080.0f);
 }
@@ -352,14 +436,16 @@ static void nameFor(char* out, size_t cap, uint32_t session,
 }
 
 bool start(const Header& h) {
-    if (!gBuf)      { gLastError = "버퍼 없음"; return false; }
-    if (gRecording) { gLastError = "이미 기록 중"; return false; }
-    if (!cardPresent()) { gLastError = "카드가 안 꽂혀 있습니다"; return false; }
+    if (!gBuf || !gWriter) { gLastError = "버퍼 없음"; gLastErrorShort = "기록기 없음"; return false; }
+    if (!canStart(gState)) { gLastError = "이미 기록 중"; gLastErrorShort = "이미 기록 중"; return false; }
+    if (gNeedFinalize) finalizeClosed();     // 시간 초과로 미뤄 둔 앞 세션 마무리
+    if (!cardPresent()) { gLastError = "카드가 안 꽂혀 있습니다"; gLastErrorShort = "카드 없음"; return false; }
 
     const uint32_t tA = millis();   // 시작 단계마다 몇 ms 걸리나 (화면이 멈춰 보였다 9/13)
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
     if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
         gLastError = "마운트 실패 — sd 명령으로 이유를 보세요";
+        gLastErrorShort = "마운트 실패";
         return false;
     }
     SD.mkdir("/LOGS");
@@ -415,7 +501,7 @@ bool start(const Header& h) {
     prefs.end();
 
     gBin = SD.open(gPath, FILE_WRITE);
-    if (!gBin) { gLastError = "파일을 못 열었습니다"; SD.end(); return false; }
+    if (!gBin) { gLastError = "파일을 못 열었습니다"; gLastErrorShort = "파일 못 엶"; SD.end(); return false; }
     gTxt = SD.open(gTxtPath, FILE_WRITE);
 
     // ── 128바이트 머리글 ────────────────────────────────────────────────
@@ -457,7 +543,15 @@ bool start(const Header& h) {
     memcpy(hdr + kOffPrevSession, &h.prevSession, 4);
     const uint16_t hcrc = crc16(hdr, 126);
     hdr[126] = (uint8_t)hcrc; hdr[127] = (uint8_t)(hcrc >> 8);
-    gBin.write(hdr, sizeof(hdr));
+    // ★ 머리글이 다 들어갔는지 본다. 안 들어간 파일은 나중에 못 읽는다.
+    if (gBin.write(hdr, sizeof(hdr)) != sizeof(hdr)) {
+        gBin.close();
+        if (gTxt) gTxt.close();
+        SD.end();
+        gLastError = "머리글을 못 썼습니다";
+        gLastErrorShort = "머리글 실패";
+        return false;
+    }
     gBin.flush();
 
     if (gTxt) {
@@ -474,6 +568,7 @@ bool start(const Header& h) {
                     h.imuType == kImuBNO085 ? "BNO085" : "MPU-9250");
         gTxt.printf("# 이 보드가 지난번에 꺼진 이유: %s\n", gBootWhy);
         if (gLastFailLine) gTxt.printf("# 지난 기록 실패: %s\n", gLastFailLine);
+        if (gSessionNote) gTxt.print(gSessionNote);
         gTxt.printf("#\n");
         gTxt.flush();
     }
@@ -482,14 +577,19 @@ bool start(const Header& h) {
     gBytes = kHeaderSize;
     gDropped = gWaited = gMaxStall = gMaxFill = 0;
     gLastError = nullptr;
+    gLastErrorShort = nullptr;
+    gLostBytes = 0;
+    portENTER_CRITICAL(&gTextMux);
     gTextUsed = 0;
+    gTextFlushWanted = false;
+    portEXIT_CRITICAL(&gTextMux);
     gTextLastFlush = gTextLastRow = millis();
     gFirstNav = true;
     gUtcStart = 0; gUtcStartMs = 0;
     gHead = gTail = 0;
     gStartedMs = millis();
     gFailedStop = false;
-    gRecording = true;
+    gState = RecState::Recording;
 
     // ★ 여기서 표시를 세운다. 전원이 끊기면 이게 남아서 다음에 이어 시작한다.
     setCutFlag(1);
@@ -501,43 +601,20 @@ bool start(const Header& h) {
     return true;
 }
 
-void stop() {
-    if (!gRecording && !gBin) return;
-
-    // 텍스트에 마지막 요약을 남기고 램에 남은 것도 쏟는다
-    if (gTxt && gTextUsed) { gTxt.write((const uint8_t*)gTextBuf, gTextUsed); gTextUsed = 0; }
-    if (gTxt) {
-        const uint32_t sec = (millis() - gStartedMs) / 1000;
-        gTxt.printf("#\n# 끝 — %u분 %u초,  NAV %u줄  IMU %u줄\n",
-                    sec / 60, sec % 60, (unsigned)gNavRows, (unsigned)gImuRows);
-        gTxt.printf("# 버린 줄 %u  기다린 횟수 %u  최대 멈춤 %ums  버퍼 최고 %u%%\n",
-                    (unsigned)gDropped, (unsigned)gWaited,
-                    (unsigned)gMaxStall, (unsigned)gMaxFill);
-        if (gDropped) gTxt.printf("# ★ 버린 줄이 있습니다. 이 세션은 구멍이 있습니다.\n");
-    }
-
-    const uint32_t durS = (millis() - gStartedMs) / 1000;
-
-    gRecording  = false;
-    gStopWanted = true;
-    // 사람이 끝낸 것이다. 다음에 켜질 때 이어 시작하면 안 된다.
-    setCutFlag(0);
-    const uint32_t t0 = millis();
-    while (gStopWanted && millis() - t0 < 15000) delay(10);
-
+// 닫힌 뒤의 마무리 — 머리글 고치기·이름 바꾸기·표시 지우기.
+// stop() 이 제때 끝났으면 거기서, 시간 초과 뒤 일꾼이 혼자 닫았으면 healthCheck 가 부른다.
+// 일꾼이 카드를 놓은 뒤(Closed/Failed)에만 부른다.
+bool finalizeClosed() {
+    gNeedFinalize = false;
+    const bool drained = (gState == RecState::Closed);
+    bool hdrOk = false;
     // ── 머리글을 다시 쓴다 ──────────────────────────────────────────────
     //
-    // 기록을 시작할 때는 첫 fix 의 UTC 도, 세션 길이도 모른다. 전원을 켠
-    // 직후에는 GPS 가 시각조차 모른다. 그런데 나중에 목록만 보고 "이게 오늘
-    // 오전 훈련인가 5분짜리 시험인가" 를 정하려면 그 값이 있어야 한다
-    // (TRANSFER.md §1).
-    //
-    // 그래서 세션을 닫으면서 파일 맨 앞 128바이트를 새로 쓴다. 그때는 다
-    // 알고 있다. CRC 도 다시 계산한다.
-    //
-    // 전원이 그냥 끊겨서 여기까지 못 오면 closed 가 0 으로 남는다. 데스크탑
-    // 앱은 그런 파일도 받을 수 있어야 한다 — 안에는 값이 다 들어 있다.
-    if (SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+    // 기록을 시작할 때는 첫 fix 의 UTC 도, 세션 길이도 모른다. 세션을 닫으면서 파일 맨 앞
+    // 128바이트를 새로 쓴다. 전원이 그냥 끊겨서 여기까지 못 오면 closed 가 0 으로 남는다.
+    // ★ 다 쓰고 닫혔을 때만 고친다. 못 쓴 바이트가 있는 파일에 closed=1 을 적으면 구멍 난
+    //   파일이 "제대로 닫힌 파일" 로 보인다.
+    if (drained && SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
         File h = SD.open(gPath, "r+");
         if (h) {
             uint8_t hdr[kHeaderSize];
@@ -545,7 +622,7 @@ void stop() {
                 memcmp(hdr, "HHLG", 4) == 0) {
                 memcpy(hdr + 24, &gUtcStart, 4);
                 memcpy(hdr + 28, &gUtcStartMs, 2);
-                memcpy(hdr + kOffDurationS, &durS, 4);
+                memcpy(hdr + kOffDurationS, &gDurS, 4);
                 memcpy(hdr + kOffNavRows, (const void*)&gNavRows, 4);
                 memcpy(hdr + kOffImuRows, (const void*)&gImuRows, 4);
                 memcpy(hdr + kOffDropped, (const void*)&gDropped, 4);
@@ -553,7 +630,7 @@ void stop() {
                 const uint16_t c = crc16(hdr, 126);
                 hdr[126] = (uint8_t)c; hdr[127] = (uint8_t)(c >> 8);
                 h.seek(0);
-                h.write(hdr, kHeaderSize);
+                hdrOk = (h.write(hdr, kHeaderSize) == kHeaderSize);
                 h.flush();
             }
             h.close();
@@ -561,10 +638,7 @@ void stop() {
         SD.end();
     }
 
-    // ── 이름을 시각으로 바꾼다 ──
-    //
-    // 시작할 때는 보드 시계로 지었다. 이 세션에서 위성을 잡았으면 그
-    // 시각이 더 맞으니 그것으로 고친다. 못 잡았으면 그대로 둔다.
+    // ── 이름을 시각으로 바꾼다 ── 이 세션에서 위성을 잡았으면 그 시각으로.
     if (gUtcStart) {
         char binNew[48], txtNew[48];
         nameFor(binNew, sizeof(binNew), gSession, gUtcStart, "HLG");
@@ -578,11 +652,97 @@ void stop() {
         }
     }
 
-    Serial.printf("[LOG] 기록 끝 — %s  NAV %u줄 / IMU %u줄\n",
-                  gPath, (unsigned)gNavRows, (unsigned)gImuRows);
-    if (gDropped) {
-        Serial.printf("[LOG] ★ 버린 줄 %u개 — 카드가 못 따라왔습니다\n", (unsigned)gDropped);
+    gState = RecState::Closed;
+    // ★ 파일이 닫힌 **뒤에** 표시를 지운다. 닫기 전에 지우면 닫다가 전원이 끊긴 세션이
+    //   이어 시작이 안 된다.
+    setCutFlag(0);
+
+    if (drained && !hdrOk) {
+        gLastError = "머리글을 못 고쳤습니다 (내용은 들어 있음)";
+        gLastErrorShort = "머리글 실패";
+        gFail = FailInfo();
+        gFail.kind = 5; gFail.session = gSession; gFail.recSec = gDurS; gFail.bytes = (uint32_t)gBytes;
+        gFail.card = cardPresent();
+        gFailedStop = true;
     }
+    Serial.printf("[LOG] 기록 끝 — %s  NAV %u줄 / IMU %u줄  %s\n",
+                  gPath, (unsigned)gNavRows, (unsigned)gImuRows,
+                  (drained && hdrOk) ? "정상 종료" : "★ 정상 종료 아님");
+    if (gDropped) {
+        Serial.printf("[LOG] ★ 버린 줄 %u개 — 카드가 못 따라왔거나 IMU 가 끊겼던 시간입니다\n",
+                      (unsigned)gDropped);
+    }
+    return drained && hdrOk;
+}
+
+bool stop() {
+    RecState st = gState;
+    if (st == RecState::Closed) {
+        // 시간 초과 뒤 일꾼이 혼자 닫아 둔 경우 — 여기서 마무리한다.
+        if (gNeedFinalize) return finalizeClosed();
+        return true;
+    }
+
+    // 일꾼이 쓰기 실패로 이미 닫았다. 실패 기록은 루프가 꺼내 NVS 에 적되, 사람이 멈춘 것이니
+    // 다시 걸지는 않게 표시한다.
+    if (st == RecState::Failed) {
+        if (gNeedFinalize) { finalizeClosed(); }
+        gState = RecState::Closed;
+        gFail.userStopped = true;
+        setCutFlag(0);          // 사람이 멈췄다. 다음에 켤 때 이어 시작하지 않는다
+        Serial.printf("[LOG] 이미 쓰기 실패로 닫혀 있었습니다 — %s\n",
+                      gLastError ? gLastError : "이유 모름");
+        return false;
+    }
+
+    if (st == RecState::Recording) {
+        gDurS = (millis() - gStartedMs) / 1000;
+        // 끝 요약을 텍스트 버퍼에 넣는다. 일꾼이 닫기 전에 쏟는다.
+        char foot[256];
+        int n = snprintf(foot, sizeof(foot),
+                         "#\n# 끝 — %u분 %u초,  NAV %u줄  IMU %u줄\n"
+                         "# 버린 줄 %u  기다린 횟수 %u  최대 멈춤 %ums  버퍼 최고 %u%%\n%s",
+                         (unsigned)(gDurS / 60), (unsigned)(gDurS % 60),
+                         (unsigned)gNavRows, (unsigned)gImuRows,
+                         (unsigned)gDropped, (unsigned)gWaited,
+                         (unsigned)gMaxStall, (unsigned)gMaxFill,
+                         gDropped ? "# ★ 버린 줄이 있습니다. 이 세션은 구멍이 있습니다.\n" : "");
+        if (n < 0) n = 0;
+        if ((size_t)n >= sizeof(foot)) n = sizeof(foot) - 1;
+        portENTER_CRITICAL(&gTextMux);
+        if (gTextUsed + (size_t)n < kTextBufSize) {
+            memcpy(gTextBuf + gTextUsed, foot, (size_t)n);
+            gTextUsed += (size_t)n;
+        }
+        portEXIT_CRITICAL(&gTextMux);
+        gNeedFinalize = true;
+        gState = RecState::Draining;
+    }
+
+    // 일꾼이 끝을 알릴 때까지 기다린다.
+    const uint32_t t0 = millis();
+    while (gState == RecState::Draining && millis() - t0 < 15000) {
+        delay(10);
+        esp_task_wdt_reset();
+    }
+    if (gState == RecState::Draining) {
+        // ★ 닫혔는지 모르는 채로 카드를 다시 붙이거나 표시를 지우면 안 된다.
+        //   표시(rec_on)는 남긴다. gNeedFinalize 가 남아 있어 일꾼이 닫으면 healthCheck 가 마무리한다.
+        gLastError = "닫기 시간 초과 — 카드가 대답이 없습니다";
+        gLastErrorShort = "닫기 초과";
+        gFail = FailInfo();
+        gFail.kind = 4; gFail.session = gSession; gFail.recSec = gDurS;
+        gFail.bytes = (uint32_t)gBytes; gFail.lost = (uint32_t)bufUsed(); gFail.card = cardPresent();
+        gFailedStop = true;     // 일꾼이 놓아준 뒤에 루프가 꺼내 NVS 에 적는다
+        Serial.println("[LOG] ★ 15초 안에 파일이 안 닫혔습니다. 닫히면 그때 머리글을 고칩니다.");
+        return false;
+    }
+
+    if (gState == RecState::Failed) {
+        Serial.printf("[LOG] ★ 닫으면서 %lu 바이트를 못 썼습니다 (errno %d)\n",
+                      (unsigned long)gLostBytes, gFail.err);
+    }
+    return finalizeClosed();
 }
 
 // 항법 한 줄(38바이트)을 링버퍼에 넣는다. 1 Hz 로 부른다.
@@ -598,7 +758,7 @@ void stop() {
 //   범위를 덮는데 **에러가 안 난다.** 파서 쪽에서만 깨져 보인다.
 //   (writeImu 는 kImuSize - 2 로 적어서 이 함정이 없다)
 void writeNav(const NavSample& s) {
-    if (!gRecording) return;
+    if (!isRec()) return;
     uint8_t r[kNavSize];
     size_t o = 0;
     put8 (r, o, kTypeNav);
@@ -632,7 +792,7 @@ void writeNav(const NavSample& s) {
 // 줄였다 — v1.0 에 있던 쿼터니언(8바이트)을 뺐다. 각도는 나중에 가속도와
 // 자이로로 다시 구할 수 있지만, 원본을 안 남기면 못 되살린다.
 void writeImu(const ImuSample& s) {
-    if (!gRecording) return;
+    if (!isRec()) return;
     uint8_t r[kImuSize];
     size_t o = 0;
     put8 (r, o, kTypeImu);
@@ -653,7 +813,7 @@ void writeImu(const ImuSample& s) {
 // 여기서 바로 카드에 안 쓴다. 램에 모았다가 1분에 한 번 쏟는다 —
 // 10초마다 다른 파일을 건드리면 바이너리 파일 자리가 조각난다.
 void writeText(const NavSample& s, const TextSample& t) {
-    if (!gRecording || !gTxt) return;
+    if (!isRec()) return;
 
     char line[320];
     int n = 0;
@@ -705,6 +865,9 @@ void writeText(const NavSample& s, const TextSample& t) {
                   (unsigned long)gDropped, (unsigned long)gMaxStall,
                   (unsigned long)gMaxFill);
 
+    // ★ 카드에는 일꾼이 쓴다. 메인 루프는 버퍼에 담기만 한다 (예전엔 여기서
+    //   write·flush 를 해서 카드가 느리면 루프가 통째로 멈췄다).
+    portENTER_CRITICAL(&gTextMux);
     if (n > 0 && gTextUsed + (size_t)n < kTextBufSize) {
         memcpy(gTextBuf + gTextUsed, line, (size_t)n);
         gTextUsed += (size_t)n;
@@ -713,11 +876,10 @@ void writeText(const NavSample& s, const TextSample& t) {
 
     // 1분에 한 번만 카드를 건드린다 (조각남 방지)
     if (millis() - gTextLastFlush >= 60000 || gTextUsed > kTextBufSize - 384) {
-        gTxt.write((const uint8_t*)gTextBuf, gTextUsed);
-        gTxt.flush();
-        gTextUsed = 0;
+        gTextFlushWanted = true;
         gTextLastFlush = millis();
     }
+    portEXIT_CRITICAL(&gTextMux);
 }
 
 // 이 세션에서 위성을 **처음** 잡은 시각을 적어 둔다. 두 번째부터는 무시한다.
@@ -726,7 +888,7 @@ void writeText(const NavSample& s, const TextSample& t) {
 // 그래서 stop() 이 파일을 닫으면서 머리글에 이 값을 다시 써 넣고 파일 이름도
 // 고친다.
 void noteUtcStart(uint32_t epochSec, uint16_t ms) {
-    if (!gRecording || gUtcStart || !epochSec) return;
+    if (!isRec() || gUtcStart || !epochSec) return;
     gUtcStart = epochSec;
     gUtcStartMs = ms;
     Serial.printf("[LOG] 첫 fix — UTC %lu.%03u 를 머리글에 적습니다\n",
@@ -743,7 +905,10 @@ void mark() {
     Serial.println("[LOG] 다음 줄에 표식을 붙입니다");
 }
 
-bool recording() { return gRecording; }
+bool recording() { return isRec(); }
+bool busy() { return sdBusy(gState); }
+RecState state() { return gState; }
+void noteDropped(uint32_t rows) { if (isRec()) gDropped += rows; }
 
 uint32_t sinceTextMs() { return millis() - gTextLastRow; }
 
@@ -755,7 +920,10 @@ uint32_t recStartedMs() { return gStartedMs; }
 // 부르는 쪽이 하나씩 읽으면 읽는 도중에 바뀌어 앞뒤가 안 맞는 상태를 본다.
 void getStatus(Status* out) {
     if (!out) return;
-    out->recording   = gRecording;
+    out->recording   = isRec();
+    out->state       = (uint8_t)gState;
+    out->lostBytes   = gLostBytes;
+    out->lastErrorShort = gLastErrorShort;
     out->cardPresent = cardPresent();
     out->session     = gSession;
     strncpy(out->path, gPath, sizeof(out->path) - 1);
@@ -781,7 +949,7 @@ void getStatus(Status* out) {
 //
 // 제일 중요한 건 마지막 것이다. IMU 가 정말 10 ms 등간격인지.
 void verify(uint32_t session) {
-    if (gRecording) { Serial.println("[검사] 기록 중에는 못 합니다. rec off 먼저."); return; }
+    if (busy()) { Serial.println("[검사] 기록 중에는 못 합니다. rec off 먼저."); return; }
     if (!cardPresent()) { Serial.println("[검사] 카드가 없습니다."); return; }
 
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
@@ -986,7 +1154,7 @@ void verify(uint32_t session) {
 // 카드를 뽑지 않고 배 위에서 "지금 것이 제대로 찍혔나" 를 보는 용이다.
 // head=true 면 앞에서, false 면 뒤에서 읽는다.
 void tail(uint32_t session, uint16_t lines, bool head) {
-    if (gRecording) { Serial.println("[꼬리] 기록 중에는 못 합니다. rec off 먼저."); return; }
+    if (busy()) { Serial.println("[꼬리] 기록 중에는 못 합니다. rec off 먼저."); return; }
     if (!cardPresent()) { Serial.println("[꼬리] 카드가 없습니다."); return; }
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
     if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
@@ -1059,7 +1227,7 @@ void tail(uint32_t session, uint16_t lines, bool head) {
 // 못 되돌린다. 그래서 기록 중에는 막고, 번호로만 받는다 —
 // 파일 이름을 직접 받으면 오타 하나로 남의 세션을 지운다.
 bool removeSession(uint32_t session) {
-    if (gRecording) { Serial.println("[지움] 기록 중에는 못 합니다. rec off 먼저."); return false; }
+    if (busy()) { Serial.println("[지움] 기록 중에는 못 합니다. rec off 먼저."); return false; }
     if (!session)   { Serial.println("[지움] 번호를 적으세요."); return false; }
     if (!cardPresent()) { Serial.println("[지움] 카드가 없습니다."); return false; }
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
@@ -1103,7 +1271,7 @@ bool removeSession(uint32_t session) {
 // 이름의 앞 번호가 정렬을 맡으므로 이름순이 곧 만든 순서다. 시각이 틀렸거나
 // `_nosat` 이 붙어 있어도 순서는 안 뒤집힌다 (nameFor 참조).
 void listFiles() {
-    if (gRecording) { Serial.println("[목록] 기록 중에는 못 합니다."); return; }
+    if (busy()) { Serial.println("[목록] 기록 중에는 못 합니다."); return; }
     if (!cardPresent()) { Serial.println("[목록] 카드가 없습니다."); return; }
     SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
     if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
@@ -1145,7 +1313,9 @@ void healthCheck() {
     // 쓰기 실패는 takeFailure() 로 루프가 꺼내 간다. 여기서 표시를 안 지운다 —
     // 루프가 곧 새 파일로 다시 걸고, 그것도 안 되고 전원이 오르내리면
     // 켤 때 이어 시작이 한 번 더 해 본다 (rec_try 5번 한도).
-    if (!gRecording) return;
+    // 닫기 시간 초과 뒤 일꾼이 혼자 닫았다 → 머리글·표시 마무리
+    if (gNeedFinalize && !busy()) finalizeClosed();
+    if (!isRec()) return;
     if (!cardPresent()) {
         Serial.println("[LOG] ★ 기록 중에 카드가 빠졌습니다 — 멈춥니다");
         FailInfo f;
@@ -1153,19 +1323,36 @@ void healthCheck() {
         f.card = false; f.bytes = (uint32_t)gBytes;
         stop();
         gLastError = "기록 중 카드가 빠졌습니다";
-        gFail = f;
+        gLastErrorShort = "카드 빠짐";
+        gFail = f;            // stop() 이 남긴 닫기 결과보다 "카드 빠짐" 이 원인이다
         gFailedStop = true;
     }
 }
 
 bool takeFailure(FailInfo* out) {
-    if (!gFailedStop || gStopWanted) return false;   // 아직 닫는 중
+    if (!gFailedStop || busy()) return false;   // 아직 닫는 중
     if (out) *out = gFail;
     gFailedStop = false;
     return true;
 }
 
 void noteLastFail(const char* line) { gLastFailLine = line; }
+void setSessionNote(const char* text) { gSessionNote = text; }
+void noteEvent(const char* text) {
+    if (!isRec() || !text) return;
+    const uint32_t sec = (millis() - gStartedMs) / 1000;
+    char line[256];
+    int n = snprintf(line, sizeof(line), "# %02u:%02u:%02u 설정 바뀜 — %s\n",
+                     (unsigned)(sec / 3600), (unsigned)(sec / 60 % 60), (unsigned)(sec % 60), text);
+    if (n <= 0) return;
+    if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;
+    portENTER_CRITICAL(&gTextMux);
+    if (gTextUsed + (size_t)n < kTextBufSize) {
+        memcpy(gTextBuf + gTextUsed, line, (size_t)n);
+        gTextUsed += (size_t)n;
+    }
+    portEXIT_CRITICAL(&gTextMux);
+}
 void testFailWrites(uint8_t n) { gTestFailN = n; }
 uint32_t writeRetries() { return gWriteRetries; }
 

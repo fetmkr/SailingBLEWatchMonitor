@@ -108,7 +108,7 @@ cd ../app && xcodegen generate && open SailingMonitor.xcodeproj
 
 | 단계 | 내용 |
 |---|---|
-| 1 | 펌웨어 로직 호스트 검증 — 인코딩 바이트, 시뮬레이션 궤적, 값 범위, 배터리 감소 |
+| 1 | 펌웨어 로직 호스트 검증 — 인코딩 바이트, 값 범위, 배터리 감소 · SD 부분 쓰기, CASIC 프레임, 자이로 단위, 설정 저장, HTTP Range (`fw_logic_test`) |
 | 2 | **C++ 인코더 → Swift 디코더 교차 검증** (192개 골든 벡터) + TFT 레이아웃 넘침 검사 |
 | 3 | 펌웨어 실제 컴파일 (RAK3112 + Feather TFT + DevKit) |
 | 4 | iOS / watchOS 앱 빌드 |
