@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include <esp_task_wdt.h>
+#include <mbedtls/base64.h>
 
 #include "board_rak.h"
 
@@ -1220,6 +1221,69 @@ void tail(uint32_t session, uint16_t lines, bool head) {
     f.close();
     SD.end();
     Serial.println("──────────────────────────────────────────");
+}
+
+// 파일 한 조각을 base64 로 뱉는다. `rec dump` 가 부른다.
+//
+// 맥 WiFi 를 갈아타지 않고 USB 로만 회수하는 길이다. 다른 작업의 로그가 줄 사이에
+// 끼어들 수 있어서 조각마다 CRC32(zlib 와 같은 식)를 붙인다. 틀리면 받는 쪽이 그 조각만 다시 청한다.
+void dump(uint32_t session, bool hlg, uint32_t offset, uint32_t len) {
+    if (busy()) { Serial.println("@DUMP X 기록 중"); return; }
+    if (!cardPresent()) { Serial.println("@DUMP X 카드 없음"); return; }
+    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
+    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+        Serial.println("@DUMP X 마운트 실패"); return;
+    }
+    char want[16];
+    snprintf(want, sizeof(want), "S%05u", (unsigned)session);
+    const char* ext = hlg ? ".HLG" : ".TXT";
+    char path[80];
+    path[0] = '\0';
+    {
+        File dir = SD.open("/LOGS");
+        while (File e = dir.openNextFile()) {
+            const String nm = e.name();
+            e.close();
+            if (nm.startsWith(want) && nm.endsWith(ext)) {
+                snprintf(path, sizeof(path), "/LOGS/%s", nm.c_str());
+                break;
+            }
+        }
+        dir.close();
+    }
+    if (!path[0]) { Serial.println("@DUMP X 파일 없음"); SD.end(); return; }
+    File f = SD.open(path, FILE_READ);
+    if (!f) { Serial.println("@DUMP X 열기 실패"); SD.end(); return; }
+
+    const uint32_t total = f.size();
+    Serial.printf("@DUMP S %s %u\n", path, (unsigned)total);
+    if (offset > total) offset = total;
+    if (len > 262144) len = 262144;
+    if (len > total - offset) len = total - offset;
+    f.seek(offset);
+
+    static uint8_t raw[3000];                 // 3 의 배수라야 줄마다 base64 가 끊기지 않는다
+    static unsigned char b64[4004];
+    uint32_t crc = 0xFFFFFFFFu, sent = 0;
+    while (sent < len) {
+        const size_t ask = (len - sent) < sizeof(raw) ? (len - sent) : sizeof(raw);
+        const size_t got = f.read(raw, ask);
+        if (got == 0) break;
+        for (size_t i = 0; i < got; ++i) {
+            crc ^= raw[i];
+            for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+        size_t olen = 0;
+        mbedtls_base64_encode(b64, sizeof(b64), &olen, raw, got);
+        Serial.print("@DUMP B ");
+        Serial.write(b64, olen);
+        Serial.print('\n');
+        sent += got;
+        esp_task_wdt_reset();
+    }
+    f.close();
+    SD.end();
+    Serial.printf("@DUMP E %u %u %08x\n", (unsigned)offset, (unsigned)sent, (unsigned)(crc ^ 0xFFFFFFFFu));
 }
 
 // 세션 하나를 지운다. HLG 와 TXT 둘 다. `rec rm <번호>` 가 부른다.

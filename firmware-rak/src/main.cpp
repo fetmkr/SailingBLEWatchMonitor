@@ -4821,6 +4821,20 @@ static void handleCommand(String line) {
             if (sdFreeFor("rec tail")) hlog::tail((uint32_t)(sess < 0 ? 0 : sess), (uint16_t)n, head);
             return;
         }
+        if (arg.startsWith("dump ")) {
+            // rec dump <번호> <hlg|txt> <시작> <바이트>   — tools/serial_dump.py 가 조각씩 청한다
+            char kind[8] = {0};
+            long sess = 0, off = 0, len = 0;
+            if (sscanf(arg.c_str() + 5, "%ld %7s %ld %ld", &sess, kind, &off, &len) != 4 ||
+                sess <= 0 || off < 0 || len <= 0 ||
+                (strcmp(kind, "hlg") != 0 && strcmp(kind, "txt") != 0)) {
+                Serial.println("@DUMP X 형식: rec dump <번호> <hlg|txt> <시작> <바이트>");
+                return;
+            }
+            if (sdFreeFor("rec dump"))
+                hlog::dump((uint32_t)sess, kind[0] == 'h', (uint32_t)off, (uint32_t)len);
+            return;
+        }
         if (arg == "check" || arg.startsWith("check ")) {
             const long n = (arg.length() > 6) ? arg.substring(6).toInt() : 0;
             if (sdFreeFor("rec check")) hlog::verify((uint32_t)(n < 0 ? 0 : n));

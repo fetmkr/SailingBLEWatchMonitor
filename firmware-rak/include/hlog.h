@@ -323,6 +323,10 @@ void verify(uint32_t session);
 // 마지막 순간의 전압·멈춤·버퍼를 보는 유일한 길이다.
 //   session 0 이면 마지막 세션.  head 를 켜면 앞부분을 본다
 void tail(uint32_t session, uint16_t lines = 20, bool head = false);
+// 세션 파일 한 조각을 시리얼로 보낸다 (WiFi 없이 USB 로 받기). tools/serial_dump.py 가 부른다.
+//   @DUMP S <경로> <크기> · @DUMP B <base64> 여러 줄 · @DUMP E <시작> <바이트> <crc32>
+//   실패는 @DUMP X <이유>. 조각 하나는 256 KB 까지.
+void dump(uint32_t session, bool hlg, uint32_t offset, uint32_t len);
 void listFiles();
 // 한 세션의 파일 두 벌(.HLG/.TXT)을 지운다. **되돌릴 수 없다.**
 // 번호를 하나만 받는다 — 한 번에 여러 개를 지우는 길은 일부러 안 만들었다.
