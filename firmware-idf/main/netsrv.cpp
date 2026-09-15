@@ -1048,8 +1048,17 @@ bool wifiMode(wifi_mode_t m) {
 
 void onEvents(bool on) {
     if (on && !gEvWifi) {
-        esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, onWifiEvent, nullptr, &gEvWifi);
-        esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, onWifiEvent, nullptr, &gEvIp);
+        // ★ 고침 (09-15 보드 실측): 부팅 뒤 WiFi 를 처음 켤 때는 기본 이벤트 루프가 아직 없다 (wifiMode 안의
+        //   wifiLowLevelInit 가 만든다). 루프 없이 등록하면 실패하고, STA 가 IP 를 받아도 kEvStaGotIp 가 안 서서
+        //   `wifi on` 이 15초 기다린 뒤 "못 붙었습니다" 로 끝났다. 등록 전에 루프를 만들고, 실패하면 크게 찍는다.
+        esp_netif_init();
+        const esp_err_t le = esp_event_loop_create_default();
+        if (le != ESP_OK && le != ESP_ERR_INVALID_STATE)
+            printf("[NET] ★ 이벤트 루프를 못 만들었습니다 (%s)\n", esp_err_to_name(le));
+        const esp_err_t e1 = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, onWifiEvent, nullptr, &gEvWifi);
+        const esp_err_t e2 = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, onWifiEvent, nullptr, &gEvIp);
+        if (e1 != ESP_OK || e2 != ESP_OK)
+            printf("[NET] ★ WiFi 사건 받기 등록 실패 (%s · %s) — 붙어도 모릅니다\n", esp_err_to_name(e1), esp_err_to_name(e2));
     } else if (!on && gEvWifi) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, gEvWifi);
         esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, gEvIp);

@@ -44,6 +44,11 @@
 - `rec on` 16초 → 세션 106: NAV 10.16 Hz · IMU 100.00 Hz 등간격 1680/1680 · CRC 0 · 버린 줄 0 · 정상 닫힘 · `rec check` 깨끗
 - ★ 기록 시작 **전** `rec` 에 IMU FIFO "넘칠 뻔 1번" (기록 중엔 0). 켤 때 BLE·화면·LoRa 올리는 동안으로 보임 [추측] — G06 에서 본다
 
+
+**09-15 19:25~19:35 사람 손 없는 시험 몰아 돌림** (로그 scratchpad `batch1.log` · `settings1~3.log` · `sleep1~2.log`)
+- 설정 바꾸는 시험 전에 NVS 영역을 `esptool read-flash 0x9000 0x5000` 으로 떠 두고(b5bf01e2…), 끝나고 `write-flash` 로 되돌림 → 다시 떠서 해시 같음 · 원래 값 확인
+- 새로 찾은 문제: ❌ W01 `wifi on` (이벤트 등록 순서) · ❌ W06 잴 방법 없음 · ❌ E02 USB 리셋 뒤 sleepstat 빔 (대조 중) · 🔶 G05 이어 시작 세션 버림 64
+
 ### 4.1 뼈대 · 기록 (1단계)
 
 | ID | 요구사항 | 기능 | 코드 | 빌드 | 보드 시험 방법 | 합격 기준 | 보드 시험 | 증거 |
@@ -68,7 +73,7 @@
 | G02 | A3 | fix · 속도 · 침로 (밖에서) | ✅ | ✅ | 밖에서 `fix` · `sog` · 1분 기록 | firmware-rak 과 같은 자리에서 값 대조 · itow 100 ms | ⬜ 실내만 | |
 | G03 | A6 | GPS 입력 끊김 → `--.--` · 복귀 | ✅ | ✅ | `test gps 5` (board_rec_test gps) | 무효 표시 · 복귀 | 🔶 무효는 봄, 실내라 복귀 값 없음 | PORTING 2단계 |
 | G04 | — | IMU FIFO 100 Hz · 자력 · 1 g | ✅ | ✅ | `imu` | |a|≈1 g · 자력 µT firmware-rak 과 같은 자세 대조 | 🔶 1 g·자력 봄, firmware-rak 대조 안 함 | PORTING 2단계 |
-| G05 | — | IMU 끊김 → dropped 정산 | ✅ | ✅ | `board_rec_test.py imu` · `clean` | 머리글 dropped 에 공백만큼 | ⬜ (USB 멎어 못 돌림) | |
+| G05 | — | IMU 끊김 → dropped 정산 | ✅ | ✅ | `board_rec_test.py imu` · `clean` | 머리글 dropped 에 공백만큼 | ✅ 19:27 세션 107: 17초 중 `test imu 30` 뒤 IMU 837줄 + 버림 956 (≈1700 기대) · rec check 깨끗. 🔶 이어 시작한 세션 108 이 IMU 다시 붙는 0.6초를 버림 64 로 셈 (실제 빈 구간) | |
 | G06 | — | 10분 기록 FIFO 넘침 0 | ✅ | ✅ | 10분 기록 → `rec` | 넘침 0 | ⬜ | |
 
 ### 4.3 BLE (3단계)
@@ -80,7 +85,7 @@
 | B03 | A7 | 연결 3대 · 한 대 끊겨도 나머지 계속 · 광고 다시 | ✅ | ✅ | 아이폰+워치 | 2/3 에서 광고 유지 · 끊김 뒤 계속 | ⬜ | |
 | B04 | B1·B2 | 제어 특성 `help`·`status` — **루프에서** 처리 | ✅ | ✅ | 앱에서 쓰기 · 로그 | 답 notify · 콜백 스택에서 일 안 함 | ⬜ | |
 | B05 | B4 | `magcal` BLE 로 · 진행 1초마다 | ✅ | ✅ | 워치에서 magcal on/stop | 막대 진행 · 저장 | ⬜ | |
-| B06 | B6 | `name`·`hz` 저장 뒤 재부팅 유지 | ✅ | ✅ | 시리얼 name/hz → 리셋 | NVS 값 유지 · firmware-rak 이 적은 이름 읽힘 | ⬜ | |
+| B06 | B6 | `name`·`hz` 저장 뒤 재부팅 유지 | ✅ | ✅ | 시리얼 name/hz → 리셋 | NVS 값 유지 · firmware-rak 이 적은 이름 읽힘 | ✅ 19:31 name idftest·hz 20 → 리셋 뒤 SAIL-idftest·20 Hz·광고 이름도 바뀜 → NVS 되돌림 뒤 SAIL-random() (firmware-rak 이 적은 이름) | |
 | B07 | — | **결정: 송신 출력** firmware-rak 도 실제 +12 dBm (`setPower(ESP_PWR_LVL_P9)` 인자 버그) | 그대로 옮김 | — | — | 사용자가 +9 / +12 정함 | ⬜ **사용자 결정 대기** | PORTING 3단계 |
 
 ### 4.4 화면 (4단계)
@@ -88,7 +93,7 @@
 | ID | 요구사항 | 기능 | 코드 | 빌드 | 보드 시험 방법 | 합격 기준 | 보드 시험 | 증거 |
 |---|---|---|---|---|---|---|---|---|
 | S01 | A3·A6 | 평소 화면 · REC · REC FAIL · SAVING · LOW · 모드 글자 | ✅ | ✅ 맥 11장면 프레임버퍼 같음 | 보드 화면 사진 | firmware-rak 화면과 같음 | 🔶 붙음 줄만 · 화면 사진 필요 | PORTING 4단계 |
-| S02 | — | `oledw` 폭 16개 | ✅ | ✅ | `oledw` | 58 89 66 87 121 74 57 98 74 58 74 82 103 113 105 89 | ⬜ | |
+| S02 | — | `oledw` 폭 16개 | ✅ | ✅ | `oledw` | 58 89 66 87 121 74 57 98 74 58 74 82 103 113 105 89 | ✅ 19:26 16개 모두 같음 | |
 | S03 | — | 화면 켠 채 10분 기록 — IMU 100 Hz 유지 | ✅ | ✅ | 10분 기록 · `loopstat` | FIFO 넘침 0 · I2C 오류 0 | ⬜ | |
 | S04 | — | 화면 뽑기·꽂기 · `oled` | ✅ | ✅ | 손으로 | 끊김 줄 · 다시 붙음 · 기록 계속 | ⬜ | |
 
@@ -96,47 +101,57 @@
 
 | ID | 요구사항 | 기능 | 코드 | 빌드 | 보드 시험 방법 | 합격 기준 | 보드 시험 | 증거 |
 |---|---|---|---|---|---|---|---|---|
-| W01 | B3 | `wifi ap` · `join` · `off` · ssid/pass 저장 (값은 로그에 길이만) | ✅ | ✅ | 시리얼 · 앱 | firmware-rak 과 같은 답 줄 | ⬜ | |
+| W01 | B3 | `wifi ap` · `join` · `off` · ssid/pass 저장 (값은 로그에 길이만) | ✅ | ✅ | 시리얼 · 앱 | firmware-rak 과 같은 답 줄 | ❌ **`wifi on`(join) 실패**: IP 를 받았는데 15초 뒤 "못 붙었습니다" · 그동안 루프 15초 멈춤. 원인: 이벤트 루프 생기기 전에 사건 처리기 등록 → IP 받음 표식 안 섬 (netsrv.cpp onEvents). 고침 넣음, 재시험 ⬜ · `wifi ap`/`off` 5번 반복 ✅ 줄 나옴 · ★ BLE 답 `ok wifi joining <SSID>` 는 앱 약속이라 이름을 그대로 보낸다 (firmware-rak 과 같음) | |
 | W02 | C5 | `/api/status`·`/api/files`·`/file` Range 200/206/416/400 | ✅ | ✅ | 사용자 기기에서 curl (내 맥 WiFi 안 바꿈) | firmware-rak 응답과 머리·몸통 바이트 같음 | ⬜ | |
 | W03 | C5 | 받은 파일 해시 = `rec hash` | ✅ | ✅ | 세션 46 받기 | sha256 같음 | ⬜ | |
 | W04 | — | 끄기 네 겹 (api off · lease 15초 · 떠남 8초 · idle) | ✅ | ✅ | 하나씩 | 각각 꺼짐 · BLE 다시 붙음 | ⬜ | |
-| W05 | — | 기록 중 WiFi 거절 · WiFi 켠 채 `rec on` 이면 끄고 시작 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 줄 | ⬜ | |
-| W06 | — | WiFi 여러 번 켜고 끄기 — 내부 메모리 안 샘 | ✅ | ✅ | 10번 · `heap_caps_get_free_size(INTERNAL)` 같은 순간 | 줄지 않음 | ⬜ | |
+| W05 | — | 기록 중 WiFi 거절 · WiFi 켠 채 `rec on` 이면 끄고 시작 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 줄 | 🔶 기록 중 거절 줄 ✅ ("기록 중에는 WiFi 를 안 켭니다") · WiFi 켠 채 rec on 은 join 버그로 못 봄 ⬜ | |
+| W06 | — | WiFi 여러 번 켜고 끄기 — 내부 메모리 안 샘 | ✅ | ✅ | 10번 · `heap_caps_get_free_size(INTERNAL)` 같은 순간 | 줄지 않음 | ❌ **미측정** — ap/off 5번 돌렸지만 남은 메모리를 찍는 줄이 없다. 재는 방법 필요 | |
 | **W07** | 목적 1 | **받기 속도: firmware-rak vs firmware-idf 기본판 vs `sdkconfig.tcp` 판** | ✅ | ✅ 둘 다 | 5장 | 5장 | ⬜ | |
 
 ### 4.6 LoRa (6단계)
 
 | ID | 요구사항 | 기능 | 코드 | 빌드 | 보드 시험 방법 | 합격 기준 | 보드 시험 | 증거 |
 |---|---|---|---|---|---|---|---|---|
-| L01 | F1 | 켤 때 설정 줄 · 전파시간 | ✅ | ✅ | 켤 때 · `lora` | 922.55 · SF7 · BW500 · 8 dBm · 14144 us | 🔶 켤 때 줄 같음 (14 ms), `lora` 안 침 | |
-| L02 | F1 | 칩 버그 셋 레지스터 | ✅ | ✅ | `lora regs` 보내기 전·후 | 15.1 bit2=1 → tx 뒤 0x0E→0x00 · 15.2 0xF · RxGain 0x96 · Sync 0x1424 | ⬜ | |
-| L03 | — | 바닥 잡음 | ✅ | ✅ | `lora rssi` | firmware-rak 같은 자리 값과 대조 | ⬜ | |
+| L01 | F1 | 켤 때 설정 줄 · 전파시간 | ✅ | ✅ | 켤 때 · `lora` | 922.55 · SF7 · BW500 · 8 dBm · 14144 us | ✅ 19:25 `lora` 14144 us · 922.55 · SF7 · BW500 · 8 dBm | |
+| L02 | F1 | 칩 버그 셋 레지스터 | ✅ | ✅ | `lora regs` 보내기 전·후 | 15.1 bit2=1 → tx 뒤 0x0E→0x00 · 15.2 0xF · RxGain 0x96 · Sync 0x1424 | ✅ 보내기 전 0x0E bit2=1 · 15.2 0x5E bit4~1=0xF · RxGain 0x96 · Sync 0x1424 · tx 뒤 0x00 (21.4 ms) | |
+| L03 | — | 바닥 잡음 | ✅ | ✅ | `lora rssi` | firmware-rak 같은 자리 값과 대조 | 🔶 −110 / 평균 −108.2 / −106 dBm — firmware-rak 같은 자리 대조는 안 함 | |
 | L04 | — | 두 보드 주고받기 | ✅ | ✅ | watch/tx | 받은 수 늘고 CRC 오류 0 | ⬜ **보드 두 대 필요** | |
-| L05 | F2 | `boat` 저장 · 기록 중 거절 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 줄 | ⬜ | |
-| L06 | — | 기록 중 `lora tx` — SD(SPI2)와 LoRa(SPI3) 안 부딪힘 | ✅ | ✅ | rec on 중 tx | 버린 줄 0 | ⬜ | |
+| L05 | F2 | `boat` 저장 · 기록 중 거절 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 줄 | 🔶 boat 3 저장·리셋 뒤 유지 ✅ · 기록 중 거절은 안 쳐 봄 | |
+| L06 | — | 기록 중 `lora tx` — SD(SPI2)와 LoRa(SPI3) 안 부딪힘 | ✅ | ✅ | rec on 중 tx | 버린 줄 0 | ✅ 세션 107 기록 중 tx · 최대 멈춤 9 ms · CRC 0 (버림 956 은 같은 세션의 IMU 끊김 시험 몫) | |
 
 ### 4.7 전원 · 버튼 · 잠 (7단계)
 
 | ID | 요구사항 | 기능 | 코드 | 빌드 | 보드 시험 방법 | 합격 기준 | 보드 시험 | 증거 |
 |---|---|---|---|---|---|---|---|---|
 | E01 | C3 | 단추 짧게=마킹 · 2초=시작/종료 · 5초=끄기 막대 | ✅ | ✅ | 사람이 단추 | firmware-rak 과 같은 동작 | 🔶 [BTN] 준비 줄만 · **밖에서 사용자가 누름** | |
-| E02 | E1·E2 | `off 60` 깨기 · 헛깸 0 · `/SLEEP.TXT` | ✅ | ✅ | `off 60` → `sleepstat` | 헛깸 0 · 60초 · GPS 바이트 0 | ⬜ (USB 가 사라진다) | |
+| E02 | E1·E2 | `off 60` 깨기 · 헛깸 0 · `/SLEEP.TXT` | ✅ | ✅ | `off 60` → `sleepstat` | 헛깸 0 · 60초 · GPS 바이트 0 | 🔶 19:3x USB 5~55초 사라짐 → 60초에 깸 ✅ · 깬 순간 보고 헛깸 0 · 3V3_S 꺼짐(GPS 0) ✅. ❌ 내가 포트 열어 리셋하자 `sleepstat` 이 "안 잤다" 로 빔 — firmware-rak 도 같은지 대조 중 · /SLEEP.TXT 확인 ⬜ | |
 | E03 | E5 | 잠자는 전류 | ✅ | ✅ | 멀티미터, USB 뽑고 | firmware-rak 129 µA 와 대조 | ⬜ **사람 손 · 계측기** | POWER.md §6 |
 | E04 | E3 | 기록 중 끄기 → 닫힌 뒤 꺼짐 · 닫기 지연 15초 뒤 강제 묻기 · `rec_forced` | ✅ | ✅ | `rec slow 20000` · `off` · `off force` | 켠 뒤 강제 끔 줄 · rec_fail 사유 | ⬜ | |
-| E05 | — | 깬 뒤 1초 전압 · `battboot` 곡선 | ✅ | ✅ | 깬 뒤 `battboot` | firmware-rak 곡선과 같은 모양 | ⬜ | |
+| E05 | — | 깬 뒤 1초 전압 · `battboot` 곡선 | ✅ | ✅ | 깬 뒤 `battboot` | firmware-rak 곡선과 같은 모양 | 🔶 11초 곡선 2480~2481 mV 평평 — 단 이 부팅은 깬 부팅이 아니라 USB 리셋 부팅이라 "깬 뒤" 곡선이 아니다 | |
 
 ### 4.8 설정 · 진단 명령 (메인)
 
 | ID | 요구사항 | 기능 | 코드 | 빌드 | 보드 시험 방법 | 합격 기준 | 보드 시험 | 증거 |
 |---|---|---|---|---|---|---|---|---|
-| M01 | D1 | `level` · `heel`/`pitch` 축 · 기록 중 잠금 | ✅ | ✅ | 시리얼 | NVS 저장 · 잠금 줄 | ⬜ | |
-| M02 | D2·D4 | `hdg` 축·off·decl·ref · 기록 중 잠금 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 출력 · NVS | ⬜ | |
+| M01 | D1 | `level` · `heel`/`pitch` 축 · 기록 중 잠금 | ✅ | ✅ | 시리얼 | NVS 저장 · 잠금 줄 | 🔶 level·heel -y·pitch -z 저장·리셋 뒤 유지 ✅ (NVS 백업→되돌림, 해시 같음) · 기록 중 잠금은 안 쳐 봄 | |
+| M02 | D2·D4 | `hdg` 축·off·decl·ref · 기록 중 잠금 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 출력 · NVS | 🔶 hdg -z x · off 10 · decl -8.5 · ref 0 출력 ✅ · 리셋 뒤 유지 ✅ · 기록 중 잠금 안 쳐 봄 · firmware-rak 출력 대조 안 함 | |
 | M03 | D3 | `magcal on/stop/clear` 판정 (magcal.h) | ✅ | ✅ | 사방 돌리기 | 저장 · 머리글 magHi | ⬜ **사람 손** | |
-| M04 | — | `hdgtilt` · `calib` · `scan` · `check` | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 출력 | ⬜ | |
-| M05 | — | `smooth`·`dead`·`sess`·`tz`·`pin`·`power`·`usbbench`·`loopstat`·`help` | ✅ | ✅ | 시리얼 | 같은 출력 · NVS | ⬜ | |
-| M06 | — | `sd` · `sdbench` · `batt` · `sleepstat` (diagnostics) | ✅ | ✅ | 같은 카드로 `sdbench 3000` 두 펌웨어 | 숫자 표로 나란히 | ⬜ | |
+| M04 | — | `hdgtilt` · `calib` · `scan` · `check` | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 출력 | 🔶 scan ✅ (0x3C·0x68, I2C2 없음) · calib 저장 ✅ · hdgtilt(사람이 기울임)·check 안 함 | |
+| M05 | — | `smooth`·`dead`·`sess`·`tz`·`pin`·`power`·`usbbench`·`loopstat`·`help` | ✅ | ✅ | 시리얼 | 같은 출력 · NVS | 🔶 smooth 3·dead 0.2·tz 600 저장·리셋 유지 ✅ · sess·power 14·help ✅ · pin 21 LOW (PPS, fix 없음 — 맞음) · usbbench 64 KB 72 KB/초 · loopstat 안 켜 봄 | |
+| M06 | — | `sd` · `sdbench` · `batt` · `sleepstat` (diagnostics) | ✅ | ✅ | 같은 카드로 `sdbench 3000` 두 펌웨어 | 숫자 표로 나란히 | 🔶 sd SDHC 122112 MB 쓰기 OK ✅ · batt 2483 mV 4.138 V ✅ · sleepstat ✅ · sdbench 두 펌웨어 대조 ⬜ | |
 | M07 | — | 1 Hz 시리얼 상태 줄 | ✅ | ✅ | 켜고 5초 | firmware-rak 과 같은 모양 | ⬜ | |
 | M08 | — | 명령 목록 빠짐 없음 | ✅ firmware-rak 50종 대조 빠짐 0 · 함수 188개 대조 | — | — | — | — (코드 대조만) | 09-15 대조 |
+
+## 4.9 외부 검토 지적 (09-15, 친구 검토 · 기준 커밋 84ddcf2) — 내가 코드·설정으로 다시 확인함
+
+| ID | 등급 | 지적 | 내 확인 | firmware-rak 도 같았나 | 고침 | 보드 시험 |
+|---|---|---|---|---|---|---|
+| R1 | P1 | SD flush·fsync·fclose 실패를 버려 저장 실패를 정상 종료로 보고할 수 있다 | ✅ 맞음 — `fileFlush` 반환 없음(hlog_idf.cpp:66) · `rewriteHeader` 는 fwrite 길이만 봄 · `finishSession` 본문 flush/close 무시 | 같음 (옮기며 그대로) | ⬜ flush/close 결과를 세션 결과·첫 오류에 합친다 | ⬜ flush·close 실패 주입 (`rec fail` 확장 필요) |
+| R2 | P1 | 부팅 뒤 첫 WiFi 에서 이벤트 루프가 없어 사건 등록 실패 | ✅ 맞음 — **보드에서 19:28 따로 재현함 (W01)** | 아님 (아두이노 WiFi.onEvent 가 처리) | 🔶 등록 전 루프 만들기·실패 찍기 넣음 (빌드 전). 검토대로 **일부 실패면 정리하고 false** 추가 필요 | ⬜ 새 부팅 첫 join · 첫 AP 접속/떠남 사건 |
+| R3 | P2 | 기록 중 `wifi scan` 이 루프를 몇 초 막는다 (동기 스캔, 막는 검사 없음) | ✅ 맞음 — app_main.cpp:1223 에 기록 중 거절 없음 · scan 은 block=true | 같음 (main.cpp:4043) | ⬜ 기록 중 거절 (`hlog::busy`) — `nmea` 등 긴 진단도 같이 본다 | ⬜ rec on → wifi scan → 거절 줄 |
+| R4 | P2 | `/api/files`·헤더 송신이 `httpd_send` 로 소켓당 최대 5초 막고 실패도 무시 | ✅ 맞음 — `rawWrite` 는 false 를 주지만 `sendContent` 가 버림 · `send_wait_timeout` 기본 5초(esp_http_server.h:71) · 목록 반복 계속 | 비슷 (WebServer 도 막는 송신) | ⬜ 실패를 올려 즉시 끝냄 · 목록도 한 바퀴 예산 | ⬜ 느린 클라이언트로 루프 지연·버튼·워치독 |
+| R5 | 설계 | 메인 루프가 **코어 0** — firmware-rak loop 는 **코어 1** 이었다. SD 일꾼·LoRa 일꾼·NimBLE(코어 0 고정)과 한 코어 | ✅ 맞음 — sdkconfig `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y` · 아두이노 `CONFIG_ARDUINO_RUNNING_CORE=1` · 내 주석(hlog_idf.cpp:106 · lora.cpp:314)은 "코어 1" 이라 **틀렸다** | 아님 — **옮기며 놓친 차이** | ⬜ `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y` (firmware-rak 과 같게) | ⬜ 10분 기록 FIFO 넘침 · loopstat · 켤 때 "넘칠 뻔 1번" 사라지나 |
 
 ## 5. 속도 비교 (목적 1)
 
