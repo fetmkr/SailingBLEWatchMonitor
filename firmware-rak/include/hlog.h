@@ -351,6 +351,8 @@ void setSessionNote(const char* text);
 void noteEvent(const char* line);
 // 시험용. 다음 n 번의 카드 쓰기를 "0 바이트 씀, EIO" 로 흉내 낸다.
 void testFailWrites(uint8_t n);
+// 시험용 (firmware-idf 만 구현). 다음 n 번의 카드 반영(flush/fsync)을 실패로 흉내 낸다 — 09-15 외부 검토 R1
+void testFailFlush(uint8_t n);
 uint32_t writeRetries();             // 다시 써서 살린 횟수 (이 부팅)
 
 // 카드에 쓴 파일을 보드가 직접 되읽어 검사한다.

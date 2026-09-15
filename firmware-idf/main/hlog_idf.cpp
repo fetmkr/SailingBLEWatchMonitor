@@ -63,7 +63,17 @@ FILE* sdOpen(const char* logsPath, const char* mode) {
     if (f) setvbuf(f, nullptr, _IOFBF, 4096);
     return f;
 }
-void fileFlush(FILE* f) { if (f) { fflush(f); fsync(fileno(f)); } }
+// 참 = 카드까지 내려갔다. ★ 09-15 외부 검토 R1: 옛 코드(firmware-rak 도)는 fflush·fsync 결과를 버려서,
+//   fwrite 가 메모리 버퍼에만 받고 카드 반영이 실패해도 정상 종료로 보고할 수 있었다.
+volatile uint8_t gTestFlushFailN = 0;   // 시험: 다음 n 번의 flush 를 실패로 흉내 (rec failflush <n>)
+volatile bool    gFlushFaked = false;   // 마지막 flush 실패가 흉내였나 — 실패 기록에 "(시험)" 을 붙인다
+bool fileFlush(FILE* f) {
+    if (!f) return true;
+    if (gTestFlushFailN) { gTestFlushFailN = (uint8_t)(gTestFlushFailN - 1); gFlushFaked = true; errno = EIO; return false; }
+    const bool a = fflush(f) == 0;
+    const bool b = fsync(fileno(f)) == 0;
+    return a && b;
+}
 long fileSize(FILE* f) {
     struct stat st;
     return (f && fstat(fileno(f), &st) == 0) ? (long)st.st_size : 0;
@@ -332,10 +342,26 @@ void writerTask(void*) {
             writerFlushText(false);
             if (millis() - lastFlush >= kFlushMs) {
                 const uint32_t b = millis();
-                fileFlush(gBin);
+                const bool flushed = fileFlush(gBin);
                 const uint32_t df = millis() - b;
                 if (df > gMaxStall) gMaxStall = df;
                 lastFlush = millis();
+                if (!flushed) {
+                    // ★ 카드 반영 실패 = 쓰기 실패와 같은 길 (첫 오류 적기 → 닫기 → 루프가 새 파일로 다시 건다). R1
+                    WriteReport fr;
+                    fr.err = errno ? errno : EIO;
+                    fr.faked = gFlushFaked;
+                    gFlushFaked = false;
+                    noteFirst(recctl::kErrWrite, fr);
+                    portENTER_CRITICAL(&gStateMux);
+                    toDraining(gState);
+                    portEXIT_CRITICAL(&gStateMux);
+                    gLastError = "카드 반영(flush) 실패";
+                    gLastErrorShort = "쓰기 실패";
+                    gDurS = (millis() - gStartedMs) / 1000;
+                    finishSession(false);
+                    continue;
+                }
             }
             if (!due) vTaskDelay(pdMS_TO_TICKS(5));
             continue;
@@ -587,7 +613,14 @@ bool start(const Header& h) {
         gLastErrorShort = "머리글 실패";
         return false;
     }
-    fileFlush(gBin);
+    if (!fileFlush(gBin)) {   // ★ R1: 머리글이 카드까지 안 내려갔으면 시작하지 않는다
+        fclose(gBin); gBin = nullptr;
+        if (gTxt) { fclose(gTxt); gTxt = nullptr; }
+        sdcard::release(sdcard::Owner::Recorder);
+        gLastError = "머리글을 카드에 못 내렸습니다 (flush 실패)";
+        gLastErrorShort = "머리글 실패";
+        return false;
+    }
 
     if (gTxt) {
         fprintf(gTxt, "# sail 경기정 모듈 — 세션 %u\n", (unsigned)gSession);
@@ -656,17 +689,34 @@ bool rewriteHeader(bool closed) {
         hdr[kOffClosed] = closed ? 1 : 0;
         const uint16_t c = crc16(hdr, 126);
         hdr[126] = (uint8_t)c; hdr[127] = (uint8_t)(c >> 8);
-        fseek(h, 0, SEEK_SET);
-        ok = (fwrite(hdr, 1, kHeaderSize, h) == kHeaderSize);
-        fileFlush(h);
+        // ★ R1: 자리 옮기기 · 쓰기 · 카드 반영 · 닫기가 **모두** 돼야 고친 것이다
+        ok = fseek(h, 0, SEEK_SET) == 0;
+        ok = ok && fwrite(hdr, 1, kHeaderSize, h) == kHeaderSize;
+        ok = fileFlush(h) && ok;
     }
-    fclose(h);
+    if (fclose(h) != 0) ok = false;
     return ok;
 }
 
 void finishSession(bool complete) {
-    if (gBin) { fileFlush(gBin); fclose(gBin); gBin = nullptr; }
-    if (gTxt) { fileFlush(gTxt); fclose(gTxt); gTxt = nullptr; }
+    // ★ R1: 본문이 카드까지 내려가고 닫혀야 "다 썼다". 아니면 닫힘 표시(closed=1)도 안 하고 첫 오류로 남긴다.
+    bool bodyOk = true;
+    if (gBin) {
+        bodyOk = fileFlush(gBin);
+        if (fclose(gBin) != 0) bodyOk = false;
+        gBin = nullptr;
+    }
+    if (gTxt) { fileFlush(gTxt); fclose(gTxt); gTxt = nullptr; }   // TXT 는 사본 — 실패해도 HLG 판정은 안 바꾼다
+    if (complete && !bodyOk) {
+        WriteReport fr;
+        fr.err = errno ? errno : EIO;
+        fr.faked = gFlushFaked;
+        gFlushFaked = false;
+        noteFirst(recctl::kErrDrainShort, fr);
+        gLastError = "닫으면서 카드에 다 못 내렸습니다 (flush/close 실패)";
+        gLastErrorShort = "닫기 실패";
+        complete = false;
+    }
     const bool hdrOk = rewriteHeader(complete);
     // 이름을 시각으로 바꾼다 — 이 세션에서 위성을 잡았으면 그 시각으로.
     if (gUtcStart) {
@@ -1318,6 +1368,7 @@ void noteEvent(const char* text) {
     portEXIT_CRITICAL(&gTextMux);
 }
 void testFailWrites(uint8_t n) { gTestFailN = n; }
+void testFailFlush(uint8_t n) { gTestFlushFailN = n; }
 uint32_t writeRetries() { return gWriteRetries; }
 
 } // namespace hlog

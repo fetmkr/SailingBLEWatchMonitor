@@ -23,6 +23,9 @@ CONFIG_FREERTOS_HZ=1000
 #   (framework-arduinoespressif32 cores/esp32/main.cpp:14 ARDUINO_LOOP_STACK_SIZE). IDF 기본 3584 로는 반도 안 된다.
 #   2026-09-15 5단계 작업이 찾음 — 1·2단계 보드 시험은 3584 로 돌았다 (memory: esp32-stack-and-leak-rules)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# ── 루프 코어 — ★ firmware-rak loopTask 는 코어 1 (아두이노 CONFIG_ARDUINO_RUNNING_CORE=1). IDF 기본은 코어 0 이라
+#   SD 쓰기 일꾼(코어 0) · LoRa 받기 일꾼(코어 0) · NimBLE 호스트(코어 0 고정)와 한 코어에 몰렸다 (09-15 외부 검토 R5)
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
 
 # ── 콘솔 — 보드의 USB 포트(USB Serial/JTAG, /dev/cu.usbmodem*) ──
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

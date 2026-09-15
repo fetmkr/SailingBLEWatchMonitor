@@ -106,7 +106,7 @@
 | W03 | C5 | 받은 파일 해시 = `rec hash` | ✅ | ✅ | 세션 46 받기 | sha256 같음 | ⬜ | |
 | W04 | — | 끄기 네 겹 (api off · lease 15초 · 떠남 8초 · idle) | ✅ | ✅ | 하나씩 | 각각 꺼짐 · BLE 다시 붙음 | ⬜ | |
 | W05 | — | 기록 중 WiFi 거절 · WiFi 켠 채 `rec on` 이면 끄고 시작 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 줄 | 🔶 기록 중 거절 줄 ✅ ("기록 중에는 WiFi 를 안 켭니다") · WiFi 켠 채 rec on 은 join 버그로 못 봄 ⬜ | |
-| W06 | — | WiFi 여러 번 켜고 끄기 — 내부 메모리 안 샘 | ✅ | ✅ | 10번 · `heap_caps_get_free_size(INTERNAL)` 같은 순간 | 줄지 않음 | ❌ **미측정** — ap/off 5번 돌렸지만 남은 메모리를 찍는 줄이 없다. 재는 방법 필요 | |
+| W06 | — | WiFi 여러 번 켜고 끄기 — 내부 메모리 안 샘 | ✅ | ✅ | 10번 · `heap_caps_get_free_size(INTERNAL)` 같은 순간 | 줄지 않음 | ⬜ 재는 줄 넣음: 시리얼 `wifi` 에 "내부 메모리 N 바이트 남음 (가장 작았을 때)" | |
 | **W07** | 목적 1 | **받기 속도: firmware-rak vs firmware-idf 기본판 vs `sdkconfig.tcp` 판** | ✅ | ✅ 둘 다 | 5장 | 5장 | ⬜ | |
 
 ### 4.6 LoRa (6단계)
@@ -148,10 +148,10 @@
 | ID | 등급 | 지적 | 내 확인 | firmware-rak 도 같았나 | 고침 | 보드 시험 |
 |---|---|---|---|---|---|---|
 | R1 | P1 | SD flush·fsync·fclose 실패를 버려 저장 실패를 정상 종료로 보고할 수 있다 | ✅ 맞음 — `fileFlush` 반환 없음(hlog_idf.cpp:66) · `rewriteHeader` 는 fwrite 길이만 봄 · `finishSession` 본문 flush/close 무시 | 같음 (옮기며 그대로) | ⬜ flush/close 결과를 세션 결과·첫 오류에 합친다 | ⬜ flush·close 실패 주입 (`rec fail` 확장 필요) |
-| R2 | P1 | 부팅 뒤 첫 WiFi 에서 이벤트 루프가 없어 사건 등록 실패 | ✅ 맞음 — **보드에서 19:28 따로 재현함 (W01)** | 아님 (아두이노 WiFi.onEvent 가 처리) | 🔶 등록 전 루프 만들기·실패 찍기 넣음 (빌드 전). 검토대로 **일부 실패면 정리하고 false** 추가 필요 | ⬜ 새 부팅 첫 join · 첫 AP 접속/떠남 사건 |
-| R3 | P2 | 기록 중 `wifi scan` 이 루프를 몇 초 막는다 (동기 스캔, 막는 검사 없음) | ✅ 맞음 — app_main.cpp:1223 에 기록 중 거절 없음 · scan 은 block=true | 같음 (main.cpp:4043) | ⬜ 기록 중 거절 (`hlog::busy`) — `nmea` 등 긴 진단도 같이 본다 | ⬜ rec on → wifi scan → 거절 줄 |
-| R4 | P2 | `/api/files`·헤더 송신이 `httpd_send` 로 소켓당 최대 5초 막고 실패도 무시 | ✅ 맞음 — `rawWrite` 는 false 를 주지만 `sendContent` 가 버림 · `send_wait_timeout` 기본 5초(esp_http_server.h:71) · 목록 반복 계속 | 비슷 (WebServer 도 막는 송신) | ⬜ 실패를 올려 즉시 끝냄 · 목록도 한 바퀴 예산 | ⬜ 느린 클라이언트로 루프 지연·버튼·워치독 |
-| R5 | 설계 | 메인 루프가 **코어 0** — firmware-rak loop 는 **코어 1** 이었다. SD 일꾼·LoRa 일꾼·NimBLE(코어 0 고정)과 한 코어 | ✅ 맞음 — sdkconfig `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y` · 아두이노 `CONFIG_ARDUINO_RUNNING_CORE=1` · 내 주석(hlog_idf.cpp:106 · lora.cpp:314)은 "코어 1" 이라 **틀렸다** | 아님 — **옮기며 놓친 차이** | ⬜ `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y` (firmware-rak 과 같게) | ⬜ 10분 기록 FIFO 넘침 · loopstat · 켤 때 "넘칠 뻔 1번" 사라지나 |
+| R2 | P1 | 부팅 뒤 첫 WiFi 에서 이벤트 루프가 없어 사건 등록 실패 | ✅ 맞음 — **보드에서 19:28 따로 재현함 (W01)** | 아님 (아두이노 WiFi.onEvent 가 처리) | 🔶 넣음·빌드 ✅: 등록 전 루프 만들기 · 일부 실패면 풀고 false · startAP/startJoin 이 false 면 안 켜고 BLE 되살림 | ⬜ 새 부팅 첫 join · 첫 AP 접속/떠남 사건 |
+| R3 | P2 | 기록 중 `wifi scan` 이 루프를 몇 초 막는다 (동기 스캔, 막는 검사 없음) | ✅ 맞음 — app_main.cpp:1223 에 기록 중 거절 없음 · scan 은 block=true | 같음 (main.cpp:4043) | 🔶 넣음·빌드 ✅: 기록 중 `wifi scan`(BLE·시리얼) → `err wifi recording` · 시리얼 `scan`·`pin`·`nmea`·`gpscfg static` 도 blockingDiagOk (★ firmware-rak 과 다름) | ⬜ rec on → 거절 줄 |
+| R4 | P2 | `/api/files`·헤더 송신이 `httpd_send` 로 소켓당 최대 5초 막고 실패도 무시 | ✅ 맞음 — `rawWrite` 는 false 를 주지만 `sendContent` 가 버림 · `send_wait_timeout` 기본 5초(esp_http_server.h:71) · 목록 반복 계속 | 비슷 (WebServer 도 막는 송신) | 🔶 넣음·빌드 ✅: 한 번 송신 실패하면 그 요청 나머지 송신·목록 반복 안 함 (최대 한 번 5초). 한 바퀴 예산은 안 넣음 — 성공하는 느린 송신은 여전히 조각마다 5초까지 [남은 위험] | ⬜ 느린 클라이언트로 루프 지연 |
+| R5 | 설계 | 메인 루프가 **코어 0** — firmware-rak loop 는 **코어 1** 이었다. SD 일꾼·LoRa 일꾼·NimBLE(코어 0 고정)과 한 코어 | ✅ 맞음 — sdkconfig `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y` · 아두이노 `CONFIG_ARDUINO_RUNNING_CORE=1` · 내 주석(hlog_idf.cpp:106 · lora.cpp:314)은 "코어 1" 이라 **틀렸다** | 아님 — **옮기며 놓친 차이** | 🔶 넣음·빌드 ✅: sdkconfig.defaults CPU1 → 새로 만든 sdkconfig `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y` 확인 | ⬜ 10분 기록 FIFO 넘침 · 켤 때 "넘칠 뻔" |
 
 ## 5. 속도 비교 (목적 1)
 

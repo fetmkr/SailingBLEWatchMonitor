@@ -255,11 +255,17 @@ bool uriEnds(const char* suf) {
     return a >= b && strcmp(gReq.uri + a - b, suf) == 0;
 }
 
+// 이 요청에서 송신이 한 번 실패했나. 실패했으면 나머지 머리·몸통을 안 보낸다 (09-15 외부 검토 R4).
+//   httpd_send 는 소켓당 send_wait_timeout(기본 5초) 동안 루프를 붙잡는다. 읽기를 멈춘 받는 쪽에 조각마다 5초씩
+//   쌓이면 화면·버튼·센서가 함께 멈춘다. 한 번 실패하면 그 요청은 끝낸다 — 최대 한 번만 기다린다.
+bool gSendFailed = false;
+
 // 소켓에 다 쓴다 (WebServer _currentClientWrite 자리). 실패하면 false.
 bool rawWrite(const char* p, size_t n) {
+    if (gSendFailed) return false;
     while (n) {
         const int w = httpd_send(gReq.r, p, n);
-        if (w <= 0) return false;
+        if (w <= 0) { gSendFailed = true; return false; }
         p += w; n -= (size_t)w;
     }
     return true;
@@ -288,6 +294,7 @@ void sendHeader(const char* name, const char* value) {
 void setContentLength(size_t n) { gReq.contentLength = n; }
 
 void sendContent(const char* s, size_t n) {   // WebServer.cpp sendContent
+    if (gSendFailed) return;
     if (gReq.chunked) {
         char sz[12];
         snprintf(sz, sizeof sz, "%x\r\n", (unsigned)n);
@@ -323,6 +330,7 @@ void send(int code, const char* type, const char* body) {
 
 // 요청을 끝낸다. async 사본을 돌려주고 연결을 닫는다 (WebServer 가 처리 뒤 클라이언트를 놓던 자리).
 void endRequest(httpd_req_t* r, int fd) {
+    gSendFailed = false;   // 다음 요청은 새로 보낸다
     if (!r) return;
     httpd_req_async_handler_complete(r);            // ★ 먼저 끝내고 (세션을 먼저 닫으면 사본이 가리키는 세션이 사라진다)
     if (gHttpd && fd >= 0) httpd_sess_trigger_close(gHttpd, fd);
@@ -489,7 +497,8 @@ void handleFiles() {
     static char item[512];
     static char path[300];
     struct dirent* de;
-    while (dir && (de = readdir(dir)) != nullptr) {
+    // 받는 쪽이 끊기거나 멈춰 송신이 실패하면 남은 항목(파일마다 머리글 읽기)을 더 안 돈다 (R4)
+    while (dir && !gSendFailed && (de = readdir(dir)) != nullptr) {
         const char* nm = de->d_name;
         const size_t nl = strlen(nm);
         if (nl < 4 || strcmp(nm + nl - 4, ".HLG") != 0) continue;   // TXT 는 사본이라 뺀다
@@ -1046,7 +1055,9 @@ bool wifiMode(wifi_mode_t m) {
     return true;
 }
 
-void onEvents(bool on) {
+// 참 = 사건을 받을 수 있다. 켜기(on)에서 등록이 하나라도 실패하면 등록된 것을 풀고 거짓 (09-15 외부 검토 R2).
+bool onEvents(bool on) {
+    bool ok = true;
     if (on && !gEvWifi) {
         // ★ 고침 (09-15 보드 실측): 부팅 뒤 WiFi 를 처음 켤 때는 기본 이벤트 루프가 아직 없다 (wifiMode 안의
         //   wifiLowLevelInit 가 만든다). 루프 없이 등록하면 실패하고, STA 가 IP 를 받아도 kEvStaGotIp 가 안 서서
@@ -1057,14 +1068,20 @@ void onEvents(bool on) {
             printf("[NET] ★ 이벤트 루프를 못 만들었습니다 (%s)\n", esp_err_to_name(le));
         const esp_err_t e1 = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, onWifiEvent, nullptr, &gEvWifi);
         const esp_err_t e2 = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, onWifiEvent, nullptr, &gEvIp);
-        if (e1 != ESP_OK || e2 != ESP_OK)
-            printf("[NET] ★ WiFi 사건 받기 등록 실패 (%s · %s) — 붙어도 모릅니다\n", esp_err_to_name(e1), esp_err_to_name(e2));
+        if (e1 != ESP_OK || e2 != ESP_OK) {
+            printf("[NET] ★ WiFi 사건 받기 등록 실패 (%s · %s) — 켜지 않습니다\n", esp_err_to_name(e1), esp_err_to_name(e2));
+            if (e1 == ESP_OK) esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, gEvWifi);
+            if (e2 == ESP_OK) esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, gEvIp);
+            gEvWifi = gEvIp = nullptr;
+            ok = false;
+        }
     } else if (!on && gEvWifi) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, gEvWifi);
         esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, gEvIp);
         gEvWifi = gEvIp = nullptr;
     }
     gEv = 0;
+    return ok;
 }
 
 uint8_t apStationNum() {
@@ -1092,7 +1109,11 @@ bool startAP() {
     stop();
     snprintf(gSsid, sizeof(gSsid), "%s", ::sailFullName());
 
-    onEvents(true);
+    if (!onEvents(true)) {
+        printf("[NET] AP 를 못 열었습니다.\n");
+        ::sailBleStart();
+        return false;
+    }
     wifi_config_t conf = {};   // WiFiAP.cpp wifi_softap_config: 채널 1 · 4대 · 비컨 100 · 숨김 0 · WPA2 · CCMP
     const size_t apLen = strnlen(gSsid, sizeof(conf.ap.ssid));   // _wifi_strncpy(…, 32) 와 같다
     memcpy(conf.ap.ssid, gSsid, apLen);
@@ -1143,7 +1164,11 @@ bool startJoin(uint32_t timeoutMs) {
         return false;
     }
     stop();
-    onEvents(true);
+    if (!onEvents(true)) {
+        printf("[NET] 못 붙었습니다. 이름·비밀번호를 보세요.\n");
+        ::sailBleStart();
+        return false;
+    }
     wifi_config_t conf = {};   // WiFiSTA.cpp wifi_sta_config: rssi −127 · PMF 가능 · 빠른 훑기 · 신호 순 · 비밀번호 있으면 WPA2 이상
     memcpy(conf.sta.ssid, gStaSsid, strnlen(gStaSsid, sizeof(conf.sta.ssid)));   // _wifi_strncpy(…, 32)
     if (gStaPass[0]) {

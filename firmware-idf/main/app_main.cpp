@@ -32,6 +32,7 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_flash.h"
+#include "esp_heap_caps.h"
 #include "esp_mac.h"
 #include "esp_psram.h"
 #include "esp_system.h"
@@ -1221,6 +1222,9 @@ static void controlLine(const char* raw) {
     }
     // wifi scan — BLE 를 안 내리고 할 수 있다
     if (!strcmp(line, "wifi scan")) {
+        // ★ 기록 중에는 안 한다 (09-15 외부 검토 R3). 스캔은 끝날 때까지 기다리는 방식(block)이라 채널마다
+        //   100~300 ms 씩 루프가 멈추고, 그동안 IMU FIFO(38벌 넘으면 비움)·NAV 줄·버튼이 밀린다. firmware-rak 은 막지 않았다.
+        if (hlog::busy()) { ble::controlSay("err wifi recording"); return; }
         static netsrv::ScanEntry list[20];   // 스택에 KB 를 안 올린다 (memory: esp32-stack-and-leak-rules)
         const int n2 = netsrv::scan(list, 20);
         snprintf(out, sizeof out, "scan begin %d", n2);
@@ -1399,7 +1403,15 @@ static void cmdRec(const char* arg) {
         hlog::noteLastFail(nullptr);
         gRecGaveUp = false; gRecRestarts = 0; gRecLastSaveBad = false;
         hlog::testFailWrites(0);
+        hlog::testFailFlush(0);   // 남은 흉내 횟수까지 지운다 (CLAUDE.md "지우기 명령은 남은 흉내 상태까지")
         printf("[REC] 멈춤 기록을 지웠습니다\n");
+        return;
+    }
+    // 시험: 다음 n 번의 카드 반영(flush)을 실패로 흉내 (R1 — 저장 마무리 실패가 정상 종료로 보이지 않나)
+    if (!strncmp(arg, "failflush ", 10)) {
+        long n = strtol(arg + 10, nullptr, 10);
+        hlog::testFailFlush((uint8_t)(n < 0 ? 0 : (n > 200 ? 200 : n)));
+        printf("[REC] 시험 — 다음 %ld번 카드 반영(flush)을 실패로 흉내 냅니다\n", n);
         return;
     }
     if (!strncmp(arg, "fail ", 5)) {
@@ -1886,6 +1898,7 @@ static void handleLine(char* line) {
         return;
     }
     if (!strncmp(line, "gpscfg static ", 14)) {
+        if (!blockingDiagOk("gpscfg static")) return;
         gps::cfgSetNavx(false, 0, true, strtof(line + 14, nullptr));
         return;
     }
@@ -1896,6 +1909,7 @@ static void handleLine(char* line) {
         if (*body == '$') ++body;
         if (char* star = strchr(body, '*')) *star = '\0';
         if (!*body) { printf("  보낼 내용이 없습니다\n"); return; }
+        if (!blockingDiagOk("nmea")) return;   // 3초 응답을 기다린다 (R3)
         gps::sendAndWatch(body);
         return;
     }
@@ -1935,7 +1949,8 @@ static void handleLine(char* line) {
         printf("  안 잡힌 게 있으면 power 값을 바꿔 다시 check 하세요.\n");
         return;
     }
-    if (!strcmp(line, "scan"))     { doScan(); return; }
+    // 몇 초씩 루프를 붙잡는 진단은 기록 중 막는다 (R3). firmware-rak 은 scan·pin·nmea·gpscfg static 을 막지 않았다.
+    if (!strcmp(line, "scan"))     { if (blockingDiagOk("scan")) doScan(); return; }
     if (!strcmp(line, "hdgtilt"))  { if (blockingDiagOk("hdgtilt")) doHeadingTilt(); return; }
     if (!strcmp(line, "magcal") || !strncmp(line, "magcal ", 7)) {
         char msg[200];
@@ -1945,7 +1960,7 @@ static void handleLine(char* line) {
     }
     if (!strcmp(line, "sess") || !strncmp(line, "sess ", 5)) { cmdSess(line); return; }
     if (!strcmp(line, "tz") || !strncmp(line, "tz ", 3))     { cmdTz(line); return; }
-    if (!strncmp(line, "pin ", 4))                            { cmdPin(line); return; }
+    if (!strncmp(line, "pin ", 4))                            { if (blockingDiagOk("pin")) cmdPin(line); return; }
     if (!strcmp(line, "usbbench") || !strncmp(line, "usbbench ", 9)) { cmdUsbBench(line); return; }
     if (!strcmp(line, "loopstat")) {
         gLoopStat = !gLoopStat;
@@ -2005,6 +2020,10 @@ static void handleLine(char* line) {
                 break;
         }
         printf("  보낸 파일     %u개  %.2f MB\n", (unsigned)netsrv::servedFiles(), netsrv::servedBytes() / 1048576.0);
+        // WiFi 를 여러 번 켜고 끌 때 새는지 보려고 (체크리스트 W06). PSRAM 이 섞이지 않게 내부 메모리만.
+        printf("  내부 메모리   %u 바이트 남음 (가장 작았을 때 %u)\n",
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
         printf("──────────────────────────────────────────\n");
         printf("  wifi ap    보드가 스스로 WiFi 를 만든다 (바닷가용)\n");
         printf("  wifi join  저장된 WiFi 에 붙는다\n");
