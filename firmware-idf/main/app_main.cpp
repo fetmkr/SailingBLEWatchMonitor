@@ -22,6 +22,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fcntl.h>    // sdread 방식 3 — POSIX open/read
+#include <unistd.h>
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -1835,6 +1837,63 @@ static void cmdUsbBench(const char* line) {
     printf("\nBENCH END %lu KB  %.2f초  %.0f KB/초\n", (unsigned long)kb, dt / 1000.0f, dt ? kb * 1000.0f / dt : 0.0f);
 }
 
+// sdread <파일이름> <MB> <방식> — WiFi 없이 SD 파일 읽기만 잰다 (09-15 새로 만듦, firmware-rak 에 없음)
+//   파일 받기가 느린 게 카드·SPI 한계인지, 읽는 코드의 손실인지 가르려고. 같은 파일·같은 양으로 방식만 바꾼다.
+//   방식 0 fopen 기본 버퍼 + fread 4 KB (setvbuf 없이 — 고치기 전 파일 보내기와 같음)
+//        1 setvbuf 4 KB + fread 4 KB · 2 setvbuf 16 KB + fread 4 KB · 3 POSIX open/read 16 KB (stdio 안 거침)
+static void cmdSdRead(const char* line) {
+    char name[64] = "";
+    long mb = 2, how = 0;
+    if (sscanf(line + 7, "%63s %ld %ld", name, &mb, &how) < 1 || strchr(name, '/') || strstr(name, "..")) {
+        printf("[SDREAD] 형식: sdread <LOGS 안 파일이름> <MB> <방식 0~3>\n");
+        return;
+    }
+    if (mb < 1) mb = 1;
+    if (mb > 64) mb = 64;
+    if (how < 0 || how > 3) how = 0;
+    if (!sdcard::acquire(sdcard::Owner::Diagnostic)) { printf("[SDREAD] 카드를 못 잡았습니다\n"); return; }
+    char path[96];
+    snprintf(path, sizeof path, "/sd/LOGS/%s", name);
+    static uint8_t* buf = nullptr;
+    static char* vbuf = nullptr;
+    if (!buf) buf = (uint8_t*)heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!vbuf) vbuf = (char*)heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const uint32_t want = (uint32_t)mb * 1048576u;
+    uint64_t got = 0;
+    const int64_t t0 = esp_timer_get_time();
+    uint32_t calls = 0;
+    bool ok = buf && vbuf;
+    if (ok && how == 3) {
+        const int fd = open(path, O_RDONLY);
+        if (fd < 0) ok = false;
+        while (ok && got < want) {
+            const int n = read(fd, buf, 16384);
+            if (n <= 0) break;
+            got += (uint64_t)n; ++calls;
+            if ((calls & 63) == 0) feedWatchdog();
+        }
+        if (fd >= 0) close(fd);
+    } else if (ok) {
+        FILE* f = fopen(path, "rb");
+        if (!f) ok = false;
+        if (f && how == 1) setvbuf(f, vbuf, _IOFBF, 4096);
+        if (f && how == 2) setvbuf(f, vbuf, _IOFBF, 16384);
+        while (ok && got < want) {
+            const size_t n = fread(buf, 1, 4096, f);
+            if (n == 0) break;
+            got += n; ++calls;
+            if ((calls & 255) == 0) feedWatchdog();
+        }
+        if (f) fclose(f);
+    }
+    const double sec = (esp_timer_get_time() - t0) / 1e6;
+    sdcard::release(sdcard::Owner::Diagnostic);
+    if (!ok) { printf("[SDREAD] %s 를 못 열었습니다 (또는 버퍼 못 잡음)\n", name); return; }
+    static const char* kHow[] = {"fopen 기본 버퍼 + fread 4KB", "setvbuf 4KB + fread 4KB", "setvbuf 16KB + fread 4KB", "read() 16KB"};
+    printf("[SDREAD] 방식 %ld (%s) · %llu 바이트 · %.2f초 · %.0f KB/초 · 부름 %lu번\n",
+           how, kHow[how], (unsigned long long)got, sec, sec > 0 ? got / 1024.0 / sec : 0.0, (unsigned long)calls);
+}
+
 // power [14|2|off] — 센서 전원 핀 (firmware-rak 5112-5149)
 static void cmdPower(const char* line) {
     char arg[16];
@@ -1927,6 +1986,7 @@ static void handleLine(char* line) {
         return;
     }
     if (!strcmp(line, "sd"))        { if (sdFreeFor("sd")) diag::sdCheck(); return; }
+    if (!strncmp(line, "sdread ", 7)) { if (sdFreeFor("sdread") && blockingDiagOk("sdread")) cmdSdRead(line); return; }
     // SD 쓰기 속도 실측. 기본 3600줄 = 10 Hz 로 6분치.
     if (!strcmp(line, "sdbench") || !strncmp(line, "sdbench ", 8)) {
         long n = (strlen(line) > 8) ? strtol(line + 8, nullptr, 10) : 3600;

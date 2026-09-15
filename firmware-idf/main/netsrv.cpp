@@ -36,8 +36,10 @@
 
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>          // 파일 보내기 read()
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"   // 보내기 버퍼 16 KB 를 PSRAM 에
 #include "esp_http_server.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -581,11 +583,24 @@ struct Xfer {
     uint32_t     t0 = 0, lastProgress = 0;
     uint32_t     usRead = 0, usWrite = 0;
     char         what[64] = {0};
+    // ★ 09-15: send 가 일부만 받으면 옛 코드(firmware-rak 과 같은 방식)는 나머지를 버리고 fseek 로 되돌려 다음에 카드에서
+    //   다시 읽었다. TCP 버퍼가 찰 때마다 같은 바이트를 또 읽어 읽기 시간이 전송의 60~70% 였다 [추측 — 아래 수로 확인].
+    //   이제 못 보낸 나머지는 gXBuf 에 두고 다음에 그대로 보낸다.
+    uint32_t     bufOff = 0, bufLen = 0;   // gXBuf 안에서 아직 안 보낸 구간 [bufOff, bufLen)
+    uint32_t     shortSends = 0;           // send 가 일부만 받은 횟수
+    uint64_t     rereadAvoided = 0;        // 옛 방식이었으면 카드에서 다시 읽었을 바이트
 };
 Xfer gX;
 constexpr uint32_t kXferStallMs  = 10000;
 constexpr uint32_t kXferBudgetMs = 20;
-uint8_t gXBuf[4096];                  // ★ 스택에 안 올린다
+// ★ 09-15: 4 KB 내부 램 → 16 KB PSRAM. sdread 실측에서 read() 16 KB 가 제일 빨랐다 (1373 KB/초, fread 4 KB 1189).
+//   처음 보낼 때 한 번 잡는다 (xferBuf). 스택에 안 올린다.
+constexpr size_t kXBufSize = 16384;
+uint8_t* gXBuf = nullptr;
+bool xferBuf() {
+    if (!gXBuf) gXBuf = (uint8_t*)heap_caps_malloc(kXBufSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return gXBuf != nullptr;
+}
 
 // WiFiClient::connected 자리 — 한 바이트 엿보기. 0 이면 상대가 닫았다.
 bool sockConnected(int fd) {
@@ -614,11 +629,12 @@ void xferFinish(bool ok, const char* why) {
         gBusyFile[0] = 0;
     }
     printf("[NET] %s %s  %lu/%lu 바이트  %.1f초  %.0f KB/초"
-           "  (읽기 %.2f초  WiFi 쓰기 %.2f초)%s%s\n",
+           "  (읽기 %.2f초  WiFi 쓰기 %.2f초  짧게 보냄 %lu번  다시 안 읽은 %lu KB)%s%s\n",
            ok ? "보냄" : "★ 중단", gX.what,
            (unsigned long)gX.sent, (unsigned long)gX.len, dt / 1000.0f,
            dt ? gX.sent / 1.024f / dt : 0.0f,
            gX.usRead / 1e6f, gX.usWrite / 1e6f,
+           (unsigned long)gX.shortSends, (unsigned long)(gX.rereadAvoided / 1024),
            why ? " — " : "", why ? why : "");
     gX = Xfer();
 }
@@ -629,17 +645,25 @@ void xferPump() {
     while (millis() - start < kXferBudgetMs) {
         if (gX.sent >= gX.len) { xferFinish(true, nullptr); return; }
         if (!sockConnected(gX.fd)) { xferFinish(false, "받는 기기가 끊었습니다"); return; }
-        const uint32_t left = gX.len - gX.sent;
-        const size_t want = left > sizeof(gXBuf) ? sizeof(gXBuf) : (size_t)left;
-        uint32_t t = micros();
-        const int got = gX.synthetic ? (int)want : (int)fread(gXBuf, 1, want, gX.f);
-        gX.usRead += micros() - t;
-        if (got <= 0) { xferFinish(false, "SD 읽기 실패"); return; }
+        uint32_t t;
+        if (gX.bufOff >= gX.bufLen) {   // 버퍼를 다 보냈을 때만 카드에서 새로 읽는다
+            const uint32_t left = gX.len - gX.sent;
+            const size_t want = left > kXBufSize ? kXBufSize : (size_t)left;
+            t = micros();
+            // ★ stdio 를 안 거치고 read() 로 (Espressif 성능 가이드 "prefer read and write over fread and fwrite").
+            //   handleFile 의 fseek 는 stdio 버퍼를 비우고 fd 위치를 옮기므로, 그 뒤 fileno 로 read 해도 자리가 맞다.
+            const int rd = gX.synthetic ? (int)want : (int)::read(fileno(gX.f), gXBuf, want);
+            gX.usRead += micros() - t;
+            if (rd <= 0) { xferFinish(false, "SD 읽기 실패"); return; }
+            gX.bufOff = 0;
+            gX.bufLen = (uint32_t)rd;
+        }
+        const size_t got = gX.bufLen - gX.bufOff;   // 이번에 보낼 것
         t = micros();
         size_t w = 0;
         if (gX.fd < 0) { xferFinish(false, "소켓이 없습니다"); return; }
         errno = 0;
-        const int res = ::send(gX.fd, gXBuf, (size_t)got, MSG_DONTWAIT);
+        const int res = ::send(gX.fd, gXBuf + gX.bufOff, got, MSG_DONTWAIT);
         if (res > 0) w = (size_t)res;
         else if (res < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
             gX.usWrite += micros() - t;
@@ -648,14 +672,16 @@ void xferPump() {
         }
         gX.usWrite += micros() - t;
         if (w > 0) {
+            gX.bufOff += (uint32_t)w;
             gX.pos += (uint32_t)w;
             gX.sent += (uint32_t)w;
             gX.lastProgress = millis();
             used();
             fastOn();
         }
-        if (w < (size_t)got) {
-            if (!gX.synthetic) fseek(gX.f, (long)gX.pos, SEEK_SET);
+        if (w < got) {
+            ++gX.shortSends;
+            gX.rereadAvoided += got - w;   // 옛 코드는 여기서 fseek 로 되돌려 이만큼을 다시 읽었다
             if (millis() - gX.lastProgress > kXferStallMs) {
                 xferFinish(false, "10초 동안 한 바이트도 못 보냈습니다");
             }
@@ -704,6 +730,7 @@ void handleFile() {
         send(404, "application/json", "{\"ok\":false,\"error\":\"그런 파일이 없습니다\"}");
         return;
     }
+    // (09-15) 본문은 xferPump 가 read() 16 KB 로 읽는다 — stdio 버퍼(setvbuf)는 안 쓴다. 한때 setvbuf 16 KB 로 580→730 KB/초 였다 (CHECKLIST 5장)
     struct stat stt;
     const uint32_t total = (fstat(fileno(f), &stt) == 0) ? (uint32_t)stt.st_size : 0;
 
@@ -748,6 +775,11 @@ void handleFile() {
         return;
     }
 
+    if (!xferBuf()) {
+        fclose(f);
+        send(500, "application/json", "{\"ok\":false,\"error\":\"보내기 버퍼를 못 잡았습니다\"}");
+        return;
+    }
     fastOn();
     gBusyIp = meIp;
     strlcpy(gBusyFile, name, sizeof(gBusyFile));   // snprintf 로 자르던 것과 같은 결과
@@ -881,8 +913,12 @@ void handleSpeed() {
     if (mb < 1) mb = 1;
     if (mb > 32) mb = 32;
 
+    if (!xferBuf()) {
+        send(500, "application/json", "{\"ok\":false,\"error\":\"보내기 버퍼를 못 잡았습니다\"}");
+        return;
+    }
     fastOn();
-    memset(gXBuf, 0x5A, sizeof(gXBuf));
+    memset(gXBuf, 0x5A, kXBufSize);
     const uint32_t total = mb * 1024UL * 1024UL;
     setContentLength(total);
     send(200, "application/octet-stream", "");

@@ -67,9 +67,10 @@ FILE* sdOpen(const char* logsPath, const char* mode) {
 //   fwrite 가 메모리 버퍼에만 받고 카드 반영이 실패해도 정상 종료로 보고할 수 있었다.
 volatile uint8_t gTestFlushFailN = 0;   // 시험: 다음 n 번의 flush 를 실패로 흉내 (rec failflush <n>)
 volatile bool    gFlushFaked = false;   // 마지막 flush 실패가 흉내였나 — 실패 기록에 "(시험)" 을 붙인다
-bool fileFlush(FILE* f) {
+// hlg=true 인 부름에만 흉내 실패를 건다 — TXT 사본 flush 가 흉내를 먼저 써 버려 HLG 시험이 안 됐다 (09-15 보드 실측)
+bool fileFlush(FILE* f, bool hlg = false) {
     if (!f) return true;
-    if (gTestFlushFailN) { gTestFlushFailN = (uint8_t)(gTestFlushFailN - 1); gFlushFaked = true; errno = EIO; return false; }
+    if (hlg && gTestFlushFailN) { gTestFlushFailN = (uint8_t)(gTestFlushFailN - 1); gFlushFaked = true; errno = EIO; return false; }
     const bool a = fflush(f) == 0;
     const bool b = fsync(fileno(f)) == 0;
     return a && b;
@@ -342,7 +343,7 @@ void writerTask(void*) {
             writerFlushText(false);
             if (millis() - lastFlush >= kFlushMs) {
                 const uint32_t b = millis();
-                const bool flushed = fileFlush(gBin);
+                const bool flushed = fileFlush(gBin, true);
                 const uint32_t df = millis() - b;
                 if (df > gMaxStall) gMaxStall = df;
                 lastFlush = millis();
@@ -613,7 +614,7 @@ bool start(const Header& h) {
         gLastErrorShort = "머리글 실패";
         return false;
     }
-    if (!fileFlush(gBin)) {   // ★ R1: 머리글이 카드까지 안 내려갔으면 시작하지 않는다
+    if (!fileFlush(gBin, true)) {   // ★ R1: 머리글이 카드까지 안 내려갔으면 시작하지 않는다
         fclose(gBin); gBin = nullptr;
         if (gTxt) { fclose(gTxt); gTxt = nullptr; }
         sdcard::release(sdcard::Owner::Recorder);
@@ -702,7 +703,7 @@ void finishSession(bool complete) {
     // ★ R1: 본문이 카드까지 내려가고 닫혀야 "다 썼다". 아니면 닫힘 표시(closed=1)도 안 하고 첫 오류로 남긴다.
     bool bodyOk = true;
     if (gBin) {
-        bodyOk = fileFlush(gBin);
+        bodyOk = fileFlush(gBin, true);
         if (fclose(gBin) != 0) bodyOk = false;
         gBin = nullptr;
     }

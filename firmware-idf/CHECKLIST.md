@@ -101,12 +101,12 @@
 
 | ID | 요구사항 | 기능 | 코드 | 빌드 | 보드 시험 방법 | 합격 기준 | 보드 시험 | 증거 |
 |---|---|---|---|---|---|---|---|---|
-| W01 | B3 | `wifi ap` · `join` · `off` · ssid/pass 저장 (값은 로그에 길이만) | ✅ | ✅ | 시리얼 · 앱 | firmware-rak 과 같은 답 줄 | ❌ **`wifi on`(join) 실패**: IP 를 받았는데 15초 뒤 "못 붙었습니다" · 그동안 루프 15초 멈춤. 원인: 이벤트 루프 생기기 전에 사건 처리기 등록 → IP 받음 표식 안 섬 (netsrv.cpp onEvents). 고침 넣음, 재시험 ⬜ · `wifi ap`/`off` 5번 반복 ✅ 줄 나옴 · ★ BLE 답 `ok wifi joining <SSID>` 는 앱 약속이라 이름을 그대로 보낸다 (firmware-rak 과 같음) | |
-| W02 | C5 | `/api/status`·`/api/files`·`/file` Range 200/206/416/400 | ✅ | ✅ | 사용자 기기에서 curl (내 맥 WiFi 안 바꿈) | firmware-rak 응답과 머리·몸통 바이트 같음 | ⬜ | |
-| W03 | C5 | 받은 파일 해시 = `rec hash` | ✅ | ✅ | 세션 46 받기 | sha256 같음 | ⬜ | |
+| W01 | B3 | `wifi ap` · `join` · `off` · ssid/pass 저장 (값은 로그에 길이만) | ✅ | ✅ | 시리얼 · 앱 | firmware-rak 과 같은 답 줄 | ✅ 19:45 고친 뒤 새 부팅 첫 join 붙음 (R2) · ~~❌ `wifi on`(join) 실패~~: IP 를 받았는데 15초 뒤 "못 붙었습니다" · 그동안 루프 15초 멈춤. 원인: 이벤트 루프 생기기 전에 사건 처리기 등록 → IP 받음 표식 안 섬 (netsrv.cpp onEvents). 고침 넣음, 재시험 ⬜ · `wifi ap`/`off` 5번 반복 ✅ 줄 나옴 · ★ BLE 답 `ok wifi joining <SSID>` 는 앱 약속이라 이름을 그대로 보낸다 (firmware-rak 과 같음) | |
+| W02 | C5 | `/api/status`·`/api/files`·`/file` Range 200/206/416/400 | ✅ | ✅ | 사용자 기기에서 curl (내 맥 WiFi 안 바꿈) | firmware-rak 응답과 머리·몸통 바이트 같음 | ✅ 19:52 `/api/status` 200 (283 B) · `/api/files` 200 (62개, 16.8 KB, 1.1초) — firmware-rak 응답과 바이트 대조 ⬜ · Range 206 ✅ (2 MB) · 416/400 ⬜ |  |
+| W03 | C5 | 받은 파일 해시 = `rec hash` | ✅ | ✅ | 세션 46 받기 | sha256 같음 | ✅ 19:52 세션 105 WiFi 로 받은 144439 B 의 sha256 = 보드 `rec hash 105 hlg` (7b8267d0…) |  |
 | W04 | — | 끄기 네 겹 (api off · lease 15초 · 떠남 8초 · idle) | ✅ | ✅ | 하나씩 | 각각 꺼짐 · BLE 다시 붙음 | ⬜ | |
-| W05 | — | 기록 중 WiFi 거절 · WiFi 켠 채 `rec on` 이면 끄고 시작 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 줄 | 🔶 기록 중 거절 줄 ✅ ("기록 중에는 WiFi 를 안 켭니다") · WiFi 켠 채 rec on 은 join 버그로 못 봄 ⬜ | |
-| W06 | — | WiFi 여러 번 켜고 끄기 — 내부 메모리 안 샘 | ✅ | ✅ | 10번 · `heap_caps_get_free_size(INTERNAL)` 같은 순간 | 줄지 않음 | ⬜ 재는 줄 넣음: 시리얼 `wifi` 에 "내부 메모리 N 바이트 남음 (가장 작았을 때)" | |
+| W05 | — | 기록 중 WiFi 거절 · WiFi 켠 채 `rec on` 이면 끄고 시작 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 줄 | ✅ 거절 줄 · 19:45 Join 켠 채 rec on → "WiFi 가 켜져 있어 끕니다" 뒤 시작 · 19:47 AP 켠 채도 같음 | |
+| W06 | — | WiFi 여러 번 켜고 끄기 — 내부 메모리 안 샘 | ✅ | ✅ | 10번 · `heap_caps_get_free_size(INTERNAL)` 같은 순간 | 줄지 않음 | ✅ 19:46 꺼진 상태 내부 메모리 135215 → (AP 켜고 끄기) 135219 → (4번 더) 135219 — 줄지 않음. 켜진 동안 가장 작았을 때 43956 | |
 | **W07** | 목적 1 | **받기 속도: firmware-rak vs firmware-idf 기본판 vs `sdkconfig.tcp` 판** | ✅ | ✅ 둘 다 | 5장 | 5장 | ⬜ | |
 
 ### 4.6 LoRa (6단계)
@@ -147,22 +147,63 @@
 
 | ID | 등급 | 지적 | 내 확인 | firmware-rak 도 같았나 | 고침 | 보드 시험 |
 |---|---|---|---|---|---|---|
-| R1 | P1 | SD flush·fsync·fclose 실패를 버려 저장 실패를 정상 종료로 보고할 수 있다 | ✅ 맞음 — `fileFlush` 반환 없음(hlog_idf.cpp:66) · `rewriteHeader` 는 fwrite 길이만 봄 · `finishSession` 본문 flush/close 무시 | 같음 (옮기며 그대로) | ⬜ flush/close 결과를 세션 결과·첫 오류에 합친다 | ⬜ flush·close 실패 주입 (`rec fail` 확장 필요) |
-| R2 | P1 | 부팅 뒤 첫 WiFi 에서 이벤트 루프가 없어 사건 등록 실패 | ✅ 맞음 — **보드에서 19:28 따로 재현함 (W01)** | 아님 (아두이노 WiFi.onEvent 가 처리) | 🔶 넣음·빌드 ✅: 등록 전 루프 만들기 · 일부 실패면 풀고 false · startAP/startJoin 이 false 면 안 켜고 BLE 되살림 | ⬜ 새 부팅 첫 join · 첫 AP 접속/떠남 사건 |
-| R3 | P2 | 기록 중 `wifi scan` 이 루프를 몇 초 막는다 (동기 스캔, 막는 검사 없음) | ✅ 맞음 — app_main.cpp:1223 에 기록 중 거절 없음 · scan 은 block=true | 같음 (main.cpp:4043) | 🔶 넣음·빌드 ✅: 기록 중 `wifi scan`(BLE·시리얼) → `err wifi recording` · 시리얼 `scan`·`pin`·`nmea`·`gpscfg static` 도 blockingDiagOk (★ firmware-rak 과 다름) | ⬜ rec on → 거절 줄 |
-| R4 | P2 | `/api/files`·헤더 송신이 `httpd_send` 로 소켓당 최대 5초 막고 실패도 무시 | ✅ 맞음 — `rawWrite` 는 false 를 주지만 `sendContent` 가 버림 · `send_wait_timeout` 기본 5초(esp_http_server.h:71) · 목록 반복 계속 | 비슷 (WebServer 도 막는 송신) | 🔶 넣음·빌드 ✅: 한 번 송신 실패하면 그 요청 나머지 송신·목록 반복 안 함 (최대 한 번 5초). 한 바퀴 예산은 안 넣음 — 성공하는 느린 송신은 여전히 조각마다 5초까지 [남은 위험] | ⬜ 느린 클라이언트로 루프 지연 |
-| R5 | 설계 | 메인 루프가 **코어 0** — firmware-rak loop 는 **코어 1** 이었다. SD 일꾼·LoRa 일꾼·NimBLE(코어 0 고정)과 한 코어 | ✅ 맞음 — sdkconfig `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y` · 아두이노 `CONFIG_ARDUINO_RUNNING_CORE=1` · 내 주석(hlog_idf.cpp:106 · lora.cpp:314)은 "코어 1" 이라 **틀렸다** | 아님 — **옮기며 놓친 차이** | 🔶 넣음·빌드 ✅: sdkconfig.defaults CPU1 → 새로 만든 sdkconfig `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y` 확인 | ⬜ 10분 기록 FIFO 넘침 · 켤 때 "넘칠 뻔" |
+| R1 | P1 | SD flush·fsync·fclose 실패를 버려 저장 실패를 정상 종료로 보고할 수 있다 | ✅ 맞음 — `fileFlush` 반환 없음(hlog_idf.cpp:66) · `rewriteHeader` 는 fwrite 길이만 봄 · `finishSession` 본문 flush/close 무시 | 같음 (옮기며 그대로) | 🔶 넣음·빌드 ✅: fileFlush 참/거짓 · 시작 머리글 flush 실패=시작 실패 · 기록 중 flush 실패=쓰기 실패 길 · 닫을 때 본문 flush/close 실패=kErrDrainShort·closed 0 · rewriteHeader seek·write·flush·close · 시험 `rec failflush <n>` (HLG 에만) | ✅ 19:46 기록 중 flush 실패 → 정상 종료 아님·이유(시험)·3초 뒤 새 파일 · ✅ 19:51 닫을 때 flush 실패(흉내 HLG 만) → 세션 112 "정상 종료 아님 · 닫으면서 다 못 씀(시험)" |
+| R2 | P1 | 부팅 뒤 첫 WiFi 에서 이벤트 루프가 없어 사건 등록 실패 | ✅ 맞음 — **보드에서 19:28 따로 재현함 (W01)** | 아님 (아두이노 WiFi.onEvent 가 처리) | ✅ 넣음 | ✅ 19:45 새 부팅 첫 `wifi on` → "붙었습니다 — http://192.168.0.76/" |
+| R3 | P2 | 기록 중 `wifi scan` 이 루프를 몇 초 막는다 (동기 스캔, 막는 검사 없음) | ✅ 맞음 — app_main.cpp:1223 에 기록 중 거절 없음 · scan 은 block=true | 같음 (main.cpp:4043) | ✅ 넣음 (★ firmware-rak 과 다름) | ✅ 19:45 기록 중 `wifi scan` → err wifi recording · scan·pin·nmea·gpscfg static → [진단] 막음 줄 |
+| R4 | P2 | `/api/files`·헤더 송신이 `httpd_send` 로 소켓당 최대 5초 막고 실패도 무시 | ✅ 맞음 — `rawWrite` 는 false 를 주지만 `sendContent` 가 버림 · `send_wait_timeout` 기본 5초(esp_http_server.h:71) · 목록 반복 계속 | 비슷 (WebServer 도 막는 송신) | 🔶 넣음·빌드 ✅: 한 번 송신 실패하면 그 요청 나머지 송신·목록 반복 안 함 (최대 한 번 5초). 한 바퀴 예산은 안 넣음 — 성공하는 느린 송신은 여전히 조각마다 5초까지 [남은 위험] | 🔶 19:52 `/api/files` 요청 뒤 15초 안 읽기: 루프 최대 43~79 ms, 5초 멈춤 없음 — 목록 16.8 KB 가 소켓 버퍼에 다 들어가 **막히는 상황이 안 만들어졌다 → 판정 못 함**. 더 큰 응답으로 다시 ⬜ |
+| R5 | 설계 | 메인 루프가 **코어 0** — firmware-rak loop 는 **코어 1** 이었다. SD 일꾼·LoRa 일꾼·NimBLE(코어 0 고정)과 한 코어 | ✅ 맞음 — sdkconfig `CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y` · 아두이노 `CONFIG_ARDUINO_RUNNING_CORE=1` · 내 주석(hlog_idf.cpp:106 · lora.cpp:314)은 "코어 1" 이라 **틀렸다** | 아님 — **옮기며 놓친 차이** | ✅ 넣음 · sdkconfig CPU1 확인 | 🔶 켜짐 1번·죽음 0 · ★ 켤 때 "넘칠 뻔 1번" 은 코어 1 로 옮겨도 그대로 → 원인은 코어가 아님 (G06 에서 따로) · 10분 기록 ⬜ |
 
 ## 5. 속도 비교 (목적 1)
 
 | 판 | 자리·거리 | 받는 기기 | `/api/speed?mb=8` KB/초 | 세션 46 HLG (23.9 MB) 걸린 초 | 해시 같음 | 날짜 |
 |---|---|---|---|---|---|---|
 | firmware-rak | | | | | | |
-| firmware-idf 기본 (TCP 창 5760) | | | | | | |
-| firmware-idf `sdkconfig.tcp` (65535) | | | | | | |
+| firmware-idf 기본 (TCP 창 5760) | 집 WiFi 공유기 경유 (보드 192.168.0.76 · 맥 192.168.0.7, 맥 WiFi 안 바꿈) | 맥 curl | — | 앞 2 MB 6.94초 = **302 KB/초** (보드 로그: 읽기 3.48초 · WiFi 쓰기 0.60초) | 세션 105 ✅ | 09-15 19:52 |
+| firmware-idf `sdkconfig.tcp` (65535) | 같은 자리 | 맥 curl | **2663 KB/초** (카드 안 읽음, 2 MB 0.8초) | 앞 2 MB 3번: **508 · 607 · 530 KB/초** (보드: 읽기 2.12~2.44초 · WiFi 쓰기 0.29~0.30초) | 세션 105 ✅ | 09-15 19:57 |
 
 - 같은 자리 · 같은 받는 기기 · 같은 파일 · 번갈아 3번씩. 받는 기기는 사용자 기기 (내 맥 WiFi 를 안 바꾼다)
 - 합격: firmware-idf 한 판이 firmware-rak 보다 빠르고 해시가 같다. 몇 배 빨라야 하는지는 **사용자가 정한다** ⬜
+- ★ 09-15 판정: TCP 창을 키우니 파일 받기가 기본판 302 → 약 550 KB/초 (약 1.8배). 카드를 안 읽는 전송은 2663 KB/초 (기본판 파일 받기의 약 9배)
+  → **남은 병목은 SD 카드 읽기** (2 MB 에 읽기 2.1~2.4초 · WiFi 쓰기 0.3초). 다음: 파일 보낼 때 읽는 조각 크기·버퍼·SD SPI 속도를 본다 ⬜
+- ★★ 위험: TCP 판은 WiFi 켠 동안 **내부 메모리 13271 바이트 남음 (가장 작았을 때 12480)** — 기본판은 80719. 이대로 쓰면 메모리 못 받아 죽을 수 있다 → WiFi·lwIP 버퍼 수를 줄이거나 PSRAM 으로 더 보내야 한다 ⬜
+- firmware-rak 줄은 아직 안 잼 (firmware-rak 을 다시 올려 같은 자리에서) ⬜
+
+
+**속도 병목 찾기 (09-15 20:0x) — 한 번에 하나씩 바꿔 같은 2 MB(세션 46 앞)로 잼**
+
+| 바꾼 것 | 2 MB 받기 (3번) | 보드: 읽기 / WiFi 쓰기 | 짧게 보냄 · 다시 안 읽은 양 | WiFi 켠 동안 내부 메모리 | 해시 |
+|---|---|---|---|---|---|
+| 기본판 (TCP 5760) | 302 KB/초 | 3.48 / 0.60초 | — | 80719 | 105 ✅ |
+| TCP 65535 · WiFi 버퍼 RX64/TX32 | 508 · 607 · 530 | 2.12~2.44 / 0.29초 | — | **13271** ★위험 | 105 ✅ |
+| + WiFi 버퍼 RX32/TX16 · 못 보낸 나머지 다시 안 읽기 | 570 · 597 · 576 | 2.10 / 0.31초 | 0~72번 · 최대 56 KB | **40939** | 105·41 ✅ |
+
+- ❌ **내 추측 틀림**: "못 보낸 나머지를 카드에서 다시 읽어 느리다" — 다시 읽을 뻔한 양이 2 MB 중 최대 56 KB 뿐이고 읽기 시간 그대로(2.10초). 고침은 두지만 병목이 아니었다
+- 인터넷 조사 (출처 5 일치): `fopen` 뒤 `setvbuf` 가 없으면 fread 기본 버퍼가 **128 바이트** → 4 KB 읽기가 128 B 씩 잘린다. 128→4096 B 에 815→1515 KB/초 (drorgl 벤치마크, SPI 20 MHz). 우리 파일 보내기 fopen 에 setvbuf 없음 [확인 netsrv.cpp]
+  SPI 20→25 MHz 는 +1.5% (esp-idf #3249) · TCP 만 키워선 안 됨 (esp-idf #15385) — 다음: 파일 보내기에 setvbuf 16 KB (PSRAM) ⬜
+- 사용자(친구) 지적 (09-15 20:1x), 내가 실측과 대조: ① TCP 도 실제 병목이었다 (302→약 550) — 맞음 · ② 재읽기 제거 방향 맞음 — **실측으론 효과 거의 없음** (위 표 셋째 줄) ·
+  ③ SPI 20 MHz 는 계산상 2.5 MB/초 상한 — 맞음 · ④ "WiFi 쓰기 0.3초" 는 send() 호출 시간 합일 뿐 무선 전송 전체가 아니다 — 맞음, "나머지는 SD" 라던 내 계산은 부정확 (3.5초 − 읽기 2.1 − send 0.3 = 1.1초는 정체 모름)
+  권고: SD 만 읽는 속도를 WiFi 없이 방식별로 → 새 시리얼 명령 `sdread <파일> <MB> <방식 0~3>` 만듦 (firmware-rak 에 없음)
+- Espressif 공식 원문 [확인]:
+  · 성능 가이드 (api-guides/performance/speed.html): "The default size in Newlib is 128 bytes, but you can increase it to 4096, 8192, or 16384 bytes … setvbuf … or globally … CONFIG_FATFS_VFS_FSTAT_BLKSIZE" · "prefer using read and write over fread and fwrite"
+  · SD SPI 문서 (peripherals/sdspi_host.html): "SD over SPI does not support speeds above SDMMC_FREQ_DEFAULT due to the limitations of the SPI driver" 와 "For High Speed cards, 40MHz can be used. For Default Speed cards, 20MHz can be used" 가 **같은 문서에 같이 있어 어긋난다** — 40 MHz 는 보드에서 재 봐야 안다 [모름]
+
+
+**SD 만 읽기 vs WiFi 받기 (09-15 20:2x, TCP 판, 같은 파일 세션 46 앞 2 MB, `sdread` 는 방식마다 2번 번갈아 — 두 번 값 같음)**
+
+| 읽는 방식 (WiFi 없음) | 2 MB 걸린 초 | KB/초 |
+|---|---|---|
+| 0 fopen 기본 버퍼 + fread 4 KB | 1.72 | 1189 |
+| 1 setvbuf 4 KB + fread 4 KB | 1.72 | 1188 (차이 없음) |
+| 2 setvbuf 16 KB + fread 4 KB | 1.50 | 1362 |
+| 3 read() 16 KB | 1.49 | 1373 (8 MB 로 1383) |
+
+- 판정: **카드 + SPI 20 MHz 가 내는 읽기 속도는 약 1.37 MB/초.** 읽는 코드 손실은 약 15% 뿐. 인터넷 벤치마크의 "128→4096 B 에 +86%" 는 **우리 보드에서 재현 안 됨** (방식 0·1 같음)
+- 파일 보내기에 setvbuf 16 KB 넣은 뒤 WiFi 받기: **698 · 698 · 730 KB/초** (앞 표 약 580 에서 +20%) · 보드 읽기 1.70초 · send 0.30초 · 세션 41 해시 ✅ · 내부 메모리 40939
+- 남은 차이: WiFi 730 은 SD 한계 1373 의 약 53%. 보드 읽기 1.70초는 sdread 같은 방식(1.50초)보다 느리고, 2.8초 중 읽기·send 밖에 0.8초가 남는다 (루프 차례 기다림 추정 [추측])
+- ✅ 파일 보내기를 read() 16 KB (PSRAM 버퍼) 로 (20:3x): 2 MB **764 · 806 · 781 KB/초** · 8 MB **783 KB/초** (10.7초) · 세션 41 해시 ✅ · 내부 메모리 45023 (가장 작았을 때 39720)
+  보드: 2 MB 에 읽기 1.67초 · send 0.20초 · 나머지 약 0.7초 (루프가 화면 33 ms×4번/초 등을 하는 차례 [추측])
+- **지금까지 한 줄 요약**: 기본판 302 → TCP 창 약 550 → 재읽기 없애기 약 580 → setvbuf 16 KB 약 710 → read() 16 KB **약 785 KB/초** (기본판의 약 2.6배). SD 만 읽기 한계 1373
+- 다음 하나: SPI 40 MHz 를 sdread 로 (문서가 어긋남) ⬜ · 그다음 파일 보내는 동안 화면 그리기 쉬기 또는 xferPump 예산 20→50 ms ⬜ · firmware-rak 같은 자리 기준값 ⬜
 
 ## 6. boat-device-checklist 다시 돌리기 (기록·통신이 바뀌었으므로)
 
