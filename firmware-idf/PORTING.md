@@ -141,6 +141,16 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
   - 다음에 꽂으면: ① 포트 열기 전 `ioreg -p IOUSB -l -w0 | grep -iE '"USB Product Name"|"USB Serial Number"|"locationID"'` ② DTR·RTS 내리고 **한 번만** 열어 20초 받기만 ([BOOT] 이유 · 코어덤프 줄 · 첫 바이트 시각)
     ③ 시험은 한 번 열어 묶어서 (`board_rec_test.py all` 한 번). 또 멎으면 포트·esptool 두드리지 말고 ioreg 만 남기고 알린다
   - 맥 탓/보드 탓 가르기: 다른 케이블·맥 포트·허브로 바꿔 다시 나는지 (우회책 겸 확인)
+  조사 2 (사용자 "USB 이전에 그런 적 없음" 뒤, IDF 판과 아두이노 판 차이):
+  - ★ 가장 큰 차이 — **콘솔 자리.** 아두이노 2.0.17 은 콘솔이 UART0 (부트로더 로그 0), 앱이 뜬 뒤 HWCDC 로만 USB 에 썼다.
+    IDF 판은 부트로더·시작 코드부터 USB Serial/JTAG 로 쓴다 [확인: 아두이노 tools/sdk/esp32s3/sdkconfig · build-sail sdkconfig.h]
+  - 17:00 판(0단계)에는 USB 드라이버 설치가 아예 없었다 → 우리 USB 드라이버 코드는 원인에서 뺀다 [확인: stage0 app_main 검색 0]
+  - RTC 쪽 USB 레지스터: IDF 드라이버와 아두이노 HWCDC 가 같은 값을 쓴다 → "IDF 만 다른 상태를 남긴다" 근거 없음 [확인: usb_serial_jtag.c:207-210 · HWCDC.cpp:336-342]
+  - 켜자마자 죽는 되풀이는 아니다 — 멎은 동안 6~14초 열어도 0바이트 (되풀이면 ROM 첫 줄이 와야 함)
+  - USB 리셋(rst 0x15)은 디지털 코어만 리셋, IDF 시작 코드는 USB 블록을 리셋 안 함 → 블록이 멎으면 케이블을 떼야 풀리는 모양 [추측, TRM 원문 확인 못 함]
+  - 모르는 것: 배터리가 꽂혀 있었나 (4.14 V 라 붙어 있었다고 봄 [추측]) — 붙어 있었다면 뽑아도 칩 전원은 안 꺼졌고 USB 연결을 뗀 것이 풀었다
+  - 가를 실험(사용자 결정 필요): 콘솔을 아두이노처럼 UART0 으로 (`CONFIG_ESP_CONSOLE_UART_DEFAULT`), 명령·출력은 앱이 USB 드라이버로. 사라지면 좁혀짐. 대신 부트로더·시작 초반 로그는 USB 로 못 봄
+  - 다음에 꽂으면 [BOOT] 이유로 가른다: USB = 앱은 돌고 USB 만 멎음 · POWERON = 뽑을 때 전원 끊김 · PANIC/WDT = 앱이 죽음
   IMU FIFO 읽기 루프는 한 번에 sPending 만큼만 돌아 끝이 있다 (imu.cpp fifoNext) — 멈춤 후보에서 뺌.
   **다음에 할 것: 뽑았다 꽂은 뒤 켤 때 [BOOT] 이유와 코어덤프 검사 줄을 먼저 본다** (워치독·패닉이었으면 거기 남는다)
 
