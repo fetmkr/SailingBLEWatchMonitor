@@ -55,7 +55,6 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | # | 무엇 | 통과 기준 (firmware-rak 과 대조) | 상태 |
 |---|---|---|---|
 | 0 | 뼈대 — 부팅 로그, 핀, 센서 전원, LED, NVS 읽기, USB 콘솔 | 켜짐 로그 · NVS `sail` 설정값이 firmware-rak 이 쓴 값 그대로 읽힘 · GPS 바이트 들어옴 | ✅ 09-15 (아래) |
-
 | 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | ❌ |
 | 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | ❌ |
 | 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | ❌ |
