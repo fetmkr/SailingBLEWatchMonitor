@@ -59,7 +59,7 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | 🔶 켜짐·fix·gpscfg·imu·1분 기록·test gps 통과 (아래). 남은 것: board_rec_test imu·clean (USB 멎어 못 돌림) · 밖에서 fix 잡힌 기록 |
 | 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | 🔶 코드·메인 연결 · 빌드 경고 0 (USB 멎어 보드 시험 전) |
 | 4 | 화면 (U8g2) | 같은 화면 | 🔶 코드·메인 연결 · 맥에서 11장면 프레임버퍼 firmware-rak 과 같음 · 빌드 경고 0 (보드 시험 전) |
-| 5 | WiFi · HTTP 파일 전송 · mDNS — **TCP 창 키우기** | `/api/files`·`/file/` Range · 해시 · 받기 속도를 firmware-rak 과 같은 자리에서 비교 | ❌ |
+| 5 | WiFi · HTTP 파일 전송 · mDNS — **TCP 창 키우기** | `/api/files`·`/file/` Range · 해시 · 받기 속도를 firmware-rak 과 같은 자리에서 비교 | 🔶 코드·메인 연결 · 빌드 경고 0 · 빠른 TCP 설정은 `sdkconfig.tcp` 따로 (보드 시험 전) |
 | 6 | LoRa (RadioLib, 칩 버그 셋) | 두 보드 사이 주고받기 | 🔶 코드·메인 연결 · 빌드 경고 0 (보드 시험 전 · 직접 짠 SPI3 HAL 은 실기기 확인 필요) |
 | 7 | 전원·깊은잠·버튼·코어덤프 | 헛깸 0 · 끄는 순서 · 코어덤프 0xFF0000 | ❌ |
 
@@ -216,6 +216,21 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
   firmware-rak `gBoatIdSetAt` 은 적기만 하고 읽는 곳이 없어 안 옮김. `~/esp/stage3` 에 lora 넣어 링크 → **경고 0 · 0xd5890 (87% 남음)**
 - 보드 시험: 켤 때 `[LORA] 922.55 ㎒ SF7 BW500㎑ CR4:5 송신 8 dBm` · `전파시간 14 ms` → `lora` 14144 us → `lora regs` (15.1 bit2=1 · 15.2 bit4~1=0xF · RxGain 0x96 · Sync 0x1424) →
   `lora tx` 뒤 15.1 0x0E→0x00 · `lora rssi` 약 −108 dBm → 두 보드 watch/tx CRC 오류 0 → 기록 중 lora tx 로 SD 와 안 부딪히나 (버린 줄 0)
+
+**5단계 WiFi·HTTP·mDNS (2026-09-15, 보드 없이 빌드만)** — `main/netsrv.cpp` (헤더 `firmware-rak/include/netsrv.h` 같이 씀) · esp_http_server · esp_wifi · espressif/mdns 1.13.0
+- ★★ **루프 스택이 3584 였다.** IDF `CONFIG_ESP_MAIN_TASK_STACK_SIZE` 기본 3584, firmware-rak loop 는 아두이노 loopTask 8192 [확인: framework cores/esp32/main.cpp:14].
+  1·2단계 보드 시험은 3584 로 돌았다. `sdkconfig.defaults` 에 8192 넣음 → 빌드된 sdkconfig 8192 확인
+- HTTP: esp_http_server 가 `/*` 로 받아 async 사본을 큐(8칸)에 → `netsrv::poll()` 이 루프에서 firmware-rak 과 같은 경로 표로. 머리 순서 WebServer.cpp:385 와 같음.
+  다른 점: 응답 첫 줄 늘 `HTTP/1.1` (WebServer 는 요청 판을 따랐다) · 파일 이름 56자 넘으면 400 · Join 중 끊기면 스스로 떠난 때 빼고 다시 붙음(아두이노 자동 재연결 흉내) · WiFi 사건 로그는 다음 poll 에서 찍힘
+- 로그에 WiFi 이름은 `WiFi(이름 N자)` 로만. HTTP `name`·mDNS `net` TXT 는 앱 약속이라 값 그대로
+- ★ firmware-rak 에서 찾은 것: AP 모드에서 `setSleep(false)` 가 칩을 안 부른다 (아두이노 setSleep 은 STA 켜진 모드일 때만 `esp_wifi_set_ps`) [확인: WiFiGeneric.cpp:1377] → AP 전송 중 절전이 안 꺼졌을 수 있다. 옮긴 코드도 그대로
+- firmware-rak 아두이노는 WiFi 버퍼 수를 코드에서 덮어썼다 (정적 RX 4 · 동적 TX 32 · 캐시 4, WiFiGeneric.cpp:672). 새 코드는 sdkconfig 값
+- 메인 연결: controlLine 의 wifi ssid/pass/scan/on/join/ap/off/idle/status (main.cpp 4025-4136) · `gWifiWant` 표식 → 루프가 150 ms 뒤 startJoin/startAP/stop ·
+  루프 `netsrv::poll` · 기록 시작 때 WiFi 끄기/보내는 중이면 거절 · 시리얼 `wifi …` (4529-4590) · `sailFullName`/`sailBleStart`/`sailBleStop` 를 app_main 이 준다 · REQUIRES esp_wifi esp_netif esp_event esp_http_server lwip
+- ★ **TCP 창은 기본 빌드에 안 넣었다.** 먼저 기본(5760, firmware-rak 과 같음) 판으로 firmware-rak 과 같은 자리에서 재고, 그다음 `sdkconfig.tcp` 판(SND_BUF·WND 65535 · 버퍼 PSRAM · BA 창 32 …)으로 잰다.
+  빌드: `idf.py -B ~/esp/build-sail-tcp -DSDKCONFIG=~/esp/build-sail-tcp/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.tcp" build`. 값 근거는 sdkconfig.tcp 머리
+- 보드 시험: wifi ap (BLE 광고 살아 있나) → 사용자 기기로 /api/status·/api/files 바이트 비교 · /file Range 200/206/416/400 → sha256 = rec hash → **속도 두 판** (/api/speed?mb=8 · 세션 46) →
+  끄기 네 겹 (api off · lease 15초 · 기기 떠남 8초 · idle) → Join·lastip·mDNS → 기록 중 거절 · DELETE confirm 403 → WiFi 여러 번 켜고 끄기 남은 내부 메모리
 
 - ★ **보드를 다시 꽂을 때까지 누구도 포트·esptool 을 열지 않는다.** 꽂은 뒤에도 조사 보고의 "한 번만 열어 볼 것" 부터.
 - 나눠 짜는 쪽은 **커밋하지 않는다**, **보드·시리얼 포트를 열지 않는다**, `app_main.cpp`·`CMakeLists.txt` 를 안 만진다.

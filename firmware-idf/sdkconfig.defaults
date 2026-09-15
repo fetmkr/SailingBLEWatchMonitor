@@ -19,6 +19,11 @@ CONFIG_SPIRAM_SPEED_80M=y
 # ── FreeRTOS 틱 — 아두이노판과 같은 1000 Hz. IDF 기본은 100 이라 1 틱이 10 ms 가 된다 ──
 CONFIG_FREERTOS_HZ=1000
 
+# ── 루프 스택 — ★ app_main 이 곧 firmware-rak 의 loop 다. 아두이노 loopTask 는 8192 였다
+#   (framework-arduinoespressif32 cores/esp32/main.cpp:14 ARDUINO_LOOP_STACK_SIZE). IDF 기본 3584 로는 반도 안 된다.
+#   2026-09-15 5단계 작업이 찾음 — 1·2단계 보드 시험은 3584 로 돌았다 (memory: esp32-stack-and-leak-rules)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # ── 콘솔 — 보드의 USB 포트(USB Serial/JTAG, /dev/cu.usbmodem*) ──
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 

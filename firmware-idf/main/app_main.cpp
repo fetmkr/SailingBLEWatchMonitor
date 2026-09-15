@@ -50,6 +50,7 @@
 #include "gps.h"
 #include "imu.h"
 #include "lora.h"      // firmware-rak/include/lora.h — 아두이노 흔적 없어 같이 쓴다 (몸통은 main/lora.cpp)
+#include "netsrv.h"    // firmware-rak/include/netsrv.h — 같이 쓴다 (몸통은 main/netsrv.cpp)
 
 static inline uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static inline void delayMs(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
@@ -480,6 +481,16 @@ static void buildHeadingNote(char* out, size_t n) {
 
 static bool logStartNow(uint32_t prevSession) {
     gRecStartErr = nullptr;
+    // ★ SD 는 한 번에 한 주인만. WiFi 가 켜져 있으면 파일 서버가 카드를 붙인다.
+    //   기록이 WiFi 를 이긴다. 파일을 보내는 중만 아니면 WiFi 를 끄고 시작한다 (firmware-rak main.cpp 3509-3517)
+    if (netsrv::mode() != netsrv::Mode::Off) {
+        if (netsrv::transferring()) {
+            gRecStartErr = "파일을 보내는 중입니다 — 끝나면 다시";
+            return false;
+        }
+        printf("[REC] WiFi 가 켜져 있어 끕니다 — 기록이 먼저다\n");
+        netsrv::stop();
+    }
     hlog::Header h;
     h.prevSession = prevSession;
     esp_read_mac(h.mac, ESP_MAC_WIFI_STA);
@@ -727,9 +738,21 @@ static sail::Telemetry buildTelemetry(uint32_t ms) {
     return t;
 }
 
-// ── BLE 제어 특성으로 들어온 줄 (firmware-rak controlLine) ──────────────────
+// ── BLE 제어 특성으로 들어온 줄 (firmware-rak controlLine, main.cpp 4015-4150) ──
 // ★ 콜백이 아니라 루프가 부른다. ble.cpp 콜백은 줄을 베껴 두기만 한다.
-// 아직 없는 것: wifi …(5단계) · magcal — firmware-rak 이 모르는 줄에 하던 대로 "err unknown" 으로 답한다.
+// 아직 없는 것: magcal — firmware-rak 이 모르는 줄에 하던 대로 "err unknown" 으로 답한다.
+// WiFi 켜고 끄기는 여기서 표식만 세우고 루프가 한다 — 답이 폰에 닿은 뒤 BLE 가 내려간다.
+static volatile uint8_t gWifiWant = 0;   // 0 없음, 1 join, 2 ap, 3 off
+
+// 앞에서 n 글자 뒤의 나머지를 앞뒤 빈칸 없이 out 에 (Arduino substring + trim)
+static void restTrim(const char* line, size_t from, char* out, size_t cap) {
+    const char* s = line + (strlen(line) > from ? from : strlen(line));
+    while (*s == ' ' || *s == '\t') ++s;
+    snprintf(out, cap, "%s", s);
+    size_t n = strlen(out);
+    while (n && (out[n - 1] == ' ' || out[n - 1] == '\t' || out[n - 1] == '\r')) out[--n] = '\0';
+}
+
 static void controlLine(const char* raw) {
     while (*raw == ' ' || *raw == '\t') ++raw;
     char line[192];
@@ -742,10 +765,94 @@ static void controlLine(const char* raw) {
     else printf("[CTL] ← %s\n", line);
 
     char out[240];
+    char v[192];
+
+    // wifi ssid <이름>
+    if (!strncmp(line, "wifi ssid ", 10)) {
+        restTrim(line, 10, v, sizeof v);
+        netsrv::setCreds(v, nullptr);
+        snprintf(out, sizeof out, "ok wifi ssid %s", v);
+        ble::controlSay(out);
+        return;
+    }
+    // wifi pass <비밀번호> — 뒤 공백도 비밀번호일 수 있다 (firmware-rak 은 substring 만, trim 안 함)
+    if (!strncmp(line, "wifi pass ", 10)) {
+        // ★ line 은 위에서 뒤 빈칸을 지웠다. firmware-rak 은 controlLine 첫 줄에서 trim 했으므로 같다
+        netsrv::setCreds(netsrv::staSsid(), line + 10);
+        // ★ 비밀번호는 되읽어 주지 않는다. 길이만 알린다.
+        snprintf(out, sizeof out, "ok wifi pass %u자", (unsigned)strlen(line + 10));
+        ble::controlSay(out);
+        return;
+    }
+    // wifi scan — BLE 를 안 내리고 할 수 있다
+    if (!strcmp(line, "wifi scan")) {
+        static netsrv::ScanEntry list[20];   // 스택에 KB 를 안 올린다 (memory: esp32-stack-and-leak-rules)
+        const int n2 = netsrv::scan(list, 20);
+        snprintf(out, sizeof out, "scan begin %d", n2);
+        ble::controlSay(out);
+        for (int i = 0; i < n2; i++) {
+            snprintf(out, sizeof out, "scan %d %d %s %s", i, (int)list[i].rssi, list[i].locked ? "lock" : "open", list[i].ssid);
+            ble::controlSay(out);
+        }
+        ble::controlSay("scan end");
+        return;
+    }
+    // wifi on / wifi join [앱번호] — 답을 먼저 보내고 켠다
+    if (!strcmp(line, "wifi on") || !strcmp(line, "wifi join") ||
+        !strncmp(line, "wifi on ", 8) || !strncmp(line, "wifi join ", 10)) {
+        if (hlog::busy()) { ble::controlSay("err wifi recording"); return; }
+        char appId[64] = "";
+        {
+            const char* sp = strchr(line + 5, ' ');   // "wifi on" 의 두 번째 빈칸
+            if (sp) restTrim(sp, 1, appId, sizeof appId);
+        }
+        // 이미 붙어 있으면 다시 붙지 않는다. 받고 있는 다른 기기가 끊긴다.
+        if (netsrv::mode() == netsrv::Mode::Join) {
+            const int others = netsrv::othersThan(appId);
+            const char* oip = netsrv::otherIpText(appId);
+            snprintf(out, sizeof out, "ok wifi joining %s mdns %s.local last %s users %d by %s",
+                     netsrv::staSsid(), netsrv::mdnsHost(), netsrv::ipText(), others, (others && *oip) ? oip : "-");
+            ble::controlSay(out);
+            return;
+        }
+        const char* ss = netsrv::staSsid();
+        if (!ss || !*ss) { ble::controlSay("err wifi no-ssid"); return; }
+        const char* last = netsrv::lastIp();
+        snprintf(out, sizeof out, "ok wifi joining %s mdns %s.local last %s users 0 by -",
+                 ss, netsrv::mdnsHost(), (last && *last) ? last : "-");
+        ble::controlSay(out);
+        gWifiWant = 1;
+        return;
+    }
+    if (!strcmp(line, "wifi ap") || !strncmp(line, "wifi ap ", 8)) {
+        if (hlog::busy()) { ble::controlSay("err wifi recording"); return; }
+        char apId[64] = "";
+        restTrim(line, 8, apId, sizeof apId);
+        const bool apUp = netsrv::mode() == netsrv::Mode::AP;
+        const int others = apUp ? netsrv::othersThan(apId) : 0;
+        const char* oip = netsrv::otherIpText(apId);
+        snprintf(out, sizeof out, "ok wifi ap %s pass %s ip 192.168.4.1 users %d by %s",
+                 ble::fullName(), netsrv::apPass(), others, (others && *oip) ? oip : "-");
+        ble::controlSay(out);
+        // 이미 열어 뒀으면 다시 열지 않는다. 붙어 있던 기기가 떨어진다.
+        if (netsrv::mode() != netsrv::Mode::AP) gWifiWant = 2;
+        return;
+    }
+    if (!strcmp(line, "wifi off")) { ble::controlSay("ok wifi off"); gWifiWant = 3; return; }
+    // wifi idle <초> — 아무도 안 쓰면 저절로 끄기까지의 시간. 0 이면 안 끈다
+    if (!strncmp(line, "wifi idle ", 10)) {
+        const uint32_t sec = (uint32_t)strtol(line + 10, nullptr, 10);
+        netsrv::setIdleOff(sec);
+        snprintf(out, sizeof out, "ok wifi idle %lu", (unsigned long)sec);
+        ble::controlSay(out);
+        return;
+    }
     if (!strcmp(line, "wifi status") || !strcmp(line, "status")) {
-        // 5단계 전이라 WiFi 는 늘 꺼져 있다. ip 칸은 firmware-rak netsrv::ipText() 자리 — 켜기 전 값은 5단계에서 맞춘다.
         snprintf(out, sizeof out, "status name %s mode %s ip %s rec %s idle %lus left %lus",
-                 ble::fullName(), "off", "-", hlog::recording() ? "on" : "off", 0ul, 0ul);
+                 ble::fullName(),
+                 netsrv::mode() == netsrv::Mode::Off ? "off" : netsrv::mode() == netsrv::Mode::AP ? "ap" : "join",
+                 netsrv::ipText(), hlog::recording() ? "on" : "off",
+                 (unsigned long)netsrv::idleOffSec(), (unsigned long)(netsrv::idleLeftMs() / 1000));
         ble::controlSay(out);
         return;
     }
@@ -756,6 +863,11 @@ static void controlLine(const char* raw) {
     snprintf(out, sizeof out, "err unknown %s", line);
     ble::controlSay(out);
 }
+
+// netsrv.cpp 가 부른다 — WiFi 로 파일을 보내는 동안만 BLE 를 내린다 (firmware-rak main.cpp 5226-5303 의 뜻)
+const char* sailFullName() { return ble::fullName(); }
+void sailBleStart() { ble::start(buildTelemetry(nowMs()), buildExtra()); }
+void sailBleStop()  { ble::stop(); }
 
 static void printIdentity() {
     char mac[20];
@@ -994,6 +1106,61 @@ static void handleLine(char* line) {
         return;
     }
     if (!strcmp(line, "info")) { printIdentity(); return; }
+    // WiFi 로 기록 파일 내보내기 (firmware-rak main.cpp 4529-4590). 자세히는 netsrv.h
+    if (!strcmp(line, "wifi") || !strncmp(line, "wifi ", 5)) {
+        char orig[64] = "";
+        restTrim(line, 5, orig, sizeof orig);   // 이름·비밀번호는 원문 대소문자가 필요하다
+        char arg[64];
+        snprintf(arg, sizeof arg, "%s", orig);
+        for (char* p = arg; *p; ++p) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+
+        if (!strcmp(arg, "join")) {
+            if (hlog::busy()) { printf("[NET] 기록 중입니다. rec off 먼저 하세요.\n"); return; }
+            netsrv::startJoin();
+            return;
+        }
+        if (!strcmp(arg, "off")) {
+            netsrv::stop();
+            printf("[NET] WiFi 껐습니다.\n");
+            return;
+        }
+        // 아래는 BLE 설정 통로와 **같은 말**을 쓴다. 앱 없이 여기서 시험한다.
+        if (!strncmp(arg, "ssid ", 5) || !strncmp(arg, "pass ", 5) || !strcmp(arg, "scan") || !strcmp(arg, "status") ||
+            !strcmp(arg, "on") || !strcmp(arg, "ap") || !strncmp(arg, "on ", 3) || !strncmp(arg, "ap ", 3) ||
+            !strncmp(arg, "idle ", 5)) {
+            char full[80];
+            snprintf(full, sizeof full, "wifi %s", orig);
+            controlLine(full);
+            return;
+        }
+        printf("──────────────────────────────────────────\n");
+        switch (netsrv::mode()) {
+            case netsrv::Mode::Off:
+                printf("  WiFi          꺼져 있음\n");
+                break;
+            case netsrv::Mode::AP:
+                printf("  WiFi          내가 만든 망\n");
+                printf("  이름          %s\n", netsrv::ssidText());
+                printf("  주소          http://%s/\n", netsrv::ipText());
+                break;
+            case netsrv::Mode::Join:
+                printf("  WiFi          %s 에 붙어 있음\n", netsrv::ssidText());
+                printf("  주소          http://%s/\n", netsrv::ipText());
+                break;
+        }
+        printf("  보낸 파일     %u개  %.2f MB\n", (unsigned)netsrv::servedFiles(), netsrv::servedBytes() / 1048576.0);
+        printf("──────────────────────────────────────────\n");
+        printf("  wifi ap    보드가 스스로 WiFi 를 만든다 (바닷가용)\n");
+        printf("  wifi join  저장된 WiFi 에 붙는다\n");
+        printf("  wifi off   끈다\n");
+        printf("  ─ 아래는 BLE 설정 통로와 같은 말이다 ─\n");
+        printf("  wifi ssid <이름>   붙을 WiFi 이름 (전원 빼도 남는다)\n");
+        printf("  wifi pass <비번>   비밀번호\n");
+        printf("  wifi scan          주변 WiFi 훑기 (BLE 안 내리고 된다)\n");
+        printf("  wifi idle <초>     아무도 안 쓰면 끄기까지 (0 이면 안 끔)\n");
+        printf("  wifi status        지금 상태\n");
+        return;
+    }
     if (!strcmp(line, "lora"))       { lora::report();      return; }
     if (!strcmp(line, "lora regs"))  { lora::reportRegs();  return; }
     if (!strcmp(line, "lora tx"))    { lora::txTest();      return; }
@@ -1179,6 +1346,7 @@ extern "C" void app_main(void) {
         // 코어 0 받기 일꾼이 링버퍼에 넣어 둔 것을 꺼낸다. 안 꺼내면 64개 뒤로 버린다
         lora::pump();
         pollSerial();
+        netsrv::poll();
 
         // GPS 는 쉬지 않고 읽는다. UART 버퍼가 넘치면 문장 중간이 잘린다.
         gps::poll();
@@ -1278,6 +1446,16 @@ extern "C" void app_main(void) {
                 ble::publish(buildTelemetry(now), buildExtra());
             }
             if (now - lastAdv >= sail::kAdvRefreshMs) { lastAdv = now; ble::refreshAdvPayload(); }
+        }
+
+        // BLE 로 시킨 WiFi 켜고 끄기. ★ 콜백 안에서 하면 안 된다 — 표식만 세우고 여기서 한다.
+        if (gWifiWant) {
+            const uint8_t want = gWifiWant;
+            gWifiWant = 0;
+            delayMs(150);   // 답이 폰에 닿을 시간. 이 뒤로 BLE 가 내려갈 수 있다
+            if (want == 1) netsrv::startJoin();
+            else if (want == 2) netsrv::startAP();
+            else netsrv::stop();
         }
 
         feedWatchdog();   // 여기까지 왔으면 살아 있다

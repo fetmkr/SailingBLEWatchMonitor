@@ -1,0 +1,26 @@
+# WiFi 받기 속도 시험용 — sdkconfig.defaults 위에 얹는다. **기본 빌드에는 안 들어간다.**
+#   먼저 기본(firmware-rak 과 같은 TCP 창 5760) 판으로 firmware-rak 과 같은 자리에서 재고, 그다음 이 판으로 잰다.
+#   빌드:  idf.py -B ~/esp/build-sail-tcp -DSDKCONFIG=~/esp/build-sail-tcp/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.tcp" build
+#
+# 근거 (5단계 작업 보고, 2026-09-15). 이름·범위는 IDF 6.1 Kconfig 에서 확인, 값은 아래 원문에서. 우리 보드 속도는 [모름].
+#   - esp-idf docs/en/api-guides/wifi-driver/wifi-performance-and-power-save.rst (ESP32-S3 표)
+#   - esp-idf examples/wifi/iperf/sdkconfig.defaults.esp32s3
+#   - https://github.com/espressif/esp-idf/issues/14171#issuecomment-5120946721 (XIAO S3, 창·송신 버퍼 5760→65535 에 약 3→22 Mbit/s 라는 댓글.
+#     같은 이슈 첫 글쓴이는 설정을 바꿔도 150~250 kbyte/s 였다고 함 — 그대로 믿지 않고 잰다)
+#
+#   이름                               IDF 기본   firmware-rak 실제   여기
+#   SPIRAM_TRY_ALLOCATE_WIFI_LWIP      n          n                   y     버퍼를 PSRAM 에 (내부 힙 약 330 KB)
+#   LWIP_TCP_SND_BUF_DEFAULT           5760       5744                65535 보드가 보내는 쪽이라 가장 중요
+#   LWIP_TCP_WND_DEFAULT               5760       5760                65535
+#   ESP_WIFI_STATIC_TX_BUFFER_NUM      동적 32    정적                정적 32  PSRAM 할당을 켜면 동적 TX 를 못 고른다
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535
+CONFIG_LWIP_TCP_WND_DEFAULT=65535
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_TX_BA_WIN=32
+CONFIG_ESP_WIFI_RX_BA_WIN=32
+CONFIG_LWIP_IRAM_OPTIMIZATION=y

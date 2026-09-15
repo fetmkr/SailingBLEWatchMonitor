@@ -5,3 +5,5 @@ dependencies:
   h2zero/esp-nimble-cpp: "2.5.0"
   # LoRa — firmware-rak 의 RadioLib 자리. HAL 은 lora.cpp 의 IdfHal (SPI3, 예제 HAL 은 S3 에서 #error · SPI2 레지스터를 직접 씀)
   jgromes/radiolib: "7.7.1"
+  # WiFi 파일 서버 — firmware-rak 의 ESPmDNS 자리 (IDF 6.1 에서 mdns 는 코어 밖 부품)
+  espressif/mdns: "1.13.0"
