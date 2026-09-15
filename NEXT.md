@@ -13,9 +13,15 @@
 - 빌드: `idf.py -B ~/esp/build-sail` 필수 (경로 빈칸 우회) · `SSL_CERT_FILE` 필요 — memory `firmware-idf-port`
 - 0단계(뼈대) ✅ — 부팅·NVS 28키·GPS·I2C 0x3C/0x68·배터리(firmware-rak 과 1 mV 차)·버튼·SD 목록
 - 1단계(기록기) ✅ GPS·IMU 없이 — 해시가 firmware-rak 과 같음 · 1분 기록 깨끗 · 쓰기 실패 다시 걸기 · 닫기 지연 · 리셋 이어 시작. 보드에 이 판이 있다
-- 2단계(GPS·IMU) 🔶 — 켜짐·fix·gpscfg·imu·1분 기록(IMU 100.00 Hz 등간격 100%)·test gps 통과. 보드에 이 판이 있다
-- ★ 17:45 USB 가 두 번째로 멎음 (보드가 아무것도 안 내고 esptool 도 못 붙음). 사용자가 USB 를 뽑았다 꽂아야 함.
-  꽂은 뒤: 켤 때 [BOOT] 이유·코어덤프 줄 보기 → `board_rec_test.py imu` · `clean` → 10분 기록(FIFO 넘침 0)
+- 2단계(GPS·IMU) 🔶 — 켜짐·fix·gpscfg·imu·1분 기록(IMU 100.00 Hz 등간격 100%)·test gps 통과. **보드에는 아직 이 2단계 판이 있다**
+- ★ 17:45 USB 가 두 번째로 멎음 → 사용자 "왜 계속 먹통 만들어. USB 연결 없이 할거 해". **꽂을 때까지 포트·esptool 안 연다.**
+  원인 [모름]. 조사 결과는 PORTING.md (IDF 판은 부트로더부터 USB 로 로그 · 아두이노는 UART0 · 우리 USB 드라이버 코드는 원인 아님)
+- 3~6단계 (USB 없이, 09-15 저녁) — 코드·메인 연결·**전체 빌드 경고 0** (커밋 54348a1), 보드 시험 전:
+  3 BLE (esp-nimble-cpp) · 4 화면 (U8g2, 맥에서 firmware-rak 과 프레임버퍼 같음) · 5 WiFi·HTTP·mDNS · 6 LoRa (직접 짠 SPI3 HAL)
+- ★★ 루프 스택이 IDF 기본 3584 였다 (firmware-rak 8192). 1·2단계 보드 시험은 3584 로 돌았다. 이제 8192
+- 7단계(전원·깊은잠·버튼) 나눠 짜는 중. 그 뒤 남는 것: magcal · hdg/heel/pitch/level/smooth/dead 설정 명령 · 진단 명령(sd·sdbench·batt·scan·help·loopstat)
+- **꽂은 뒤 순서** (PORTING.md): ① 포트 열기 전 ioreg ② DTR·RTS 내리고 한 번만 열어 [BOOT] 이유·코어덤프 ③ 새 판 올리기 ④ board_rec_test all 한 번 ⑤ BLE·화면·LoRa·WiFi 속도(기본판 vs sdkconfig.tcp 판)
+- **사용자 결정 대기**: 켤 때 콘솔을 UART0 으로 돌려 USB 멎음 가르기 · BLE 송신 +9/+12 dBm · CLAUDE.md nimble 스택 5120→4096 고치기 · 카드 시험 세션 84~105 지우기
 - 보드 로그 받기는 DTR·RTS 를 내린 채 포트를 연다 (board_rec_test.py 방식). 기본값으로 열면 리셋이 안 될 때가 있다
 
 ## 지금 상태 (2026-09-15 11:20 기준)
