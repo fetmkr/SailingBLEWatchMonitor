@@ -13,6 +13,8 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
     idf.py -B ~/esp/build-sail -p /dev/cu.usbmodem1101 flash
     # 로그는 pyserial 로 포트를 열어 받는다 (열면 리셋). idf.py monitor 는 대화형이라 안 씀
 
+> ★★ **판정·다음 할 일은 `CHECKLIST.md` 가 원본이다.** 이 파일은 실측값과 경과의 자세한 기록이다. 칸을 채우면 CHECKLIST 를 먼저 고친다.
+
 ## 규칙
 
 1. **firmware-rak 은 건드리지 않는다.** 물 위에서 검증된 펌웨어다. 옮긴 쪽이 같은 결과를 낼 때까지 그대로 쓴다.

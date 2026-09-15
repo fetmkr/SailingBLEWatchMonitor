@@ -7,7 +7,9 @@
 
 ## ★ 지금 하는 일 — 펌웨어를 ESP-IDF v6.1 로 옮기는 중 (2026-09-15 오후~)
 
-- **폴더 `firmware-idf/`** · 계획·단계·결과·막힌 곳은 **`firmware-idf/PORTING.md`** 가 원본이다. 새 세션은 거기부터.
+- ★★ **진행은 `firmware-idf/CHECKLIST.md` 로만 한다** (목적 · 원칙 · 기능별 합격 기준 · 보드 시험 칸). 표에 없는 일은 안 한다. 새 세션은 거기부터.
+  사용자 (09-15): "왜 지금 마이그레이션하는거 트래킹안해? 목적없이하는거야? 체크리스트 만들어서 해야할거 아니야."
+- **폴더 `firmware-idf/`** · 실측값·결과·막힌 곳의 자세한 기록은 **`firmware-idf/PORTING.md`**.
 - 기준 코드: 커밋 `2b18b17` 의 firmware-rak (HLG 1.2). firmware-rak 은 건드리지 않는다.
 - **보드에는 firmware-idf 를 올려 둔다** (사용자 결정 "보드 그냥 새코드로 구현해"). 시험은 단계마다 나눠서.
 - 빌드: `idf.py -B ~/esp/build-sail` 필수 (경로 빈칸 우회) · `SSL_CERT_FILE` 필요 — memory `firmware-idf-port`
