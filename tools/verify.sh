@@ -56,6 +56,13 @@ swiftc -O -o "$BUILD/decode_check" \
 "$BUILD/decode_check" "$BUILD/vectors.tsv"
 ok "프로토콜 구현 일치"
 
+# 보정 저장 거절이 매초 진행 알림에 묻히지 않는지, 재시도·저장 상태를 구분하는지.
+swiftc -o "$BUILD/magcal_state_check" \
+    "$ROOT/app/Shared/MagCalibrationState.swift" \
+    "$ROOT/tools/magcal_state_check/main.swift"
+"$BUILD/magcal_state_check"
+ok "워치·아이폰 보정 결과 유지 및 재시도 상태"
+
 if [ "$QUICK" = "quick" ]; then
     bar "quick 모드 — 컴파일 단계는 건너뜀"
     exit 0

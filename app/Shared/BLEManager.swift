@@ -163,22 +163,8 @@ final class BLEManager: NSObject, ObservableObject {
     /// 제어 통로가 열려 있나. 안 열려 있으면 단추를 잠근다.
     @Published private(set) var controlReady = false
 
-    /// 자력계 보정이 몇 점까지 왔나. 안 하는 중이면 nil.
-    ///
-    /// 보드가 1초에 한 번 `magcal 37/128 …` 로 알려준다. 그 앞부분만 뽑는다.
-    /// **숫자만으로는 부족하다** — 화면이 막대로 그려야 사람이 언제 그만둘지 안다.
-    @Published private(set) var magcalProgress: (done: Int, total: Int)?
-
-    /// 보드가 보낸 줄에서 `N/M` 을 뽑는다. 못 뽑으면 nil.
-    private func parseMagcalProgress(_ text: String) -> (Int, Int)? {
-        guard text.hasPrefix("magcal ") else { return nil }
-        let parts = text.dropFirst(7).split(separator: " ", maxSplits: 1)
-        guard let first = parts.first else { return nil }
-        let nums = first.split(separator: "/")
-        guard nums.count == 2,
-              let a = Int(nums[0]), let b = Int(nums[1]), b > 0 else { return nil }
-        return (a, b)
-    }
+    /// 점 수와 명령 결과를 분리한다. 저장 거절 이유가 매초 진행에 묻히면 안 된다.
+    @Published private(set) var magcal = MagCalibrationState()
 
     /// 보드에 명령 한 줄을 보낸다. 줄바꿈은 여기서 붙인다.
     ///
@@ -189,6 +175,7 @@ final class BLEManager: NSObject, ObservableObject {
             appendLog("제어 통로가 아직 안 열렸습니다 — \(line)")
             controlReply = "보드에 안 붙어 있습니다"
             controlReplyAt = Date()
+            if line.hasPrefix("magcal") { magcal.showConnectionError(controlReply) }
             return
         }
         guard let data = (line + "\n").data(using: .utf8) else { return }
@@ -250,6 +237,7 @@ final class BLEManager: NSObject, ObservableObject {
 
     /// 설정 화면에서 모듈을 골랐을 때.
     func selectModule(_ module: DiscoveredModule) {
+        magcal = MagCalibrationState()
         let pin = ModulePin(fullName: module.fullName,
                             moduleID: module.moduleID ?? 0,
                             peripheralID: module.peripheralID,
@@ -267,6 +255,7 @@ final class BLEManager: NSObject, ObservableObject {
 
     /// "다른 모듈에 붙기" — 고정을 풀고 다시 탐색 모드로.
     func unpinModule() {
+        magcal = MagCalibrationState()
         appendLog("모듈 고정 해제 — 탐색 모드로 복귀")
         ModulePinStore.clear()
         pinnedModule = nil
@@ -769,13 +758,7 @@ extension BLEManager: CBPeripheralDelegate {
             guard !text.isEmpty else { return }
             controlReply = text
             controlReplyAt = Date()
-            // 보정 진행이면 막대로 그릴 수 있게 숫자를 뽑아 둔다.
-            // 끝났다는 말(저장/지웠습니다/실패)이 오면 막대를 내린다.
-            if let p = parseMagcalProgress(text) {
-                magcalProgress = p
-            } else if text.hasPrefix("magcal") {
-                magcalProgress = nil
-            }
+            magcal.receive(text)
             appendLog("← \(text)")
             return
         }

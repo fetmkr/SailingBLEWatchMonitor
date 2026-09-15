@@ -834,8 +834,7 @@ static void magCalStatus(char* out, size_t n) {
 }
 
 // 명령 처리. 답 한 줄을 out 에 쓴다. 시리얼·BLE 공용.
-// ★ firmware-rak 은 clear/stop 이 기록 중이라 막힐 때 out 을 안 채운 채 돌아가, 부르는 쪽이 채워지지 않은 버퍼를 찍었다.
-//   여기서는 out 을 빈 줄로 시작한다 (잠금 이유는 settingsLockedWhileRecording 이 이미 찍었다).
+// 기록 중 거절도 out 에 적는다. 시리얼에만 찍으면 BLE 쪽에는 이유가 전달되지 않는다.
 static void magCalCmd(const char* arg, char* out, size_t n) {
     if (n) out[0] = '\0';
     if (!strcmp(arg, "on") || !strcmp(arg, "start")) {
@@ -854,14 +853,20 @@ static void magCalCmd(const char* arg, char* out, size_t n) {
         return;
     }
     if (!strcmp(arg, "clear")) {
-        if (settingsLockedWhileRecording("magcal clear")) return;
+        if (settingsLockedWhileRecording("magcal clear")) {
+            snprintf(out, n, "magcal 안 씀 — 기록 종료 후 다시 누르세요. 기존 보정 유지");
+            return;
+        }
         imu::setMagOffset(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         const bool ok = magCalSave();
         snprintf(out, n, ok ? "magcal 지웠습니다 (치우침 0)" : "magcal 지웠지만 보드에 못 적었습니다");
         return;
     }
     if (!strcmp(arg, "stop")) {
-        if (settingsLockedWhileRecording("magcal stop")) return;
+        if (settingsLockedWhileRecording("magcal stop")) {
+            snprintf(out, n, "magcal 안 씀 — 기록 종료 후 다시 저장하세요. 모은 점과 기존 보정 유지");
+            return;
+        }
         if (!gMagCalOn) { snprintf(out, n, "magcal 모으는 중이 아닙니다 — magcal on 부터 누르세요"); return; }
         // 너무 적으면 끄지 않는다. 꺼버리면 다시 처음부터 모아야 한다.
         if (gMagCalN < 20) {

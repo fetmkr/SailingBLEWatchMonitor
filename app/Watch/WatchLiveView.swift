@@ -387,7 +387,7 @@ private struct SettingsPage: View {
     // ── 자력계 치우침 보정 (REQUIREMENTS B4·D3)
     //
     // 아이폰과 같은 기능이다. 배 위에서 해야 하는 작업이라 손목에도 둔다.
-    // 배를 돌리면서 손목만 보면 되니까 오히려 여기가 편하다.
+    // 보드가 든 장치를 여러 자세로 돌리고, 손목에서 진행·거절 이유를 확인한다.
     //
     // ★ 화면이 좁으니 단추 둘만 둔다. 시작과 저장. 상태는 자동으로 온다.
     private var magcalSection: some View {
@@ -406,7 +406,8 @@ private struct SettingsPage: View {
             //
             //   그래서 .plain 으로 두고 배경을 직접 그린다. 높이를 우리가 정한다.
             HStack(spacing: 4) {
-                magcalButton("시작", "magcal on")
+                magcalButton(ble.magcal.isFull ? "다시 모으기" : "시작",
+                             ble.magcal.isFull ? "magcal reset" : "magcal on")
                 magcalButton("저장", "magcal stop")
             }
 
@@ -416,40 +417,44 @@ private struct SettingsPage: View {
             //   보내서 워치에서는 "시작했다" 한 줄 뜨고 끝이었다. 128점이 차는
             //   내내 아무 변화가 없어서 언제 그만둘지 알 수가 없었다.
             //   보드가 이제 1초에 한 번 BLE 로도 보내고, 여기서 막대로 그린다.
-            if let p = ble.magcalProgress {
+            if let p = ble.magcal.progress {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text("\(p.done) / \(p.total) 점")
                             .font(.system(size: 12, weight: .semibold).monospacedDigit())
                         Spacer()
                         if p.done >= p.total {
-                            Text("다 찼다").font(.system(size: 10)).foregroundStyle(.green)
+                            Text("수집 끝").font(.system(size: 10)).foregroundStyle(.secondary)
                         }
                     }
                     GeometryReader { g in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.gray.opacity(0.25))
                             Capsule()
-                                .fill(p.done >= p.total ? Color.green : Color.accentColor)
+                                .fill(Color.accentColor)
                                 .frame(width: g.size.width * CGFloat(p.done) / CGFloat(p.total))
                         }
                     }
                     .frame(height: 6)
-                    Text("계속 돌리세요")
+                    Text(p.done >= p.total
+                         ? "저장을 눌러 검사하세요. 다시 모으면 이번 점은 지워집니다."
+                         : "장치를 앞뒤·좌우로 기울여 돌리세요")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                 }
-            } else if !ble.controlReady {
+            }
+            if !ble.controlReady {
                 Text("보드에 안 붙어 있습니다 — 눌러보면 이유가 나옵니다")
                     .font(.system(size: 9))
                     .foregroundStyle(.orange)
-            } else if ble.controlReply.isEmpty {
-                Text("배를 한 바퀴 천천히 돌리면서 시작")
+            }
+            if ble.magcal.message.isEmpty {
+                Text("보드가 든 장치를 기울이고 뒤집으며 천천히 돌리세요. 수평 회전만으로는 부족합니다.")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
             } else {
-                Text(ble.controlReply)
-                    .font(.system(size: 9, design: .monospaced))
+                Text(ble.magcal.message)
+                    .font(.caption2)
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
             }

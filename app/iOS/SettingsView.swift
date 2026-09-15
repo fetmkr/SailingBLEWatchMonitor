@@ -99,9 +99,9 @@ struct SettingsView: View {
                     .font(.footnote)
             }
             Button {
-                ble.sendControl("magcal on")
+                ble.sendControl(ble.magcal.isFull ? "magcal reset" : "magcal on")
             } label: {
-                Label("치우침 재기 시작", systemImage: "circle.dotted")
+                Label(ble.magcal.isFull ? "처음부터 다시 모으기" : "치우침 재기 시작", systemImage: "circle.dotted")
             }
 
             Button {
@@ -117,28 +117,28 @@ struct SettingsView: View {
             }
 
             // 진행 중이면 막대로 보여준다. 숫자만으로는 언제 그만둘지 모른다.
-            if let p = ble.magcalProgress {
+            if let p = ble.magcal.progress {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("\(p.done) / \(p.total) 점")
                             .font(.headline.monospacedDigit())
                         Spacer()
-                        Text(p.done >= p.total ? "다 찼습니다 — 저장하세요" : "계속 돌리세요")
+                        Text(p.done >= p.total ? "수집 끝 — 저장을 눌러 검사" : "장치를 기울여 돌리세요")
                             .font(.caption)
-                            .foregroundStyle(p.done >= p.total ? .green : .secondary)
+                            .foregroundStyle(.secondary)
                     }
                     ProgressView(value: Double(p.done), total: Double(p.total))
-                        .tint(p.done >= p.total ? .green : .accentColor)
+                        .tint(.accentColor)
                 }
                 .padding(.vertical, 2)
             }
 
-            if !ble.controlReply.isEmpty {
+            if !ble.magcal.message.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("보드가 답한 것")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text(ble.controlReply)
+                    Text(ble.magcal.message)
                         .font(.system(.footnote, design: .monospaced))
                         .textSelection(.enabled)
                 }
@@ -146,9 +146,10 @@ struct SettingsView: View {
         } header: {
             Text("자력계 치우침")
         } footer: {
-            Text("배에 달아 놓은 채로 배를 한 바퀴 천천히 돌리세요. "
-               + "128점이 차면 '맞추고 저장'. "
-               + "맞춘 반지름이 50 µT 근처면 잘 된 것입니다 (한국 지구 자기장).")
+            Text("보드가 든 장치를 앞뒤·좌우로 기울이고 뒤집으며 천천히 돌리세요. "
+               + "수평으로 한 바퀴 도는 것만으로는 부족합니다. "
+               + "128점은 수집 한도이며, 저장할 때 보정 품질을 검사합니다. "
+               + "거절되면 이유를 확인하고 다시 모으세요. 다시 모으면 이번 점만 지워지고 기존 보정은 유지됩니다.")
         }
     }
 

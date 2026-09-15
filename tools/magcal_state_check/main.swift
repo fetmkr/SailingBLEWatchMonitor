@@ -1,0 +1,35 @@
+import Foundation
+
+var state = MagCalibrationState()
+state.receive("magcal 128/128  퍼짐 96/91/94 uT  다 찼습니다")
+precondition(state.isFull)
+let refusal = "magcal 안 씀 — 한 평면에 몰림 | 기존 보정 그대로 — magcal reset 뒤 사방으로 다시"
+state.receive(refusal)
+for _ in 0..<60 { state.receive("magcal 128/128  다 찼습니다") }
+precondition(state.message == refusal && state.isFull, "진행 알림이 거절을 지우거나 재시도를 막으면 안 됨")
+state.receive("ok wifi off")
+precondition(state.message == refusal, "다른 명령이 보정 결과를 덮으면 안 됨")
+state.receive("magcal 처음부터 다시 — 128점")
+precondition(state.progress == nil && !state.isFull)
+state.receive("magcal 1/128  퍼짐 0/0/0 uT")
+precondition(state.progress?.done == 1)
+state.receive("magcal on 37/128  퍼짐 96/91/94 uT")
+precondition(state.progress?.done == 37, "명시적인 상태 응답도 진행으로 읽어야 함")
+state.receive("magcal 아직 10점뿐 — 계속 돌리세요")
+state.receive("magcal 38/128  퍼짐 96/91/94 uT")
+precondition(state.message.contains("아직 10점뿐") && state.progress?.done == 38)
+state.receive("magcal 저장 — 치우침 4.0 15.3 -2.4 uT")
+precondition(state.progress == nil && state.message.contains("저장"))
+state.receive("magcal off  치우침 4.0 15.3 -2.4 uT")
+precondition(state.progress == nil)
+state.receive("magcal 128/128 다 찼습니다")
+state.showConnectionError("보드에 안 붙어 있습니다")
+state.receive("magcal 128/128 다 찼습니다")
+precondition(state.message == "보드에 안 붙어 있습니다")
+state.receive("magcal 적용(보드에 못 적음) — 치우침 4.0 15.3 -2.4 uT")
+precondition(state.progress == nil && state.message.contains("못 적음"))
+for bad in ["magcal -1/128", "magcal 129/128", "magcal 0/0", "magcal abc/128"] {
+    state.receive(bad)
+    precondition(state.progress == nil)
+}
+print("PASS: rejection survives 60 progress updates; retry, save, persistence failure, status and connection error remain distinct")
