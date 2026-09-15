@@ -76,7 +76,7 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
   `-B ~/esp/build-stage0` 로 지어 올린다. 합칠 때 지운다.
 - ★ 17:00 쯤부터 보드에 연결이 안 된다 — `Failed to connect to ESP32-S3: No serial data received` 세 번 (default-reset 둘, usb-reset 하나).
   맥은 USB 칩(303A:1001, 일련번호 3C:DC:75:70:2F:B4)을 계속 본다. 포트를 열어도 0 바이트. 사용자에게 USB·전원 뽑았다 꽂기를 부탁함.
-  LED 고친 판은 빌드만 되고 아직 못 올렸다.
+  → 17:06 사용자가 USB 를 뽑았다 꽂은 뒤 바로 올라감 (해시 확인 3개). LED 고친 판이 보드에 있다 — 부팅 로그 "LED 는 꺼 둔다", SD 89개 그대로.
 - 고친 것: 속도 바꿀 때마다 `uart_set_pin` 을 다시 불러 `GPIO 43 is not usable` 경고 → 핀은 한 번, 속도는 `uart_set_baudrate`. 다시 올려 경고 사라짐 확인
 - ★ `Core dump data check failed`: 코어덤프 영역에 옛 아두이노판(IDF 4.4, 판 0x00090100)이 쓴 ELF 코어덤프 23,492 바이트가 있다.
   IDF 6.1 이 형식이 달라 체크섬을 못 맞춘 것. 증거라 `~/esp/coredump_ff0000.bin` 으로 떠 뒀다 (09-11 nimble_host 죽음일 가능성 — 추측)
