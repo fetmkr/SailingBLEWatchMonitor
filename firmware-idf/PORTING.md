@@ -63,7 +63,10 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 - 시험 뒤 보드는 firmware-rak 으로 되돌려 둠 (`pio run -t upload` SUCCESS, 부팅 상태줄 확인)
 - SD 목록 (읽기만, 포맷 안 함, SPI2 20 MHz): 붙는 데 65 ms · 카드 ED4QT · **파일 89개 · 49.69 MB · 남은 자리 122002 MB — firmware-rak `rec ls` 와 같음** ·
   S00046 HLG 23,868,416 · S00094 HLG 140,179 바이트도 같음
-- 조사 중: 카드를 내릴 때 `W gpio: conflict found for GPIO[12]` (CS 핀). `cmd=52/5 command not supported` 는 SDIO 여부 묻는 정보 줄로 봄(추측, 확인 중)
+- 카드를 내릴 때 `W gpio: conflict found for GPIO[12]` (CS 핀) — **IDF SD 드라이버 안의 동작이다.** 붙일 때 CS 를 출력으로 잡으며 핀을 예약하고
+  (`sdspi_host.c:378-391` → `gpio.c:389-393` esp_gpio_reserve), 뗄 때 `deinit_slot` 이 예약을 안 풀고 입력으로 바꾸어 `gpio.c:395-401` 이 경고만 찍는다.
+  우리 코드 문제가 아니고 내릴 때만 난다. 기록 중에는 카드를 붙인 채 둔다.
+- `cmd=52/5 R1 response: command not supported` — IDF `sdspi_transaction.c:80` 의 정보 줄(ESP_LOGI). 카드 초기화가 SDIO 명령을 물어볼 때 SD 카드가 모른다고 답한 것
 
 **보드 운용 (사용자 결정 2026-09-15):** 이제 보드에는 firmware-idf 를 올려 둔다. 시험은 단계마다 나눠서 한다.
 - 고친 것: 속도 바꿀 때마다 `uart_set_pin` 을 다시 불러 `GPIO 43 is not usable` 경고 → 핀은 한 번, 속도는 `uart_set_baudrate`. 다시 올려 경고 사라짐 확인
@@ -79,6 +82,20 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | 5 | WiFi · HTTP 파일 전송 · mDNS — **TCP 창 키우기** | `/api/files`·`/file/` Range · 해시 · 받기 속도를 firmware-rak 과 같은 자리에서 비교 | ❌ |
 | 6 | LoRa (RadioLib, 칩 버그 셋) | 두 보드 사이 주고받기 | ❌ |
 | 7 | 전원·깊은잠·버튼·코어덤프 | 헛깸 0 · 끄는 순서 · 코어덤프 0xFF0000 | ❌ |
+
+## 작업 나누기 (1·2단계, 2026-09-15)
+
+1단계(기록기)와 2단계(GPS·IMU)를 동시에 짠다. **보드는 하나라 올리기·시험은 메인만 한다.** 나눠 짜는 쪽은 빌드만.
+
+| 누가 | 파일 (이 사람만 만진다) | 약속 |
+|---|---|---|
+| **기록기** | `main/hlog_idf.cpp` · `main/sdcard_idf.cpp` (+ 필요하면 `main/hlog_idf_*.h`) | `firmware-rak/include/hlog.h` · `sdcard.h` 의 함수를 **이름·뜻 그대로** 구현. HLG·TXT 바이트 형식, TXT 머리·줄 글자, `@DUMP`·`@HASH`·`rec check` 출력 글자를 firmware-rak `hlog.cpp` 와 같게 (앱·파이썬 파서·board_rec_test.py 가 그대로 돌아야 함). 시리얼은 `printf`. 쓰기 일꾼은 코어 0, 링버퍼 PSRAM. 빌드는 `-B ~/esp/build-sail-rec` |
+| **GPS·IMU** | `main/gps.h/.cpp` · `main/imu.h/.cpp` · `components/tinygpsplus/` | GPS: UART1 115200, 켤 때 9600→115200 절차·PCAS·CASIC(CFG-MSG NAV-PV 10Hz, 선박 모드 4)·NMEA(TinyGPS++)·NAV-PV 값, firmware-rak `gpsPoll` 과 같은 결과. IMU: MPU-9250 FIFO 100 Hz · AK8963 자력(축 정렬·하드아이언 빼기 전후) · 단위 g · °/s · µT 가 firmware-rak 과 같게. 루프가 부르는 `poll()`/`drain()` 모양 (콜백에서 일 안 함). 빌드는 `-B ~/esp/build-sail-sens` |
+| **메인** | `main/app_main.cpp` · `main/CMakeLists.txt` · `sdkconfig.defaults` · `PORTING.md` | 시리얼 명령 줄 받기, 기록 제어(rec_control.h, recWantOn/Off, 이어 시작, NVS rec_want·rec_open), buildNav/buildImu 로 둘을 잇기, 보드 올리기·시험·커밋 |
+
+- 나눠 짜는 쪽은 **커밋하지 않는다**, **보드·시리얼 포트를 열지 않는다**, `app_main.cpp`·`CMakeLists.txt` 를 안 만진다.
+- 필요한 IDF 부품이 `REQUIRES` 에 없으면 메인에게 말한다.
+- 막히면 추측으로 채우지 말고 무엇이 모르는지 적어 보고한다.
 
 ## 파티션
 
