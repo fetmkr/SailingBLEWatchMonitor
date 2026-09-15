@@ -31,7 +31,4 @@ void    endForSleep();
 // 시험용 (firmware-idf 만 구현, 09-15 속도 조사): 다음 마운트부터 SD SPI 주파수를 kHz 로. 0 = board_rak kSdHz
 void    setTestFreqKhz(int khz);
 int     cardFreqKhz();                 // 붙어 있으면 카드가 실제로 쓰는 주파수(kHz), 아니면 0
-void    setTestSdmmc(bool on);         // 시험 (firmware-idf 만): 다음 마운트부터 SPI 대신 SDMMC 1비트
-bool    testSdmmc();
-
 } // namespace sdcard
