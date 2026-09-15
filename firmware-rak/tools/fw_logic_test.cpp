@@ -317,6 +317,11 @@ static void testHeadingTilt() {
         check(near(hdg::tiltHeadingDeg(acc, mag, c), 10.0f, 0.01f), "오프셋 350 + 편각 20 → 10° 로 접는다");
         for (int i = 0; i < 3; ++i) acc[i] *= 1.2f;
         check(hdg::tiltHeadingDeg(acc, mag, c) < 0.0f, "가속 크기 1.2 g — 기울기를 못 믿어 방위 없음(-1)");
+        check(near(hdg::tiltHeadingDeg(acc, mag, c, false), 10.0f, 0.01f),
+              "식3: 1.2 g여도 같은 계산값 표시, 식2의 거절은 보존");
+        const float noAcc[3] = {0, 0, 0};
+        check(hdg::tiltHeadingDeg(noAcc, mag, c, false) < 0.0f,
+              "식3도 가속 입력 자체가 없으면 방위를 만들지 않음");
         hdg::HeadingCfg bad{1, 1, 1.0f, 1.0f, 0.0f, 0.0f};
         check(hdg::tiltHeadingDeg(acc, mag, bad) < 0.0f && hdg::flatHeadingDeg(mag, bad) < 0.0f,
               "두 축이 같은 잘못된 설정 → 방위 없음");

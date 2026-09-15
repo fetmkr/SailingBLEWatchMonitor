@@ -25,6 +25,7 @@ export interface HeadingCfg {
 export const FORMULA_NONE = 0;
 export const FORMULA_FLAT = 1;
 export const FORMULA_TILT = 2;
+export const FORMULA_TILT_VISIBLE = 3;
 
 function wrap360(deg: number): number {
   if (!Number.isFinite(deg)) return NaN;
@@ -48,19 +49,20 @@ function toFRD(v: readonly number[], c: HeadingCfg): [number, number, number] | 
 }
 
 /** 가속(가속도계 좌표, g)으로 힐·피치 (라디안). 1 g ±0.15 밖이면 null. */
-function gravityRollPitch(acc: readonly number[], c: HeadingCfg): [number, number] | null {
+function gravityRollPitch(acc: readonly number[], c: HeadingCfg, requireGravity = true): [number, number] | null {
   const a = [acc[1], acc[0], -acc[2]];           // 자력 좌표로 (자력 X=가속 Y, Y=가속 X, Z=−가속 Z)
   const frd = toFRD(a, c);
   if (!frd) return null;
   const gf = -frd[0], gr = -frd[1], gd = -frd[2];
   const gn = Math.hypot(gf, gr, gd);
-  if (gn < 0.2 || Math.abs(gn - 1) > 0.15) return null;
+  if (!Number.isFinite(gn) || gn <= 0) return null;
+  if (requireGravity && Math.abs(gn - 1) > 0.15) return null;
   return [Math.atan2(gr, gd), Math.atan2(-gf, Math.hypot(gr, gd))];
 }
 
 /** 기울기 보정 방위 (도). 식 번호 2. */
-export function tiltHeadingDeg(acc: readonly number[], mag: readonly number[], c: HeadingCfg): number {
-  const rp = gravityRollPitch(acc, c);
+export function tiltHeadingDeg(acc: readonly number[], mag: readonly number[], c: HeadingCfg, requireGravity = true): number {
+  const rp = gravityRollPitch(acc, c, requireGravity);
   if (!rp) return NaN;
   const m = toFRD(mag, c);
   if (!m) return NaN;
@@ -90,7 +92,9 @@ export function describe(h: {
   }
   const ax = (a: number, s: number) => `${s < 0 ? "−" : "+"}${"XYZ"[a] ?? "?"}`;
   const sgn = (v: number) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}`;
-  const kind = h.hdgFormula === FORMULA_TILT
+  const kind = h.hdgFormula === FORMULA_TILT_VISIBLE
+    ? "기울기 보정 (INSLIB ahrs_mag_detilt · 운동 가속에도 계산 · 1 g ±0.15 밖이면 보드 OLED에 ?)"
+    : h.hdgFormula === FORMULA_TILT
     ? "기울기 보정 (INSLIB ahrs_mag_detilt · 중력은 그때 가속도 · 1 g ±0.15 밖이면 없음)"
     : h.hdgFormula === FORMULA_FLAT ? "평평 atan2 (기울기 보정 없음)" : `알 수 없는 식 번호 ${h.hdgFormula}`;
   const hi = h.magHardIron.map((v) => v.toFixed(1)).join(", ");

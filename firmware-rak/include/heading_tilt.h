@@ -48,13 +48,15 @@ inline bool toFRD(const float v[3], const HeadingCfg& c, float* f, float* r, flo
 // 가속(가속도계 좌표, g)으로 힐 φ · 피치 θ (라디안).
 // ★ 가속도계가 중력만 잰다고 가정한다. 크기가 1 g 에서 0.15 g 넘게 벗어나면 운동 가속이 섞인 것이라 false.
 //   (세션 46: 달리는 중 거절 0.34%, 가장 긴 연속 310 ms)
-inline bool gravityRollPitch(const float accAccel[3], const HeadingCfg& c, float* roll, float* pitch) {
+inline bool gravityRollPitch(const float accAccel[3], const HeadingCfg& c, float* roll, float* pitch,
+                             bool requireGravity = true) {
     const float a[3] = { accAccel[1], accAccel[0], -accAccel[2] };   // 자력 좌표로
     float f, r, d;
     if (!toFRD(a, c, &f, &r, &d)) return false;
     const float gf = -f, gr = -r, gd = -d;                            // 가속은 위를 가리킨다 → 중력
     const float gn = std::sqrt(gf * gf + gr * gr + gd * gd);
-    if (gn < 0.2f || std::fabs(gn - 1.0f) > 0.15f) return false;
+    if (!std::isfinite(gn) || gn <= 0.0f) return false;
+    if (requireGravity && std::fabs(gn - 1.0f) > 0.15f) return false;
     *roll  = std::atan2(gr, gd);
     *pitch = std::atan2(-gf, std::sqrt(gr * gr + gd * gd));
     return true;
@@ -63,9 +65,12 @@ inline bool gravityRollPitch(const float accAccel[3], const HeadingCfg& c, float
 // 기울기 보정 방위 (도, 0~360). 못 구하면 -1.
 //   식은 INSLIB ahrs_mag_detilt (MIT). 72가지 자세 검산 0.5° 미만 (NEXT.md 2026-09-09)
 //   mag 는 자력 좌표 µT (HLG 에 적힌 값 — 하드아이언은 이미 빠져 있다)
-inline float tiltHeadingDeg(const float accAccel[3], const float mag[3], const HeadingCfg& c) {
+// requireGravity=false: 같은 계산값을 계속 제공한다. 운동 가속은 호출자가 품질 경고로 표시한다.
+// 기본 true는 옛 펌웨어·HLG 식 2의 거절 규칙을 보존한다. 식 3만 false를 사용한다.
+inline float tiltHeadingDeg(const float accAccel[3], const float mag[3], const HeadingCfg& c,
+                            bool requireGravity = true) {
     float roll, pitch;
-    if (!gravityRollPitch(accAccel, c, &roll, &pitch)) return -1.0f;
+    if (!gravityRollPitch(accAccel, c, &roll, &pitch, requireGravity)) return -1.0f;
     float mf, mr, md;
     if (!toFRD(mag, c, &mf, &mr, &md)) return -1.0f;
     const float cr = std::cos(roll),  sr = std::sin(roll);

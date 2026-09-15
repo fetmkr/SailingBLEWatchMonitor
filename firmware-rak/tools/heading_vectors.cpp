@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
     if (argc < 2) { std::fprintf(stderr, "쓸 파일 이름을 주세요\n"); return 2; }
     FILE* fp = std::fopen(argv[1], "w");
     if (!fp) return 2;
-    std::fprintf(fp, "# axisA axisB signA signB off decl ax ay az mx my mz tilt flat\n");
+    std::fprintf(fp, "# axisA axisB signA signB off decl ax ay az mx my mz tilt flat visible\n");
 
     // 결정적인 난수 (돌릴 때마다 같은 벡터)
     unsigned long seed = 12345;
@@ -40,9 +40,10 @@ int main(int argc, char** argv) {
             float mag[3] = { (float)(rnd() * 100 - 50), (float)(rnd() * 100 - 50), (float)(rnd() * 100 - 50) };
             const float t = hdg::tiltHeadingDeg(acc, mag, c);
             const float f = hdg::flatHeadingDeg(mag, c);
-            std::fprintf(fp, "%d %d %d %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n",
+            const float visible = hdg::tiltHeadingDeg(acc, mag, c, false);
+            std::fprintf(fp, "%d %d %d %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n",
                          a, b, sa, sb, c.offDeg, c.declDeg, acc[0], acc[1], acc[2],
-                         mag[0], mag[1], mag[2], t, f);
+                         mag[0], mag[1], mag[2], t, f, visible);
             ++n;
         }
     }

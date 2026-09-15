@@ -163,6 +163,7 @@ constexpr size_t kOffPrevSession = 77;  // U4  이어받은 앞 세션 번호. 0
 //
 //   hdg_formula  0 = 안 적힘(옛 파일)  1 = 평평 atan2  2 = 기울기 보정(INSLIB ahrs_mag_detilt,
 //                중력은 그때 가속도에서, |a| 가 1 g ±0.15 를 벗어나면 방위 없음)
+//                3 = 같은 기울기 보정, 운동 가속에도 계산·저장 (OLED에는 ?로 품질 표시)
 //   축 A·B·부호  방위 = atan2(A·sA, B·sB) 의 두 축 (0=X 1=Y 2=Z, 부호 0=+ 1=-). 자력계 좌표
 //                앞 = B·sB, 오른쪽 = −A·sA, 아래 = 오른손 법칙
 //   가속→자력 축은 고정: 자력 X = 가속 Y, 자력 Y = 가속 X, 자력 Z = −가속 Z
@@ -178,6 +179,8 @@ constexpr size_t kOffHdgDecl    = 90;  // R4  자기 편각 (도, 동편 +)
 constexpr size_t kOffMagHi      = 94;  // R4×3  뺀 하드아이언 (µT) 94·98·102
 constexpr uint8_t kHdgFormulaFlat = 1;
 constexpr uint8_t kHdgFormulaTilt = 2;
+// 같은 기울기 보정식. 운동 가속(1g ±0.15 밖)도 계산·저장하고 OLED에는 ?로 표시한다.
+constexpr uint8_t kHdgFormulaTiltVisible = 3;
 
 constexpr uint8_t kImuBNO085  = 0;
 constexpr uint8_t kImuMPU9250 = 1;

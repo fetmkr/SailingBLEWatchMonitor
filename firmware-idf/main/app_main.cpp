@@ -316,7 +316,8 @@ static float headingTiltDeg() {
     const imu::Vec& m = imu::mag();
     const float acc[3] = {a.x, a.y, a.z};
     const float v[3]   = {m.x, m.y, m.z};
-    return hdg::tiltHeadingDeg(acc, v, hdgCfgNow());
+    // 사용자가 요청한 표시 정책: 운동 가속이어도 값을 숨기지 않는다 (HLG 식 3).
+    return hdg::tiltHeadingDeg(acc, v, hdgCfgNow(), false);
 }
 
 // 배의 방위 — 화면·BLE·TXT·NAV 가 읽는 단 하나. 못 구하면 -1 (평평 식으로 몰래 채우지 않는다)
@@ -491,7 +492,7 @@ static void buildHeadingNote(char* out, size_t n) {
     snprintf(b, sizeof b, "%c%c", gHdgSignB < 0 ? '-' : '+', kAx[gHdgAxisB < 3 ? gHdgAxisB : 0]);
     const float* mo = imu::magOffset();
     snprintf(out, n,
-             "# 방위(화면·BLE·TXT): 기울기 보정(INSLIB ahrs_mag_detilt) — 축 atan2(자력 %s, 자력 %s) 기준, 중력은 그때 가속도, |a| 가 1 g ±0.15 밖이면 방위 없음. + 장착 오프셋 %+.2f° + 자기 편각 %+.2f°\n"
+             "# 방위(화면·BLE·TXT): 기울기 보정(INSLIB ahrs_mag_detilt, 식3) — 축 atan2(자력 %s, 자력 %s) 기준, 중력은 그때 가속도. 운동 가속에도 계산·저장, |a| 가 1 g ±0.15 밖이면 OLED에 ?. + 장착 오프셋 %+.2f° + 자기 편각 %+.2f°\n"
              "# 자력: HLG 의 mag 는 하드아이언을 뺀 값 — 뺀 오프셋 %.2f %.2f %.2f uT (반지름 %.1f, 잔차 %.2f)\n"
              "# 가속→자력 축: 자력 X=가속 Y, Y=가속 X, Z=−가속 Z\n",
              a, b, gHdgOffsetDeg, gHdgDeclDeg, mo[0], mo[1], mo[2], imu::magRadius(), imu::magResid());
@@ -524,7 +525,7 @@ static bool logStartNow(uint32_t prevSession) {
     h.heelAxis  = gHeelAxis;   h.heelSign  = gHeelSign < 0 ? 1 : 0;
     h.pitchAxis = gPitchAxis;  h.pitchSign = gPitchSign < 0 ? 1 : 0;
     h.heelOff   = gHeelOffsetDeg;  h.pitchOff = gPitchOffsetDeg;
-    h.hdgFormula = hlog::kHdgFormulaTilt;
+    h.hdgFormula = hlog::kHdgFormulaTiltVisible;
     h.hdgAxisA = gHdgAxisA;  h.hdgAxisB = gHdgAxisB;
     h.hdgSignA = gHdgSignA < 0 ? 1 : 0;  h.hdgSignB = gHdgSignB < 0 ? 1 : 0;
     h.hdgOff   = gHdgOffsetDeg;  h.hdgDecl = gHdgDeclDeg;
@@ -744,11 +745,12 @@ static sail::Telemetry buildTelemetry(uint32_t ms) {
     sail::Telemetry t;
     t.moduleID = ble::moduleId();
     t.uptimeMs = ms;
-    // 속도는 "화면 속도" 규칙을 거친다 — 멈추면 0, 튀면 --.--
-    t.sogValid = gs.fix && gs.sogShownOk;
-    t.cogValid = gs.fix;
+    // 품질 거절로 숫자를 숨기지 않는다. 다듬은 값이 없으면 현재 RMC 원본을 표시한다.
+    // 원본 자체가 없거나 오래됐으면 gs.fix가 false다.
+    t.sogValid = gs.fix;
+    t.cogValid = gs.fix && gps::parser().course.isValid() && gps::parser().course.age() < gps::kStaleMs;
     if (gs.fix) {
-        t.sogKn  = gs.sogShownKn;
+        t.sogKn  = gs.sogShownOk ? gs.sogShownKn : (float)gps::parser().speed.knots();
         t.cogDeg = (gs.cogDamped >= 0.0f) ? gs.cogDamped : (float)gps::parser().course.deg();
     }
     t.heelValid = imu::ok();
@@ -2390,7 +2392,7 @@ extern "C" void app_main(void) {
             if (now - lastDraw >= drawPeriod) {
                 lastDraw = now;
                 const gps::State& gs = gps::state();
-                const sail::Telemetry& lt = ble::latest();
+                const sail::Telemetry lt = buildTelemetry(now);
                 TinyGPSPlus& p = gps::parser();
                 auto modeChar = [](uint8_t m) -> char {
                     return m == 0 ? 'h' : m == 1 ? 's' : m == 2 ? 'p' : m == 3 ? 'c' : m == 4 ? 'b' : '?';
@@ -2406,7 +2408,7 @@ extern "C" void app_main(void) {
                 ds.recClosing   = hlog::phase() == recctl::Phase::Closing;
                 ds.battLow      = kBattWarnVolts > 0.0f && gBattVolts > 0.0f && gBattVolts < kBattWarnVolts;
                 ds.recSeconds   = ds.recording ? (now - hlog::recStartedMs()) / 1000 : 0;
-                ds.sogKn        = lt.sogKn;   // 다듬고 잡음 바닥까지 적용된 값
+                ds.sogKn        = lt.sogKn;   // 정상은 다듬은 값, 품질 거절 시 원본 + ?
                 // ★ 정해 둔 모드(선박 4)와 다를 때만 속도 줄에 띄운다. 전압 옆 칸은 늘.
                 ds.gnssMode     = (gs.dyModel == gps::kBoatMode) ? 0 : modeChar(gs.dyModel);
                 ds.gnssModeNow  = modeChar(gs.dyModel);
@@ -2417,6 +2419,13 @@ extern "C" void app_main(void) {
                 ds.imuOk        = imu::ok();
                 ds.magOk        = imu::magOk();
                 ds.sogValid     = lt.sogValid;
+                ds.cogValid     = lt.cogValid;
+                ds.sogCaution   = lt.sogValid && !gs.sogShownOk;
+                const imu::Vec& ha = imu::acc();
+                const float headingAcc[3] = {ha.x, ha.y, ha.z};
+                float roll, pitch;
+                ds.headingCaution = ds.headingDeg >= 0.0f &&
+                    !hdg::gravityRollPitch(headingAcc, hdgCfgNow(), &roll, &pitch);
                 ds.heelValid    = lt.heelValid;
                 ds.gpsFix       = gs.fix;
                 ds.satellites   = p.satellites.isValid() ? (int)p.satellites.value() : 0;

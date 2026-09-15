@@ -263,7 +263,7 @@ void displayUpdate(const DisplayState& s) {
     u8g2_DrawHLine(&gOled, 0, kLineY, kW);
 
     // ── 2줄  속도 — 값이 없으면 숫자를 안 그린다 ─────────────────────────
-    if (s.sogValid) snprintf(buf, sizeof(buf), "SOG %.2f kn", s.sogKn);
+    if (s.sogValid) snprintf(buf, sizeof(buf), "SOG %.2f kn%s", s.sogKn, s.sogCaution ? "?" : "");
     else            snprintf(buf, sizeof(buf), "SOG --- kn");
     drawChecked(kColL, kRow2, buf, "SOG");
 
@@ -276,11 +276,12 @@ void displayUpdate(const DisplayState& s) {
     }
 
     // ── 3줄  침로와 방위 ─────────────────────────────────────────────────
-    if (s.sogValid) snprintf(buf, sizeof(buf), "COG %03d", (int)(s.cogDeg + 0.5f) % 360);
+    if (s.cogValid) snprintf(buf, sizeof(buf), "COG %03d", (int)(s.cogDeg + 0.5f) % 360);
     else            snprintf(buf, sizeof(buf), "COG ---");
     drawChecked(kColL, kRow3, buf, "COG");
 
-    if (s.headingDeg >= 0.0f) snprintf(buf, sizeof(buf), "HDG %03d", (int)(s.headingDeg + 0.5f) % 360);
+    if (s.headingDeg >= 0.0f) snprintf(buf, sizeof(buf), "HDG %03d%s", (int)(s.headingDeg + 0.5f) % 360,
+                                    s.headingCaution ? "?" : "");
     else                      snprintf(buf, sizeof(buf), "HDG ---");
     drawChecked(kColR, kRow3, buf, "HDG");
 

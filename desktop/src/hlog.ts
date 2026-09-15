@@ -73,7 +73,7 @@ export interface Header {
   heelOff: number;     // 기준각 (도)
   pitchOff: number;
   // 방위를 보드와 같은 식으로 다시 구할 설정 (hlog.h kOffHdgFormula, 81~105). 0 이면 옛 파일 — 안 적힘
-  hdgFormula: number;  // 0 없음 · 1 평평 · 2 기울기 보정
+  hdgFormula: number;  // 0 없음 · 1 평평 · 2 기울기 보정(운동 가속 거절) · 3 운동 가속에도 계산
   hdgAxisA: number;    // 0=X 1=Y 2=Z (자력계 좌표)
   hdgAxisB: number;
   hdgSignA: number;    // +1 / -1

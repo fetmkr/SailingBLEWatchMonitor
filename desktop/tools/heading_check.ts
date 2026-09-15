@@ -18,8 +18,9 @@ for (const line of readFileSync(path, "utf8").split("\n")) {
   const c = { axisA: v[0], axisB: v[1], signA: v[2], signB: v[3], offDeg: v[4], declDeg: v[5] };
   const acc = [v[6], v[7], v[8]], mag = [v[9], v[10], v[11]];
   const t = tiltHeadingDeg(acc, mag, c), f = flatHeadingDeg(mag, c);
+  const visible = tiltHeadingDeg(acc, mag, c, false);
   if (v[12] < 0) invalid++;
-  if (!same(v[12], t) || !same(v[13], f)) {
+  if (!same(v[12], t) || !same(v[13], f) || (v.length > 14 && !same(v[14], visible))) {
     if (bad < 5) console.error(`어긋남: ${line}  → 앱 tilt ${t} flat ${f}`);
     bad++;
   }

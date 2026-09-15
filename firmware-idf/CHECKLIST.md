@@ -35,6 +35,14 @@
 
 ## 4. 기능 표
 
+**09-15 실외 세션 116 후 표시 수정 (A3·A6·D2·D7)**
+- 사용자: OLED에서 값을 숨기지 말 것. 보드·SD HDG 계산은 동일하게 유지.
+- SOG 품질 거절 시 RMC 원본 + `?`, COG 독립 유효성, HDG 운동 가속도에서도 계산 + `?`.
+- 새 기록은 방위 정책 3, 옛 정책 2의 해석은 유지. 장착 오프셋·편각·자력 보정은 변경하지 않음.
+- 빌드 ✅ (`visible-1`), 기존 로직 및 정책 3 포함 960개 C++↔TS 비교 ✅, OLED 문자열·원본 대체·COG 독립 판정 호스트 시험 ✅.
+- 보드 적용·실물 화면 확인: 아직 안 함. 자동 승인 검토가 펌웨어 교체·리셋·SD 시험 기록의 명시적 승인 필요로 실행을 거절함. 실외 품질·나침반 정확도를 통과로 표시하지 않음.
+- 근거: `/Users/hojunsong/Documents/ChatGPT/sailing analyzer/visible-values-20260915/`의 수정결과.md, build.log, logic-test.log, heading-check.log, display-test.log, field-replay.json.
+
 상태 표시: ⬜ 안 함 · 🔶 일부 · ✅ 통과 · ❌ 실패. **보드 시험 칸이 ✅ 가 아니면 그 기능은 안 된 것이다.**
 보드에 지금 올라가 있는 판: **cafbdc5-codex** (소스 `cafbdc58`, SDMMC 시험 경로 제거 · SPI 20 MHz · 기존 TCP 설정 유지) — 09-15 Codex 인수 점검에서 올림. ELF SHA `a6ed9db3…`. 아래 19:17 기록은 이전 판 시험 이력이다.
 

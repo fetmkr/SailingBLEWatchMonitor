@@ -75,6 +75,9 @@ struct DisplayState {
     // ── 값이 있는가 ──────────────────────────────────────────────────────
     // ★ 없으면 숫자를 그리지 않는다. 지어낸 값도, 0 도 보여주지 않는다.
     bool  sogValid  = false; // GPS 가 위성을 잡았나
+    bool  cogValid  = false; // COG 자체가 있고 최근에 갱신됐나 (IDF 화면)
+    bool  sogCaution = false; // 품질이 낮아 평균 대신 원본을 표시 중
+    bool  headingCaution = false; // 운동 가속으로 기울기 추정에 주의 필요
     bool  heelValid = false; // IMU 가 살아 있나
     bool  gpsFix     = false;
     int   satellites = 0;

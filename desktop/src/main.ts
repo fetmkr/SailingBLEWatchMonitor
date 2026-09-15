@@ -328,14 +328,15 @@ function buildSeries(s: hlog.Session) {
       hdg[i] = NaN;
     } else if (hdrH.hdgFormula === heading.FORMULA_FLAT) {
       hdg[i] = heading.flatHeadingDeg(r.mag, hdgCfg);
-    } else if (hdrH.hdgFormula === heading.FORMULA_TILT) {
+    } else if (hdrH.hdgFormula === heading.FORMULA_TILT || hdrH.hdgFormula === heading.FORMULA_TILT_VISIBLE) {
       while (imuAt + 1 < s.imu.length && s.imu[imuAt + 1].ms <= r.ms) imuAt++;
       const a = s.imu[imuAt];
       // ★ 이 줄 시각 **이전**이고 IMU 두 주기 안이어야 그 순간의 자세다 (검토 5번).
       //   옛 코드는 5초 전 표본이나, 첫 IMU 가 늦으면 미래 표본까지 썼다.
       //   세션 46: NAV 99.92% 가 10 ms 안, 가장 늦은 것 203 ms (IMU 공백) → 그 줄은 방위 없음.
       const fresh = a !== undefined && a.ms <= r.ms && r.ms - a.ms <= imuMaxAgeMs;
-      hdg[i] = fresh ? heading.tiltHeadingDeg(a.acc, r.mag, hdgCfg) : NaN;
+      hdg[i] = fresh ? heading.tiltHeadingDeg(a.acc, r.mag, hdgCfg,
+        hdrH.hdgFormula !== heading.FORMULA_TILT_VISIBLE) : NaN;
     } else {
       hdg[i] = NaN;                       // 모르는 식 번호 — 짐작하지 않는다
     }
@@ -3870,7 +3871,6 @@ if (import.meta.env.DEV) {
 if (import.meta.env.DEV) {
   void lib.load().then((l) => { if (!l.lastOpen) void loadSample(); });
 }
-
 
 
 
