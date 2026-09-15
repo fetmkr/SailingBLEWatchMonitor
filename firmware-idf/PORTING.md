@@ -55,7 +55,7 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | # | 무엇 | 통과 기준 (firmware-rak 과 대조) | 상태 |
 |---|---|---|---|
 | 0 | 뼈대 — 부팅 로그, 핀, 센서 전원, LED, NVS 읽기, USB 콘솔 | 켜짐 로그 · NVS `sail` 설정값이 firmware-rak 이 쓴 값 그대로 읽힘 · GPS 바이트 들어옴 | ✅ 09-15 (아래) |
-| 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | ❌ |
+| 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | 🔶 기록기 코드 됨(빌드 경고 0) · 메인 연결·보드 시험 전 |
 | 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | ❌ |
 | 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | ❌ |
 | 4 | 화면 (U8g2) | 같은 화면 | ❌ |
@@ -93,6 +93,13 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 - ★ 빌드 출력은 `idf.py -B ~/esp/build-sail` 로 둔다. 저장소 경로의 빈칸·굽은 따옴표(`hojun’s mbp`) 때문에 picolibc.specs 경로가 깨진다
   (ESP-IDF 문서 "does not support spaces in the paths"). **우회책**이다 — 근본 해결은 빈칸 없는 경로로 저장소를 옮기는 것
 - ★ install.sh 는 python.org Python 3.13 에 인증서 파일이 없어 `CERTIFICATE_VERIFY_FAILED`. 명령에만 `SSL_CERT_FILE=<certifi cacert.pem>` 을 줘서 설치 (시스템 설정은 안 바꿈)
+
+**1단계 기록기 코드 (2026-09-15, 나눠 짠 작업 보고)**
+- `main/hlog_idf.cpp` · `main/sdcard_idf.cpp` — hlog.h·sdcard.h 함수 전부. 두 파일은 경고·에러 0 으로 컴파일 (전체 빌드는 tinygpsplus 쪽 에러로 멈춤 — GPS 작업 몫)
+- 원본과 글자 비교: 원본 문자열이 옮긴 쪽에 다 있음. 새로 생긴 출력은 `@HASH X 해시 계산 실패` 하나 (PSA 해시가 실패할 때)
+- 달라진 것: 줄끝이 CRLF (IDF `CONFIG_LIBC_STDOUT_LINE_ENDING_CRLF`) — serial_dump.py `strip()`·board_rec_test.py `rstrip()` 는 괜찮음, 앱 쪽은 모름 ·
+  워치독은 이 작업이 등록됐을 때만 먹임 · 파일 이름 자르기는 snprintf 와 같은 결과 · `start` 의 NVS 는 get·set·get 뒤 commit 한 번
+- 보드 시험 순서 (메인): rec ls → rec check 94 · rec hash 94 hlg (firmware-rak 해시와 같나) → serial_dump + hlog_parse → rec on 1분 → rec check·rec head → board_rec_test.py clean·all → 기록 중 카드 빼기 → 쓰기 일꾼 스택 남은 양
 
 ## 작업 나누기 (1·2단계, 2026-09-15)
 
