@@ -207,7 +207,10 @@
   · `sdhz 20000` → sdread read() 16 KB 2 MB: 1370 · 1370 KB/초 (카드 주파수 20000 kHz)
   · `sdhz 40000` → **카드 초기화 실패** `sdmmc_enable_hs_mode_and_check: send_csd returned 0x108` → 뒤로 계속 `R1 response: command CRC error` · `sdmmc_card_init failed (0x103)` · `rec hash 41` 도 마운트 실패
   · ★ `sdhz 0` 으로 20 MHz 에 되돌려도 **리셋 전까지 계속 안 붙음** (0x103) — 카드가 이상한 상태에 남음 → 리셋 뒤 확인 (아래)
-  → 이 보드·카드·배선으로 40 MHz 는 **안 된다** [확인]. SD 쪽 한계는 20 MHz 에서 약 1.37 MB/초
+  → ~~이 보드·카드·배선으로 40 MHz 는 안 된다 [확인]~~ ← **틀린 결론 (사용자 지적 09-15 21:0x)**. 내가 한 것은 **SPI 모드 40 MHz** 뿐이다.
+    Espressif SD SPI 문서가 "SD over SPI does not support speeds above SDMMC_FREQ_DEFAULT due to the limitations of the SPI driver" 라 했으니 실패는 예상된 결과였다.
+    **SDMMC 1비트(SD 모드) 는 시험 안 함.** 사용자(친구) 연결표: CLK 13 · CMD 11 · DAT0 10 · DAT3 12 · DAT1·DAT2 없음 → 1비트에 필요한 CLK·CMD·DAT0 는 있다. 회로도·풀업 확인 중 ⬜
+    SD 쪽 한계 "약 1.37 MB/초" 는 **SPI 20 MHz 에서의 값**일 뿐이다
   · ★★ **보드 리셋(포트 열기) 뒤에도 카드가 안 붙는다** (20:5x): `sd` · `rec hash 41` · `sdread` · `rec ls` 모두 `sdmmc_card_init failed (0x103)` — 카드 감지 GPIO39 는 LOW(있음)
     USB 리셋은 칩만 다시 켜고 SD 카드 전원은 안 끊는다 (배터리도 붙어 있음) → 40 MHz 때 이상해진 카드 상태가 남은 것 [추측]. 마운트 단계 실패라 카드에 쓴 것은 없다
     ⬜ 카드 전원 끊었다 켜기로 풀리는지 · 기록 파일 멀쩡한지 (rec hash 41 = dfe410f3…) 확인해야 한다 · 그다음 파일 보내는 동안 화면 그리기 쉬기 또는 xferPump 예산 20→50 ms ⬜ · firmware-rak 같은 자리 기준값 ⬜
