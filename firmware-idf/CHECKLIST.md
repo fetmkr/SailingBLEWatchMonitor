@@ -203,7 +203,14 @@
 - ✅ 파일 보내기를 read() 16 KB (PSRAM 버퍼) 로 (20:3x): 2 MB **764 · 806 · 781 KB/초** · 8 MB **783 KB/초** (10.7초) · 세션 41 해시 ✅ · 내부 메모리 45023 (가장 작았을 때 39720)
   보드: 2 MB 에 읽기 1.67초 · send 0.20초 · 나머지 약 0.7초 (루프가 화면 33 ms×4번/초 등을 하는 차례 [추측])
 - **지금까지 한 줄 요약**: 기본판 302 → TCP 창 약 550 → 재읽기 없애기 약 580 → setvbuf 16 KB 약 710 → read() 16 KB **약 785 KB/초** (기본판의 약 2.6배). SD 만 읽기 한계 1373
-- 다음 하나: SPI 40 MHz 를 sdread 로 (문서가 어긋남) ⬜ · 그다음 파일 보내는 동안 화면 그리기 쉬기 또는 xferPump 예산 20→50 ms ⬜ · firmware-rak 같은 자리 기준값 ⬜
+- ❌ **SPI 40 MHz 시험 (20:4x, 사용자 "40mhz 테스트 해")**: 시험 명령 `sdhz <kHz>` 만들어 같은 파일로
+  · `sdhz 20000` → sdread read() 16 KB 2 MB: 1370 · 1370 KB/초 (카드 주파수 20000 kHz)
+  · `sdhz 40000` → **카드 초기화 실패** `sdmmc_enable_hs_mode_and_check: send_csd returned 0x108` → 뒤로 계속 `R1 response: command CRC error` · `sdmmc_card_init failed (0x103)` · `rec hash 41` 도 마운트 실패
+  · ★ `sdhz 0` 으로 20 MHz 에 되돌려도 **리셋 전까지 계속 안 붙음** (0x103) — 카드가 이상한 상태에 남음 → 리셋 뒤 확인 (아래)
+  → 이 보드·카드·배선으로 40 MHz 는 **안 된다** [확인]. SD 쪽 한계는 20 MHz 에서 약 1.37 MB/초
+  · ★★ **보드 리셋(포트 열기) 뒤에도 카드가 안 붙는다** (20:5x): `sd` · `rec hash 41` · `sdread` · `rec ls` 모두 `sdmmc_card_init failed (0x103)` — 카드 감지 GPIO39 는 LOW(있음)
+    USB 리셋은 칩만 다시 켜고 SD 카드 전원은 안 끊는다 (배터리도 붙어 있음) → 40 MHz 때 이상해진 카드 상태가 남은 것 [추측]. 마운트 단계 실패라 카드에 쓴 것은 없다
+    ⬜ 카드 전원 끊었다 켜기로 풀리는지 · 기록 파일 멀쩡한지 (rec hash 41 = dfe410f3…) 확인해야 한다 · 그다음 파일 보내는 동안 화면 그리기 쉬기 또는 xferPump 예산 20→50 ms ⬜ · firmware-rak 같은 자리 기준값 ⬜
 
 ## 6. boat-device-checklist 다시 돌리기 (기록·통신이 바뀌었으므로)
 

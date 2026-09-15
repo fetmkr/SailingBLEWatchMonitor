@@ -24,6 +24,7 @@ portMUX_TYPE gMux = portMUX_INITIALIZER_UNLOCKED;
 Owner   gOwner = Owner::None;
 Refusal gRefusal = Refusal::None;
 sdmmc_card_t* gCard = nullptr;          // 붙어 있으면 null 아님
+int gTestFreqKhz = 0;                   // 0 이면 board_rak kSdHz (sdhz 시험 명령)
 
 // SD.begin 과 같은 일. 붙으면 true.
 bool mountCard() {
@@ -39,7 +40,7 @@ bool mountCard() {
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI2_HOST;
-    host.max_freq_khz = (int)(rak::kSdHz / 1000);
+    host.max_freq_khz = gTestFreqKhz > 0 ? gTestFreqKhz : (int)(rak::kSdHz / 1000);
     sdspi_device_config_t slot = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot.gpio_cs = static_cast<gpio_num_t>(rak::kSPI_CS);
     slot.host_id = SPI2_HOST;
@@ -120,6 +121,9 @@ const char* ownerName(Owner o) {
 void endForSleep() {
     if (owner() == Owner::None) unmountCard();
 }
+
+void setTestFreqKhz(int khz) { gTestFreqKhz = khz > 0 ? khz : 0; }
+int  cardFreqKhz() { return gCard ? gCard->real_freq_khz : 0; }
 
 } // namespace sdcard
 

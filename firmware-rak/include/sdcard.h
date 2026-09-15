@@ -28,5 +28,8 @@ Refusal lastRefusal();                 // 마지막 acquire 가 왜 거절됐나
 const char* ownerName(Owner o);
 // 잠들기 직전. 아무도 안 쥐었으면 카드를 내려 칩셀렉트를 놓는다 (쥔 주인이 있으면 안 건드린다)
 void    endForSleep();
+// 시험용 (firmware-idf 만 구현, 09-15 속도 조사): 다음 마운트부터 SD SPI 주파수를 kHz 로. 0 = board_rak kSdHz
+void    setTestFreqKhz(int khz);
+int     cardFreqKhz();                 // 붙어 있으면 카드가 실제로 쓰는 주파수(kHz), 아니면 0
 
 } // namespace sdcard

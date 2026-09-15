@@ -1887,7 +1887,9 @@ static void cmdSdRead(const char* line) {
         if (f) fclose(f);
     }
     const double sec = (esp_timer_get_time() - t0) / 1e6;
+    const int realKhz = sdcard::cardFreqKhz();   // 놓기 전에 — 카드가 실제로 붙은 주파수
     sdcard::release(sdcard::Owner::Diagnostic);
+    printf("[SDREAD] 카드 주파수 %d kHz\n", realKhz);
     if (!ok) { printf("[SDREAD] %s 를 못 열었습니다 (또는 버퍼 못 잡음)\n", name); return; }
     static const char* kHow[] = {"fopen 기본 버퍼 + fread 4KB", "setvbuf 4KB + fread 4KB", "setvbuf 16KB + fread 4KB", "read() 16KB"};
     printf("[SDREAD] 방식 %ld (%s) · %llu 바이트 · %.2f초 · %.0f KB/초 · 부름 %lu번\n",
@@ -1987,6 +1989,20 @@ static void handleLine(char* line) {
     }
     if (!strcmp(line, "sd"))        { if (sdFreeFor("sd")) diag::sdCheck(); return; }
     if (!strncmp(line, "sdread ", 7)) { if (sdFreeFor("sdread") && blockingDiagOk("sdread")) cmdSdRead(line); return; }
+    // sdhz <kHz> — 시험: 다음 마운트부터 SD SPI 주파수 (0 = 기본 20000). 전원을 끄면 기본으로 돌아간다 (NVS 에 안 적는다)
+    if (!strcmp(line, "sdhz") || !strncmp(line, "sdhz ", 5)) {
+        if (strlen(line) > 5) {
+            if (!sdFreeFor("sdhz")) return;
+            const long k = strtol(line + 5, nullptr, 10);
+            // ★ 20000 kHz 가 상한. 09-15 에 40000 을 걸자 카드 초기화가 실패하고(send_csd 0x108), 보드 리셋으로도 안 풀렸다
+            //   (카드는 VDD 라 전원을 못 끊는다 — POWER.md). 카드를 뽑았다 꽂아야 했다. 다시는 못 걸게 막는다.
+            if (k > 20000) { printf("[SDHZ] 20000 kHz 넘게는 못 겁니다 — 40 MHz 에서 카드가 멈췄습니다 (CHECKLIST 5장)\n"); return; }
+            sdcard::setTestFreqKhz((int)(k < 0 ? 0 : k));
+        }
+        printf("[SDHZ] 다음 마운트부터 %s (지금 붙은 카드 %d kHz)\n",
+               strlen(line) > 5 && strtol(line + 5, nullptr, 10) > 0 ? "시험 주파수" : "기본 20000 kHz", sdcard::cardFreqKhz());
+        return;
+    }
     // SD 쓰기 속도 실측. 기본 3600줄 = 10 Hz 로 6분치.
     if (!strcmp(line, "sdbench") || !strncmp(line, "sdbench ", 8)) {
         long n = (strlen(line) > 8) ? strtol(line + 8, nullptr, 10) : 3600;
