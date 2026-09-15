@@ -162,7 +162,11 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 |---|---|---|
 | **BLE (3)** | `main/ble.h/.cpp` · `main/idf_component.yml` (esp-nimble-cpp) · sdkconfig 추가 줄은 제안만 | `-B ~/esp/build-sail-ble` |
 | **화면 (4)** | `main/display.h/.cpp` · `components/u8g2*` | `-B ~/esp/build-sail-disp` |
-| **USB 멎음 조사** | 읽기·웹만 | — |
+| **USB 멎음 조사** | 읽기·웹만 | — (끝남, 아래) |
+| **WiFi·HTTP·mDNS (5)** | `main/netsrv.h/.cpp` · TCP 창·WiFi 버퍼 설정 후보는 제안만 | 격리 복사본 `~/esp/stage5` → `-B ~/esp/build-stage5` |
+| **LoRa (6)** | `main/lora.h/.cpp` · `components/radiolib*` | 격리 복사본 `~/esp/stage6` → `-B ~/esp/build-stage6` |
+
+- ★ 나눠 짜는 파일이 `main/` 에 반쯤 있으면 `SRC_DIRS "."` 전체 빌드가 깨진다 (display.cpp 가 그랬다). 그래서 각자 **SRCS 를 적은 격리 복사본**으로 짓는다. 메인도 링크 확인은 `~/esp/stage3` 같은 복사본으로.
 
 **3단계 BLE 코드 보고 (2026-09-15, 커밋 전)** — `main/ble.h/.cpp` · `main/idf_component.yml` (esp-nimble-cpp 2.5.0). ble.cpp 경고 0 컴파일, 링크는 display.cpp 가 u8g2.h 를 못 찾아 아직.
 - API: `ble::loadIdentity` · `start(t,e)`/`stop` · `pump()`(광고 다시 걸기) · `publish(t,e)` · `refreshAdvPayload()` · `takeControlLine(buf,cap)` · `controlSay` · `setNotifyPeriodMs` · `saveIdentity` · `requestAdvApply`.
