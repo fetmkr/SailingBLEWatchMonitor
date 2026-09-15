@@ -131,7 +131,16 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 - ★★ **17:45 쯤 두 번째로 USB 가 멎었다.** `board_rec_test.py gps` 가 끝난 뒤 `imu`·`clean` 단계에 보드가 한 줄도 안 냄.
   포트는 열리고 맥은 USB 칩(303A, 3C:DC:75:70:2F:B4)을 계속 본다. 명령(`rec`)에 답 없음 · DTR·RTS 리셋 안 먹음 ·
   esptool `--before no-reset` / `default-reset` / `usb-reset` 셋 다 `No serial data received` (ROM 다운로드 모드도 아님).
-  17:00 에도 똑같았고 USB 를 뽑았다 꽂아 풀렸다. 원인 [모름]. 둘 다 포트를 여러 번 열고 닫은 뒤였다.
+  17:00 에도 똑같았고 USB 를 뽑았다 꽂아 풀렸다. 원인 [모름].
+  ★ 고침: "둘 다 포트를 여러 번 열고 닫은 뒤" 는 틀렸다. 17:00 은 로그 받고 6분 가만히 둔 뒤 올리려는 순간이었다 (transcript 07:54Z~08:01Z). 17:45 만 열고 닫은 직후.
+  조사 (문서·기록·웹, 포트 안 엶):
+  - firmware-rak 시절에는 "칩은 보이는데 데이터 0, 뽑아야 풀림" 기록이 없다 (09-08 한 번 실패 뒤 곧 성공 · 09-14 는 목록에서 사라짐 — 다른 증상)
+  - USB Serial/JTAG 는 하드웨어 고정 기능이라 리셋은 앱이 멈춰도 먹어야 한다 [확인: esp-idf docs usb-serial-jtag-console.rst:17-19 · esptool troubleshooting]. 셋 다 안 먹었으니 USB 신호 자체가 칩에 안 닿았다 [추측]
+  - 문서의 멎는 길 셋(USB 핀 19·20 다른 용도 · 깊은잠 · 얕은잠)은 우리 코드에 없다 [확인: grep · CONFIG_PM_ENABLE 없음]
+  - 후보: 맥 CDC 드라이버 · 보드 USB PHY/전원 · IDF 6.1 앱 · 포트 반복 열기 · 케이블/허브 — 가를 자료 없음
+  - 다음에 꽂으면: ① 포트 열기 전 `ioreg -p IOUSB -l -w0 | grep -iE '"USB Product Name"|"USB Serial Number"|"locationID"'` ② DTR·RTS 내리고 **한 번만** 열어 20초 받기만 ([BOOT] 이유 · 코어덤프 줄 · 첫 바이트 시각)
+    ③ 시험은 한 번 열어 묶어서 (`board_rec_test.py all` 한 번). 또 멎으면 포트·esptool 두드리지 말고 ioreg 만 남기고 알린다
+  - 맥 탓/보드 탓 가르기: 다른 케이블·맥 포트·허브로 바꿔 다시 나는지 (우회책 겸 확인)
   IMU FIFO 읽기 루프는 한 번에 sPending 만큼만 돌아 끝이 있다 (imu.cpp fifoNext) — 멈춤 후보에서 뺌.
   **다음에 할 것: 뽑았다 꽂은 뒤 켤 때 [BOOT] 이유와 코어덤프 검사 줄을 먼저 본다** (워치독·패닉이었으면 거기 남는다)
 
