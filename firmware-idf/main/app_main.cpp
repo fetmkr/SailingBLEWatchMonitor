@@ -49,6 +49,7 @@
 #include "display.h"
 #include "gps.h"
 #include "imu.h"
+#include "lora.h"      // firmware-rak/include/lora.h — 아두이노 흔적 없어 같이 쓴다 (몸통은 main/lora.cpp)
 
 static inline uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static inline void delayMs(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
@@ -102,6 +103,8 @@ static uint8_t gHdgAxisA = 1, gHdgAxisB = 0;
 static float   gHdgSignA = 1.0f, gHdgSignB = 1.0f, gHdgOffsetDeg = 0.0f, gHdgDeclDeg = 0.0f;
 static int     gSensorPowerPin = rak::kSensorPowerA;
 static uint8_t gBoatId = 0;   // 로라 배 번호 (PROTOCOL.md §10.11). 0 = 번호 없음. 화면 B-- 에 그린다
+static constexpr uint8_t kBoatIdMax = 32;
+// firmware-rak 의 gBoatIdSetAt 은 적기만 하고 읽는 곳이 없어 안 옮겼다 (main.cpp:90·5194 뿐)
 
 static void loadSettings() {
     uint8_t damp = 2;
@@ -991,6 +994,37 @@ static void handleLine(char* line) {
         return;
     }
     if (!strcmp(line, "info")) { printIdentity(); return; }
+    if (!strcmp(line, "lora"))       { lora::report();      return; }
+    if (!strcmp(line, "lora regs"))  { lora::reportRegs();  return; }
+    if (!strcmp(line, "lora tx"))    { lora::txTest();      return; }
+    if (!strcmp(line, "lora rssi"))  { lora::reportNoise(); return; }
+    if (!strcmp(line, "lora watch")) { lora::watchToggle(); return; }
+    if (!strcmp(line, "lora on"))    { lora::begin();       return; }
+    // 로라 배 번호. PROTOCOL.md §10.11
+    if (!strcmp(line, "boat") || !strncmp(line, "boat ", 5)) {
+        if (!strcmp(line, "boat")) {
+            if (gBoatId == 0) printf("[BOAT] 번호 없음 — 로라로 안 보낸다\n");
+            else printf("[BOAT] %u번 (차례 %u)\n", gBoatId, gBoatId - 1);
+            return;
+        }
+        // ★ 달리는 중에는 안 바꾼다. 번호가 바뀌면 말할 차례가 옮겨 가 남의 차례에 떨어질 수 있다.
+        if (hlog::recording()) { printf("[BOAT] 기록 중에는 못 바꿉니다. 먼저 stop 하세요\n"); return; }
+        char* arg = line + 5;
+        while (*arg == ' ') ++arg;
+        char* end = nullptr;
+        const long n = strtol(arg, &end, 10);
+        // firmware-rak: 빈 칸 · 숫자 아님(toInt 0 인데 "0" 아님) · 범위 밖을 거절
+        if (!*arg || end == arg || n < 0 || n > kBoatIdMax) {
+            printf("[BOAT] 0~%u 로 입력하세요. 0 은 번호 없음. 예) boat 7\n", kBoatIdMax);
+            return;
+        }
+        gBoatId = (uint8_t)n;
+        if (!nv::writeWith([](nvs_handle_t h) { return nvs_set_u8(h, "boat", gBoatId) == ESP_OK; }))
+            printf("[BOAT] ★ 보드에 못 적었습니다 — 껐다 켜면 옛 번호로 돌아갑니다\n");
+        if (gBoatId == 0) printf("[BOAT] 번호 없음 — 로라로 안 보낸다\n");
+        else printf("[BOAT] %u번 (차례 %u). 뱃머리 번호표와 같은지 보세요\n", gBoatId, gBoatId - 1);
+        return;
+    }
     if (!strcmp(line, "oledw")) { diag::oledWidths(); return; }
     // 화면을 나중에 꽂았을 때 다시 붙인다. 재부팅할 필요 없다.
     if (!strcmp(line, "oled")) {
@@ -1126,6 +1160,10 @@ extern "C" void app_main(void) {
         printf("[OLED] 없음 — J12 헤더에 꽂으면 자동으로 잡힙니다\n");
     }
 
+    // 무전기는 켤 때 올린다. 배에서 명령을 칠 수가 없다. 번호가 있든 없든 늘 받는다 (PROTOCOL.md §10.11).
+    // 없거나 실패해도 보드는 그대로 돈다.
+    lora::begin();
+
     printf("[SRC] SOG/COG 는 GPS 가 위성을 잡았을 때만 값이 있습니다 (못 잡으면 무효)\n");
     printf("      HEEL·9축은 IMU 가 붙어 있을 때만 값이 있습니다\n");
 
@@ -1138,6 +1176,8 @@ extern "C" void app_main(void) {
     bool ledOn = false;
     for (;;) {
         const uint32_t now = nowMs();
+        // 코어 0 받기 일꾼이 링버퍼에 넣어 둔 것을 꺼낸다. 안 꺼내면 64개 뒤로 버린다
+        lora::pump();
         pollSerial();
 
         // GPS 는 쉬지 않고 읽는다. UART 버퍼가 넘치면 문장 중간이 잘린다.

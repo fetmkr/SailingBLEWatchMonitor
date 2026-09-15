@@ -60,7 +60,7 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | 🔶 코드·메인 연결 · 빌드 경고 0 (USB 멎어 보드 시험 전) |
 | 4 | 화면 (U8g2) | 같은 화면 | 🔶 코드·메인 연결 · 맥에서 11장면 프레임버퍼 firmware-rak 과 같음 · 빌드 경고 0 (보드 시험 전) |
 | 5 | WiFi · HTTP 파일 전송 · mDNS — **TCP 창 키우기** | `/api/files`·`/file/` Range · 해시 · 받기 속도를 firmware-rak 과 같은 자리에서 비교 | ❌ |
-| 6 | LoRa (RadioLib, 칩 버그 셋) | 두 보드 사이 주고받기 | ❌ |
+| 6 | LoRa (RadioLib, 칩 버그 셋) | 두 보드 사이 주고받기 | 🔶 코드·메인 연결 · 빌드 경고 0 (보드 시험 전 · 직접 짠 SPI3 HAL 은 실기기 확인 필요) |
 | 7 | 전원·깊은잠·버튼·코어덤프 | 헛깸 0 · 끄는 순서 · 코어덤프 0xFF0000 | ❌ |
 
 **0단계 결과 (2026-09-15, 보드 3C:DC:75:70:2F:B4)**
@@ -204,6 +204,18 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
   (속도·침로·힐은 `ble::latest()`, 모드 글자는 `gps::state().dyModel` 과 `kBoatMode`) · 배 번호 NVS `boat` 읽기 · 저전압 3.0 V · 명령 `oled` · `oledw` · REQUIRES `u8g2`.
   버튼 막대(gBtnOwnsScreen)는 7단계. `~/esp/stage3` 에 display 넣어 링크 → **경고 0 · 0xce4f0 (87% 남음)**
 - 보드 시험: [OLED] 붙음·부트 문구 → 평소 화면 firmware-rak 과 같나 → oledw 폭 58 89 66 87 121 74 57 98 74 58 74 82 103 113 105 89 → 화면 켠 채 10분 기록 IMU 100 Hz·FIFO 넘침 0·I2C 오류 0 → 화면 뽑기·꽂기
+
+**6단계 LoRa (2026-09-15, 보드 없이 빌드만)** — `main/lora.cpp` (헤더는 `firmware-rak/include/lora.h` 같이 씀) · RadioLib 7.7.1 (idf_component.yml)
+- ★ HAL 을 직접 짰다 (`IdfHal`): RadioLib 의 ESP-IDF 예제 HAL 은 S3 에서 `#error` 이고 SPI2(= SD 버스) 레지스터를 직접 쓴다 [확인: examples/NonArduino/ESP-IDF/main/EspHal.h].
+  `spi_master` SPI3_HOST · 2 MHz · mode 0 (firmware-rak `SPIClass(HSPI)` 도 S3 에서 SPI3 [확인: esp32-hal-spi.h:30]) · CS 는 RadioLib 이 digitalWrite 로 · DIO1 상승 에지 인터럽트 (ISR 서비스 플래그 0, 아두이노 2.0.17 과 같음)
+- 설정 그대로: 922.55 MHz · SF7 · BW500 · CR 4:5 · sync 0x12 · 프리앰블 8 · 8 dBm · 링버퍼 64 · 받기 일꾼 코어 0 우선순위 5 스택 4096
+- 칩 버그 셋: RadioLib 7.7.1 이 부른다 (15.2 SX1262.cpp:63 · 15.3 SX126x.cpp:466 · 15.1 SX126x.cpp:1093 송신 길) [확인] — 레지스터 값은 보드에서 `lora regs` [모름]
+- SPI 겹침 없음: SD = SPI2 (10/11/13/12) · LoRa = SPI3 (5/3/6/7, 리셋 8, DIO1 47, BUSY 48) [확인: board_rak.h]
+- C++26 이 `volatile ++` 를 막아 `x = x + 1` 로 (받기 일꾼만 쓰는 수)
+- 메인 연결: `lora::begin` (화면 뒤, [SRC] 앞) · 루프 맨 앞 `lora::pump` · 명령 `lora` · `lora regs/tx/rssi/watch/on` · `boat [0~32]` (기록 중 거절, NVS boat). 깊은잠 전 `lora::sleep` 은 7단계.
+  firmware-rak `gBoatIdSetAt` 은 적기만 하고 읽는 곳이 없어 안 옮김. `~/esp/stage3` 에 lora 넣어 링크 → **경고 0 · 0xd5890 (87% 남음)**
+- 보드 시험: 켤 때 `[LORA] 922.55 ㎒ SF7 BW500㎑ CR4:5 송신 8 dBm` · `전파시간 14 ms` → `lora` 14144 us → `lora regs` (15.1 bit2=1 · 15.2 bit4~1=0xF · RxGain 0x96 · Sync 0x1424) →
+  `lora tx` 뒤 15.1 0x0E→0x00 · `lora rssi` 약 −108 dBm → 두 보드 watch/tx CRC 오류 0 → 기록 중 lora tx 로 SD 와 안 부딪히나 (버린 줄 0)
 
 - ★ **보드를 다시 꽂을 때까지 누구도 포트·esptool 을 열지 않는다.** 꽂은 뒤에도 조사 보고의 "한 번만 열어 볼 것" 부터.
 - 나눠 짜는 쪽은 **커밋하지 않는다**, **보드·시리얼 포트를 열지 않는다**, `app_main.cpp`·`CMakeLists.txt` 를 안 만진다.

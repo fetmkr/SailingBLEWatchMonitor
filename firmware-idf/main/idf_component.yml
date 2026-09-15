@@ -3,3 +3,5 @@ dependencies:
   idf: ">=5.3.0"
   # BLE — firmware-rak 의 NimBLE-Arduino 2.5.1 자리. 같은 저자(h2zero)의 IDF 판
   h2zero/esp-nimble-cpp: "2.5.0"
+  # LoRa — firmware-rak 의 RadioLib 자리. HAL 은 lora.cpp 의 IdfHal (SPI3, 예제 HAL 은 S3 에서 #error · SPI2 레지스터를 직접 씀)
+  jgromes/radiolib: "7.7.1"
