@@ -151,6 +151,21 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
   - 모르는 것: 배터리가 꽂혀 있었나 (4.14 V 라 붙어 있었다고 봄 [추측]) — 붙어 있었다면 뽑아도 칩 전원은 안 꺼졌고 USB 연결을 뗀 것이 풀었다
   - 가를 실험(사용자 결정 필요): 콘솔을 아두이노처럼 UART0 으로 (`CONFIG_ESP_CONSOLE_UART_DEFAULT`), 명령·출력은 앱이 USB 드라이버로. 사라지면 좁혀짐. 대신 부트로더·시작 초반 로그는 USB 로 못 봄
   - 다음에 꽂으면 [BOOT] 이유로 가른다: USB = 앱은 돌고 USB 만 멎음 · POWERON = 뽑을 때 전원 끊김 · PANIC/WDT = 앱이 죽음
+  ★★★ **18:35 다시 꽂은 뒤 한 번 열어 본 결과 — 보드가 켜졌다 죽기를 되풀이한다 (내 펌웨어 탓)**
+  - 포트 열기 전 ioreg: 칩 보임 (3C:DC:75:70:2F:B4). 20초 받기만 → **ESP-ROM 줄 4번 = 20초에 4번 켜짐**
+  - 매번 `main_task: Calling app_main()` 뒤 앱 줄이 하나도 없이 약 5.6초에 `Guru Meditation Error: Core 0 panic'ed (Interrupt wdt timeout on CPU0)` → 코어덤프 저장 → `rst:0xc RTC_SW_CPU_RST` 로 다시
+  - 보드 판: `gf1fc8ff-dir` 17:40:04 빌드, ELF dfabe316… (= df8dbec 의 앱 코드). 같은 소스를 worktree 로 다시 지어 addr2line [확인: 되짚은 호출이 app_main 까지 이어짐]:
+    `app_main:917 usb_serial_jtag_driver_install` → `esp_intr_alloc` → 인터럽트가 켜지자마자 **`usb_serial_jtag_isr_handler_default` (usb_serial_jtag.c:59) 안에서 코어 0 가 못 빠져나옴** → 인터럽트 워치독. 코어 1 은 쉬는 중
+  - 즉 **USB 콘솔 드라이버를 까는 순간 그 인터럽트가 계속 다시 뜬다.** 왜 안 지워지는지 · 왜 다시 꽂은 뒤에만인지 [모름] — 드라이버 소스·이슈 조사 중
+  - 17:00 (0단계 판, 드라이버 안 깜) 멎음과 같은 원인인지는 [모름]. 그때는 0바이트였고 지금은 매번 부트 로그가 온다
+  - 내 가설 (확정 아님): 아두이노 HWCDC 가 켠 BUS_RESET(bit9) 켜짐이 남아(HWCDC.cpp:344-345, IDF 처리기는 안 지움) 다시 꽂을 때 폭주
+  - 사용자: "여러개 찾아서 결론내려. 니맘대로 한2개 보고 결론 내리지 마" → 출처 여러 개 모으는 조사를 따로 돌림 (결과 대기)
+  - **시험판 실측 (18:5x, worktree `df8dbec` + 드라이버 전 레지스터 찍기 + 안 다루는 켜짐 끄기 + BUS_RESET 걸림 지우기, esptool 로 올린 직후 한 번 열기)**:
+    켜짐 1번 · 앱 정상 · **드라이버 전 int_ena 0x00000004 · int_st 0 · int_raw 0x000005a8**
+    → **BUS_RESET 켜짐은 꺼져 있었다 — 가설에 불리.** OUT_RECV_PKT(bit2) 켜짐은 까기 전에 이미 켜져 있었다 (앞 판이 켠 게 남았는지, ROM/esptool 인지 [모름]).
+    단 이 켜짐은 "다시 꽂은 뒤" 가 아니라 "esptool 로 올린 뒤" 라 폭주 때와 상태가 다르다. 고침이 먹었다는 증거도 아니다 (끌 켜짐이 없었다)
+  - 저장소 app_main 에도 같은 찍기·끄기를 넣었다 (커밋 전, 빌드 경고 0). 조사 결과 보고 남길지 정한다
+  - **보드에는 지금 이 시험판(2단계 기반)이 올라가 있다**
   IMU FIFO 읽기 루프는 한 번에 sPending 만큼만 돌아 끝이 있다 (imu.cpp fifoNext) — 멈춤 후보에서 뺌.
   **다음에 할 것: 뽑았다 꽂은 뒤 켤 때 [BOOT] 이유와 코어덤프 검사 줄을 먼저 본다** (워치독·패닉이었으면 거기 남는다)
 
