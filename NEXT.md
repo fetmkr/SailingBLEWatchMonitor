@@ -11,7 +11,9 @@
 - 기준 코드: 커밋 `2b18b17` 의 firmware-rak (HLG 1.2). firmware-rak 은 건드리지 않는다.
 - **보드에는 firmware-idf 를 올려 둔다** (사용자 결정 "보드 그냥 새코드로 구현해"). 시험은 단계마다 나눠서.
 - 빌드: `idf.py -B ~/esp/build-sail` 필수 (경로 빈칸 우회) · `SSL_CERT_FILE` 필요 — memory `firmware-idf-port`
-- 0단계(뼈대) ✅ — 부팅·NVS 28키·GPS·I2C 0x3C/0x68·배터리(firmware-rak 과 1 mV 차)·버튼. 다음: SD 목록 → 1단계 기록기
+- 0단계(뼈대) ✅ — 부팅·NVS 28키·GPS·I2C 0x3C/0x68·배터리(firmware-rak 과 1 mV 차)·버튼·SD 목록
+- 1단계(기록기) ✅ GPS·IMU 없이 — 해시가 firmware-rak 과 같음 · 1분 기록 깨끗 · 쓰기 실패 다시 걸기 · 닫기 지연 · 리셋 이어 시작. 보드에 이 판이 있다
+- 다음: 2단계 GPS·IMU 붙이기 (gps.cpp·imu.cpp 코드는 나눠 짠 작업이 끝냄, 컴파일만 됨) → 보드 시험
 
 ## 지금 상태 (2026-09-15 11:20 기준)
 

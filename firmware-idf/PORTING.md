@@ -55,7 +55,7 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | # | 무엇 | 통과 기준 (firmware-rak 과 대조) | 상태 |
 |---|---|---|---|
 | 0 | 뼈대 — 부팅 로그, 핀, 센서 전원, LED, NVS 읽기, USB 콘솔 | 켜짐 로그 · NVS `sail` 설정값이 firmware-rak 이 쓴 값 그대로 읽힘 · GPS 바이트 들어옴 | ✅ 09-15 (아래) |
-| 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | 🔶 기록기 코드 됨(빌드 경고 0) · 메인 연결·보드 시험 전 |
+| 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | ✅ 09-15 GPS·IMU 없이 (아래). 남은 것: 기록 중 카드 빼기 · 쓰기 일꾼 스택 남은 양 · IMU 끊김(2단계 뒤) |
 | 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | ❌ |
 | 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | ❌ |
 | 4 | 화면 (U8g2) | 같은 화면 | ❌ |
@@ -99,6 +99,21 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 - 원본과 글자 비교: 원본 문자열이 옮긴 쪽에 다 있음. 새로 생긴 출력은 `@HASH X 해시 계산 실패` 하나 (PSA 해시가 실패할 때)
 - 달라진 것: 줄끝이 CRLF (IDF `CONFIG_LIBC_STDOUT_LINE_ENDING_CRLF`) — serial_dump.py `strip()`·board_rec_test.py `rstrip()` 는 괜찮음, 앱 쪽은 모름 ·
   워치독은 이 작업이 등록됐을 때만 먹임 · 파일 이름 자르기는 snprintf 와 같은 결과 · `start` 의 NVS 는 get·set·get 뒤 commit 한 번
+**1단계 보드 시험 결과 (2026-09-15 20:23~20:28 보드 시각, 올린 판 `~/esp/stage1` → `-B ~/esp/build-stage1`)**
+- 메인 연결 `main/app_main.cpp`: USB 줄 받기(64자) · 켤 때 이유(firmware-rak 과 같은 글자, USB 리셋 한 칸만 더함) · NVS 설정 읽기(키·기본값·범위 검사 firmware-rak loadSettings 와 같음) ·
+  recWantOn/Off · recStartFrom · recOnResult · recGiveUp · recControlTick · resumeRecordingIfCut · `rec` 명령 전부 · NAV 10 Hz(GPS 칸은 값 없음 표식, 전압만) · TXT 10초 · LED 기록 중 1초에 80 ms
+- 빌드 경고 0. `main/CMakeLists.txt` REQUIRES 에 `esp_driver_usb_serial_jtag` 더함
+- `rec ls` 89개 49.69 MB — firmware-rak 과 같음. `S00014_19700103-0043_nosa` 이름 잘림은 firmware-rak 목록에서도 똑같이 보였다 (카드 위 이름)
+- **`rec hash 94 hlg/txt` — firmware-rak 이 낸 해시와 같음** (b8fa3047… · 45f00849…) · `rec check 94` 깨끗함 (IMU 등간격 100%)
+- `rec on` 1분 → 세션 95: NAV 631줄 10.04 Hz · CRC 틀림 0 · 닫힘 1 · TXT 머리 방위 설정 줄·전압 4143 mV · 없는 값 `---`
+- `serial_dump.py 95` 로 USB 받기 → **맥 sha256 = 보드 `rec hash` (b867f87e…)** → `tools/hlog_parse.py` v1.2 깨끗함
+- `board_rec_test.py basic`: 머리글 formula 2 · 축 1/2 · off 155.70 · magHi 5.69 16.7 -3.31 · closed 1 (hdg·level·sd 는 아직 없는 명령)
+- `fail`: 쓰기 실패 20번 흉내 → 3초 뒤 새 파일 3번(97→98→99→100, 앞 세션 번호 이어받음) → "다시 걸기를 다 썼습니다 (REC FAIL)" → `rec fail clear`
+- `slow`: 닫기 20초 지연 중에도 명령 받음 · 닫는 중 `rec on` → "닫히면 시작" → 닫힌 뒤 세션 102 시작
+- `resume`: 기록 중 포트 열어 리셋 → 켤 때 "세션 103 가 못 닫히고 끊겼습니다 — 이어서" → 104 · 사람이 멈춘 뒤 리셋 → 이어 시작 안 함
+- 시험 세션 95~104 가 카드에 남아 있다 (84~94 와 같이 지울지 사용자 결정 대기)
+- 카드를 붙이고 뗄 때마다 `W gpio: conflict found for GPIO[12]` — 0단계에 적은 IDF SD 드라이버 동작
+
 - 보드 시험 순서 (메인): rec ls → rec check 94 · rec hash 94 hlg (firmware-rak 해시와 같나) → serial_dump + hlog_parse → rec on 1분 → rec check·rec head → board_rec_test.py clean·all → 기록 중 카드 빼기 → 쓰기 일꾼 스택 남은 양
 
 ## 작업 나누기 (1·2단계, 2026-09-15)

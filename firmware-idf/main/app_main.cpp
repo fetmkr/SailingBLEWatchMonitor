@@ -1,25 +1,29 @@
-// firmware-idf 0단계 — 뼈대. PORTING.md 의 통과 기준:
-//   켜짐 로그 · NVS `sail` 설정이 firmware-rak 이 쓴 값 그대로 읽힘 · GPS 바이트가 들어옴.
+// firmware-idf — 1단계: 기록기 붙이기. PORTING.md 의 단계 표가 원본이다.
 //
-// ★ NVS 는 **읽기만** 한다. 이 보드에는 firmware-rak 이 저장한 방위 축·자력 보정·세션 번호가 있다.
-//   초기화가 실패해도 지우지 않는다 (IDF 예제는 지우고 다시 만드는데, 그러면 설정이 날아간다).
+// 이 판에서 되는 것
+//   켤 때 점검(0단계) · NVS 설정 읽기 · 기록기(hlog_idf.cpp) · 기록 제어(원하는 상태 / 실제 상태) · 이어 시작 ·
+//   시리얼 명령 `rec …` · NAV 10 Hz · TXT 10초 · 카드 건강 1 Hz · 기록 중 초록 LED
+// 아직 안 되는 것 (2단계에서)
+//   GPS·IMU — NAV 줄의 위치·속도·침로·자력은 **값 없음 표식**으로 둔다 (0 을 넣지 않는다). IMU 줄은 안 쓴다.
+//   머리글 gnssHz·gnssDyn 은 모름(0·255) 으로 둔다 — 모듈에서 실제로 읽은 값만 적는 firmware-rak 규칙.
+//
+// 옮긴 원본: firmware-rak/src/main.cpp — logStartNow(3500) · recSaveWant/Open · recStartFrom · recWantOn/Off(3574-3636) ·
+//   resumeRecordingIfCut(5349) · recGiveUp · recOnResult(5407-5456) · recControlTick(5458) · rec 명령(4600-4756) ·
+//   sdFreeFor · loadSettings(380) · reportResetReason(3760) · buildHeadingNote(2765) · setup 의 rec_fail 읽기(5522)
 
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
-#include <dirent.h>
-#include <sys/stat.h>
-#include "driver/sdspi_host.h"
-#include "driver/spi_common.h"
-#include "esp_vfs_fat.h"
-#include "sdmmc_cmd.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_log.h"
@@ -32,293 +36,559 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
-#include "board_rak.h"   // firmware-rak/include — 같은 핀 정의를 같이 쓴다
+#include "board_rak.h"     // firmware-rak/include — 같이 쓴다
+#include "heading_math.h"  // sanitizeFloat · sanitizeAxes · wrap180
+#include "hlog.h"
+#include "rec_control.h"
+#include "sdcard.h"
 
-static const char* TAG = "sail";
+static inline uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-static const char* resetWhy(esp_reset_reason_t r) {
-    switch (r) {
-        case ESP_RST_POWERON:   return "전원 켬";
-        case ESP_RST_SW:        return "소프트웨어 재시작";
-        case ESP_RST_PANIC:     return "★ 패닉";
-        case ESP_RST_INT_WDT:   return "★ 인터럽트 워치독";
-        case ESP_RST_TASK_WDT:  return "★ 작업 워치독";
-        case ESP_RST_WDT:       return "★ 워치독";
-        case ESP_RST_DEEPSLEEP: return "깊은잠에서 깸";
-        case ESP_RST_BROWNOUT:  return "★ 전압 떨어짐";
-        case ESP_RST_USB:       return "USB (포트 열림)";
-        default:                return "기타";
+// ── NVS 도우미 — 아두이노 Preferences 와 같은 키·형식 ──────────────────────
+//   getUChar=u8 · getChar=i8 · getUInt=u32 · getInt=i32 · getFloat=4바이트 blob (Preferences.cpp:255 putBytes)
+namespace nv {
+static uint8_t  u8 (nvs_handle_t h, const char* k, uint8_t d)  { uint8_t v;  return nvs_get_u8 (h, k, &v) == ESP_OK ? v : d; }
+static int8_t   i8 (nvs_handle_t h, const char* k, int8_t d)   { int8_t v;   return nvs_get_i8 (h, k, &v) == ESP_OK ? v : d; }
+static uint32_t u32(nvs_handle_t h, const char* k, uint32_t d) { uint32_t v; return nvs_get_u32(h, k, &v) == ESP_OK ? v : d; }
+static float    f32(nvs_handle_t h, const char* k, float d) {
+    float v; size_t n = sizeof v;
+    return (nvs_get_blob(h, k, &v, &n) == ESP_OK && n == sizeof v) ? v : d;
+}
+static bool has(nvs_handle_t h, const char* k) { return nvs_find_key(h, k, nullptr) == ESP_OK; }
+// 쓰기 한 번 = 열기·쓰기·commit·닫기. 실패하면 false (prefs_util.h 의 "말없이 실패하지 않게" 와 같은 뜻)
+template <class Fn>
+static bool writeWith(Fn&& fn) {
+    nvs_handle_t h;
+    if (nvs_open("sail", NVS_READWRITE, &h) != ESP_OK) return false;
+    bool ok = fn(h);
+    ok = ok && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
+}
+} // namespace nv
+
+// ── 설정 (firmware-rak loadSettings 에서 기록 머리글에 들어가는 것만) ───────
+static uint8_t gHeelAxis = 1;   static float gHeelSign = -1.0f;  static float gHeelOffsetDeg = 0.0f;
+static uint8_t gPitchAxis = 2;  static float gPitchSign = 1.0f;  static float gPitchOffsetDeg = 0.0f;
+static uint8_t gHdgAxisA = 1, gHdgAxisB = 0;
+static float   gHdgSignA = 1.0f, gHdgSignB = 1.0f, gHdgOffsetDeg = 0.0f, gHdgDeclDeg = 0.0f;
+static float   gMagOff[3] = {0, 0, 0};
+static float   gMagRadius = 0.0f, gMagResid = 0.0f;
+
+static void loadSettings() {
+    nvs_handle_t h;
+    if (nvs_open("sail", NVS_READONLY, &h) == ESP_OK) {
+        gHeelAxis       = nv::u8 (h, "heel_axis", 1);
+        gHeelSign       = nv::i8 (h, "heel_sgn", -1) < 0 ? -1.0f : 1.0f;
+        gHeelOffsetDeg  = nv::f32(h, "heel_off2", 0.0f);     // heel_off 는 옛 키 — 안 읽는다 (firmware-rak 과 같음)
+        gPitchAxis      = nv::u8 (h, "pitch_axis", 2);
+        gPitchSign      = nv::i8 (h, "pitch_sgn", 1) < 0 ? -1.0f : 1.0f;
+        gPitchOffsetDeg = nv::f32(h, "pitch_off", 0.0f);
+        gMagOff[0]      = nv::f32(h, "mag_ox", 0.0f);
+        gMagOff[1]      = nv::f32(h, "mag_oy", 0.0f);
+        gMagOff[2]      = nv::f32(h, "mag_oz", 0.0f);
+        gMagRadius      = nv::f32(h, "mag_r", 0.0f);
+        gMagResid       = nv::f32(h, "mag_res", 0.0f);
+        gHdgAxisA       = nv::u8 (h, "hdg_a", 1);
+        gHdgAxisB       = nv::u8 (h, "hdg_b", 0);
+        gHdgSignA       = nv::i8 (h, "hdg_sa", 1) < 0 ? -1.0f : 1.0f;
+        gHdgSignB       = nv::i8 (h, "hdg_sb", 1) < 0 ? -1.0f : 1.0f;
+        gHdgOffsetDeg   = nv::f32(h, "hdg_off", 0.0f);
+        gHdgDeclDeg     = nv::f32(h, "hdg_decl", 0.0f);
+        nvs_close(h);
     }
+    int fixed = 0;
+    fixed += hdg::sanitizeFloat(&gHeelOffsetDeg,  -180.0f, 180.0f, 0.0f);
+    fixed += hdg::sanitizeFloat(&gPitchOffsetDeg, -180.0f, 180.0f, 0.0f);
+    fixed += hdg::sanitizeFloat(&gHdgOffsetDeg,   -360.0f, 360.0f, 0.0f);
+    fixed += hdg::sanitizeFloat(&gHdgDeclDeg,      -30.0f,  30.0f, 0.0f);
+    gHdgOffsetDeg = hdg::wrap180(gHdgOffsetDeg);
+    bool magBad = false;
+    for (int i = 0; i < 3; ++i) magBad |= hdg::sanitizeFloat(&gMagOff[i], -500.0f, 500.0f, 0.0f);
+    if (magBad) { gMagOff[0] = gMagOff[1] = gMagOff[2] = 0.0f; gMagRadius = gMagResid = 0.0f; ++fixed; }
+    fixed += hdg::sanitizeFloat(&gMagRadius, 0.0f, 500.0f, 0.0f);
+    fixed += hdg::sanitizeFloat(&gMagResid,  0.0f, 500.0f, 0.0f);
+    fixed += hdg::sanitizeAxes(&gHdgAxisA, &gHdgAxisB);
+    if (gHeelAxis > 2)  { gHeelAxis = 1;  ++fixed; }
+    if (gPitchAxis > 2) { gPitchAxis = 2; ++fixed; }
+    if (fixed) printf("[SET] ★ 보드에 저장된 설정 %d개가 범위 밖이라 기본값으로 씁니다\n", fixed);
 }
 
-static void logBoot() {
-    uint8_t mac[6] = {};
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    esp_chip_info_t ci;
-    esp_chip_info(&ci);
-    uint32_t flash = 0;
-    esp_flash_get_size(nullptr, &flash);
-    ESP_LOGI(TAG, "────────────────────────────────────────");
-    ESP_LOGI(TAG, "firmware-idf 0단계 · ESP-IDF %s", esp_get_idf_version());
-    ESP_LOGI(TAG, "켜진 이유 %s", resetWhy(esp_reset_reason()));
-    ESP_LOGI(TAG, "MAC %02X:%02X:%02X:%02X:%02X:%02X · 코어 %d · 칩 판 %d",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ci.cores, ci.revision);
-    ESP_LOGI(TAG, "플래시 %" PRIu32 " MB · PSRAM %u 바이트", flash / (1024 * 1024),
-             (unsigned)esp_psram_get_size());
-}
-
-// NVS 이름공간 하나의 키를 전부 적는다. 문자열 값은 길이만 — wifi 에는 비밀번호가 있다.
-static void dumpNamespace(const char* ns) {
-    nvs_iterator_t it = nullptr;
-    esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, ns, NVS_TYPE_ANY, &it);
-    int n = 0;
-    nvs_handle_t h = 0;
-    const bool opened = (nvs_open(ns, NVS_READONLY, &h) == ESP_OK);
-    while (err == ESP_OK) {
-        nvs_entry_info_t info;
-        nvs_entry_info(it, &info);
-        char val[48] = "?";
-        if (opened) {
-            switch (info.type) {
-                case NVS_TYPE_U8:  { uint8_t v;  if (nvs_get_u8(h, info.key, &v) == ESP_OK)  snprintf(val, sizeof val, "u8 %u", v); break; }
-                case NVS_TYPE_I8:  { int8_t v;   if (nvs_get_i8(h, info.key, &v) == ESP_OK)  snprintf(val, sizeof val, "i8 %d", v); break; }
-                case NVS_TYPE_U16: { uint16_t v; if (nvs_get_u16(h, info.key, &v) == ESP_OK) snprintf(val, sizeof val, "u16 %u", v); break; }
-                case NVS_TYPE_U32: { uint32_t v; if (nvs_get_u32(h, info.key, &v) == ESP_OK) snprintf(val, sizeof val, "u32 %" PRIu32, v); break; }
-                case NVS_TYPE_I32: { int32_t v;  if (nvs_get_i32(h, info.key, &v) == ESP_OK) snprintf(val, sizeof val, "i32 %" PRIi32, v); break; }
-                case NVS_TYPE_STR: { size_t len = 0; nvs_get_str(h, info.key, nullptr, &len); snprintf(val, sizeof val, "문자열 %u 바이트", (unsigned)len); break; }
-                case NVS_TYPE_BLOB: {
-                    size_t len = 0; nvs_get_blob(h, info.key, nullptr, &len);
-                    // Preferences::putFloat 은 4바이트 blob 이다 (아두이노 Preferences.cpp). 이 보드의 방위 오프셋 등이 여기 있다.
-                    if (len == 4) { float f; nvs_get_blob(h, info.key, &f, &len); snprintf(val, sizeof val, "blob4 (float %.3f)", f); }
-                    else snprintf(val, sizeof val, "blob %u 바이트", (unsigned)len);
-                    break;
-                }
-                default: snprintf(val, sizeof val, "형 %d", info.type);
-            }
-        }
-        ESP_LOGI(TAG, "  NVS %s.%-12s %s", ns, info.key, val);
-        ++n;
-        err = nvs_entry_next(&it);
+// ── 지난번에 왜 다시 켜졌나 (firmware-rak reportResetReason 과 같은 글자) ──
+static const char* gResetWhy = "?";
+static void reportResetReason() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:  gResetWhy = "POWERON 전원이 새로 들어왔다"; break;
+        case ESP_RST_BROWNOUT: gResetWhy = "BROWNOUT ★ 전압이 내려앉았다"; break;
+        case ESP_RST_PANIC:    gResetWhy = "PANIC ★ 코드가 죽었다"; break;
+        case ESP_RST_TASK_WDT: gResetWhy = "TASK_WDT ★ 워치독이 물었다"; break;
+        case ESP_RST_INT_WDT:  gResetWhy = "INT_WDT ★ 인터럽트 워치독"; break;
+        case ESP_RST_WDT:      gResetWhy = "WDT ★ 워치독"; break;
+        case ESP_RST_SW:       gResetWhy = "SW 소프트웨어가 다시 켰다"; break;
+        case ESP_RST_DEEPSLEEP:gResetWhy = "DEEPSLEEP 깊은잠에서 깼다"; break;
+        case ESP_RST_EXT:      gResetWhy = "EXT 바깥에서 리셋"; break;
+        case ESP_RST_USB:      gResetWhy = "USB 포트가 열리며 리셋"; break;   // firmware-rak 목록에 없는 칸 — 거기서는 default(UNKNOWN)로 갔다
+        default:               gResetWhy = "UNKNOWN 알 수 없음"; break;
     }
-    nvs_release_iterator(it);
-    if (opened) nvs_close(h);
-    ESP_LOGI(TAG, "  NVS 이름공간 '%s' 키 %d개", ns, n);
+    printf("[BOOT] 지난번 꺼진 이유 — %s\n", gResetWhy);
+    hlog::noteBootReason(gResetWhy);
 }
 
-static void checkNvs() {
-    esp_err_t err = nvs_flash_init();
-    if (err != ESP_OK) {
-        // ★ 지우지 않는다. 설정이 날아간다.
-        ESP_LOGE(TAG, "NVS 초기화 실패 %s — 지우지 않고 멈춘다", esp_err_to_name(err));
-        return;
-    }
-    dumpNamespace("sail");
-    dumpNamespace("wifi");
-}
+// ── 배터리 (0단계에서 firmware-rak 과 1 mV 차로 맞춘 방법) — 한 번 만들어 두고 NAV 에 쓴다 ──
+static adc_oneshot_unit_handle_t gAdc = nullptr;
+static adc_cali_handle_t gCali = nullptr;
+static adc_channel_t gBattCh;
+static uint16_t gBattMv = 0;      // 배터리 전압 (mV). 0 = 못 읽음
 
-static void sensorPowerOn() {
-    gpio_set_direction(static_cast<gpio_num_t>(rak::kSensorPowerA), GPIO_MODE_OUTPUT);
-    gpio_set_level(static_cast<gpio_num_t>(rak::kSensorPowerA), 1);
-    ESP_LOGI(TAG, "센서 전원 켬 — GPIO%d HIGH (3V3_S)", rak::kSensorPowerA);
-}
-
-// UART1 을 GPS 핀에 한 번만 묶는다.
-// ★ 속도를 바꿀 때마다 uart_set_pin 을 다시 부르면 "GPIO 43 is not usable, maybe used by others" 경고가 났다
-//   (2026-09-15 0단계 첫 부팅 로그 — 두 번째 부를 때만). 핀은 한 번, 속도는 uart_set_baudrate 로 바꾼다.
-static void gpsUartInit() {
-    uart_config_t cfg = {};
-    cfg.baud_rate = 115200;
-    cfg.data_bits = UART_DATA_8_BITS;
-    cfg.parity = UART_PARITY_DISABLE;
-    cfg.stop_bits = UART_STOP_BITS_1;
-    cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
-    cfg.source_clk = UART_SCLK_DEFAULT;
-    uart_param_config(UART_NUM_1, &cfg);
-    uart_set_pin(UART_NUM_1, rak::kUART1_TX, rak::kUART1_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    uart_driver_install(UART_NUM_1, 4096, 0, 0, nullptr, 0);   // firmware-rak 과 같은 받는 버퍼 4096
-}
-
-// GPS 가 말하는지만 본다. 켤 때 모듈이 어느 속도에 있는지 모르니 둘 다 들어 본다 (firmware-rak 도 9600 → 115200).
-static void listenGps(int baud, int ms) {
-    uart_set_baudrate(UART_NUM_1, baud);
-    uart_flush_input(UART_NUM_1);
-
-    static uint8_t buf[512];          // ★ 스택에 안 올린다
-    char first[100] = "";
-    size_t firstN = 0, total = 0;
-    int64_t end = esp_timer_get_time() + (int64_t)ms * 1000;
-    while (esp_timer_get_time() < end) {
-        int got = uart_read_bytes(UART_NUM_1, buf, sizeof buf, pdMS_TO_TICKS(50));
-        if (got <= 0) continue;
-        total += (size_t)got;
-        for (int i = 0; i < got && firstN < sizeof first - 1; ++i) {
-            if (firstN == 0 && buf[i] != '$') continue;
-            if (buf[i] == '\r' || buf[i] == '\n') { if (firstN) firstN = sizeof first - 1; continue; }
-            first[firstN++] = (char)buf[i];
-        }
-    }
-    first[firstN < sizeof first ? strnlen(first, sizeof first - 1) : sizeof first - 1] = '\0';
-    ESP_LOGI(TAG, "GPS %d bps %d ms 동안 %u 바이트 · 첫 문장 %s", baud, ms, (unsigned)total,
-             first[0] ? first : "(없음)");
-}
-
-// ── I2C 훑기 — IMU(0x68)·자력계(0x0C)·화면(0x3C) 이 보이나. firmware-rak 과 같은 400 kHz, SDA 9 · SCL 40 ──
-static void scanI2c() {
-    i2c_master_bus_config_t cfg = {};
-    cfg.i2c_port = -1;
-    cfg.sda_io_num = static_cast<gpio_num_t>(rak::kI2C1_SDA);
-    cfg.scl_io_num = static_cast<gpio_num_t>(rak::kI2C1_SCL);
-    cfg.clk_source = I2C_CLK_SRC_DEFAULT;
-    cfg.glitch_ignore_cnt = 7;
-    cfg.flags.enable_internal_pullup = 0;    // 베이스보드에 4.7k 풀업이 있다 (board_rak.h)
-    i2c_master_bus_handle_t bus = nullptr;
-    esp_err_t err = i2c_new_master_bus(&cfg, &bus);
-    if (err != ESP_OK) { ESP_LOGE(TAG, "I2C 버스 못 만듦 %s", esp_err_to_name(err)); return; }
-    char found[200] = "";
-    int n = 0;
-    for (uint16_t a = 0x08; a < 0x78; ++a) {
-        if (i2c_master_probe(bus, a, 20) == ESP_OK) {
-            size_t len = strlen(found);
-            snprintf(found + len, sizeof found - len, " 0x%02X", a);
-            ++n;
-        }
-    }
-    ESP_LOGI(TAG, "I2C 훑기 — %d개:%s  (기대: 0x3C 화면 · 0x68 IMU)", n, n ? found : " 없음");
-    i2c_del_master_bus(bus);
-}
-
-// ── 배터리 — firmware-rak readBatteryVolts 와 같은 조건: 16번 평균 · 2 ms 간격 · 11 dB(=IDF DB_12) · 분압 0.6 ──
-//   아두이노 analogReadMilliVolts 는 칩 보정값으로 mV 를 낸다. 여기서는 IDF 보정 방식으로 같은 일을 한다.
-static void readBattery() {
+static void batteryInit() {
     adc_unit_t unit;
-    adc_channel_t ch;
-    if (adc_oneshot_io_to_channel(rak::kBattAdcPin, &unit, &ch) != ESP_OK) {
-        ESP_LOGE(TAG, "GPIO%d 는 ADC 핀이 아니다", rak::kBattAdcPin);
-        return;
-    }
+    if (adc_oneshot_io_to_channel(rak::kBattAdcPin, &unit, &gBattCh) != ESP_OK) return;
     adc_oneshot_unit_init_cfg_t ucfg = {};
     ucfg.unit_id = unit;
-    adc_oneshot_unit_handle_t adc = nullptr;
-    if (adc_oneshot_new_unit(&ucfg, &adc) != ESP_OK) { ESP_LOGE(TAG, "ADC 단위 못 만듦"); return; }
+    if (adc_oneshot_new_unit(&ucfg, &gAdc) != ESP_OK) { gAdc = nullptr; return; }
     adc_oneshot_chan_cfg_t ccfg = {};
     ccfg.atten = ADC_ATTEN_DB_12;
     ccfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-    adc_oneshot_config_channel(adc, ch, &ccfg);
-
-    adc_cali_handle_t cali = nullptr;
-    const char* scheme = "보정 없음";
+    adc_oneshot_config_channel(gAdc, gBattCh, &ccfg);
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
     adc_cali_curve_fitting_config_t cc = {};
-    cc.unit_id = unit; cc.chan = ch; cc.atten = ADC_ATTEN_DB_12; cc.bitwidth = ADC_BITWIDTH_DEFAULT;
-    if (adc_cali_create_scheme_curve_fitting(&cc, &cali) == ESP_OK) scheme = "곡선 보정";
+    cc.unit_id = unit; cc.chan = gBattCh; cc.atten = ADC_ATTEN_DB_12; cc.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_cali_create_scheme_curve_fitting(&cc, &gCali) != ESP_OK) gCali = nullptr;
 #endif
-    if (!cali) {
-        ESP_LOGE(TAG, "ADC 보정을 못 만듦 — mV 를 지어내지 않는다");
-        adc_oneshot_del_unit(adc);
-        return;
-    }
-    uint32_t sum = 0;
-    int ok = 0;
+}
+
+// firmware-rak readBatteryVolts: 16번 · 2 ms · 분압 0.6. 못 읽으면 0 (지어내지 않는다)
+static void batteryRead() {
+    if (!gAdc || !gCali) { gBattMv = 0; return; }
+    uint32_t sum = 0; int ok = 0;
     for (int i = 0; i < 16; ++i) {
         int mv = 0;
-        if (adc_oneshot_get_calibrated_result(adc, cali, ch, &mv) == ESP_OK) { sum += (uint32_t)mv; ++ok; }
+        if (adc_oneshot_get_calibrated_result(gAdc, gCali, gBattCh, &mv) == ESP_OK) { sum += (uint32_t)mv; ++ok; }
         vTaskDelay(pdMS_TO_TICKS(2));
     }
-    if (ok == 0) { ESP_LOGE(TAG, "배터리 한 번도 못 읽음"); }
-    else {
-        const uint32_t mv = sum / ok;
-        const float volts = (mv / 1000.0f) / rak::kBattDivider * rak::kBattCorrection;
-        ESP_LOGI(TAG, "배터리 핀 GPIO%d (ADC%d 채널 %d, %s) — %u mV 평균 %d번 → 배터리 %.3f V",
-                 rak::kBattAdcPin, (int)unit + 1, (int)ch, scheme, (unsigned)mv, ok, volts);
-    }
-    adc_cali_delete_scheme_curve_fitting(cali);
-    adc_oneshot_del_unit(adc);
+    if (!ok) { gBattMv = 0; return; }
+    const float volts = (sum / (float)ok / 1000.0f) / rak::kBattDivider * rak::kBattCorrection;
+    gBattMv = (uint16_t)(volts * 1000.0f + 0.5f);
 }
 
-// ── SD 카드 — 붙여서 /LOGS 목록만 읽는다. firmware-rak 과 같은 SPI 핀·20 MHz ──
-//   ★ 쓰지 않는다. 붙이다 실패해도 포맷하지 않는다 (format_if_mount_failed = false) — 카드에 항해 기록이 있다.
-//   대조 기준: firmware-rak `rec ls` (2026-09-15 15:1x) — 파일 89개, 49.69 MB, 남은 자리 122002 MB
-static void listSd() {
-    spi_bus_config_t bus = {};
-    bus.mosi_io_num = rak::kSPI_MOSI;
-    bus.miso_io_num = rak::kSPI_MISO;
-    bus.sclk_io_num = rak::kSPI_CLK;
-    bus.quadwp_io_num = -1;
-    bus.quadhd_io_num = -1;
-    bus.max_transfer_sz = 4000;
-    esp_err_t err = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO);
-    if (err != ESP_OK) { ESP_LOGE(TAG, "SPI 버스 못 만듦 %s", esp_err_to_name(err)); return; }
+// ── 기록 제어 — 원하는 상태(gWantRec)와 실제 상태(hlog::phase) ──────────────
+static constexpr uint8_t  kResumeMax       = 5;
+static constexpr uint8_t  kRecRestartMax   = 3;
+static constexpr uint32_t kRecRestartGapMs = 3000;
+static constexpr uint32_t kRecRestartOkMs  = 600000;
 
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.slot = SPI2_HOST;
-    host.max_freq_khz = rak::kSdHz / 1000;
-    sdspi_device_config_t slot = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot.gpio_cs = static_cast<gpio_num_t>(rak::kSPI_CS);
-    slot.host_id = SPI2_HOST;
+static bool     gWantRec = false;
+static bool     gRecGaveUp = false;
+static bool     gRecLastSaveBad = false;
+static uint8_t  gRecRestarts = 0;
+static uint32_t gRecRestartAt = 0;
+static uint32_t gRecFailSession = 0;
+static char     gRecFailLine[240] = "";
+static const char* gRecStartErr = nullptr;
+static char     gSessNote[640] = "";
 
-    esp_vfs_fat_mount_config_t mcfg = {};
-    mcfg.format_if_mount_failed = false;     // ★ 절대 포맷하지 않는다
-    mcfg.max_files = 5;
-    mcfg.allocation_unit_size = 0;
+static void recSaveWant(bool want) {
+    if (!nv::writeWith([&](nvs_handle_t h) { return nvs_set_u8(h, "rec_want", want ? 1 : 0) == ESP_OK; }))
+        printf("[REC] ★ 이어 시작 의도(rec_want)를 못 적었습니다\n");
+}
+static void recSaveOpen(uint32_t session) {
+    if (!nv::writeWith([&](nvs_handle_t h) { return nvs_set_u32(h, "rec_open", session) == ESP_OK; }))
+        printf("[REC] ★ 열린 세션(rec_open)을 못 적었습니다\n");
+}
 
-    sdmmc_card_t* card = nullptr;
-    const int64_t t0 = esp_timer_get_time();
-    err = esp_vfs_fat_sdspi_mount("/sd", &host, &slot, &mcfg, &card);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SD 못 붙임 %s — 포맷하지 않고 그만둔다", esp_err_to_name(err));
-        spi_bus_free(SPI2_HOST);
+// firmware-rak buildHeadingNote 와 같은 글자 (TXT 머리)
+static void buildHeadingNote(char* out, size_t n) {
+    static const char* kAx = "XYZ";
+    char a[8], b[8];
+    snprintf(a, sizeof a, "%c%c", gHdgSignA < 0 ? '-' : '+', kAx[gHdgAxisA < 3 ? gHdgAxisA : 0]);
+    snprintf(b, sizeof b, "%c%c", gHdgSignB < 0 ? '-' : '+', kAx[gHdgAxisB < 3 ? gHdgAxisB : 0]);
+    snprintf(out, n,
+             "# 방위(화면·BLE·TXT): 기울기 보정(INSLIB ahrs_mag_detilt) — 축 atan2(자력 %s, 자력 %s) 기준, 중력은 그때 가속도, |a| 가 1 g ±0.15 밖이면 방위 없음. + 장착 오프셋 %+.2f° + 자기 편각 %+.2f°\n"
+             "# 자력: HLG 의 mag 는 하드아이언을 뺀 값 — 뺀 오프셋 %.2f %.2f %.2f uT (반지름 %.1f, 잔차 %.2f)\n"
+             "# 가속→자력 축: 자력 X=가속 Y, Y=가속 X, Z=−가속 Z\n",
+             a, b, gHdgOffsetDeg, gHdgDeclDeg, gMagOff[0], gMagOff[1], gMagOff[2], gMagRadius, gMagResid);
+}
+
+static bool logStartNow(uint32_t prevSession) {
+    gRecStartErr = nullptr;
+    hlog::Header h;
+    h.prevSession = prevSession;
+    esp_read_mac(h.mac, ESP_MAC_WIFI_STA);
+    h.fwVersion = 0x0100;
+    h.hwRev     = 1;
+    h.gnssType  = 0xFF;                   // L76K 는 규격에 없다 — 모름
+    h.imuType   = hlog::kImuMPU9250;
+    h.timeRef   = 1;
+    h.magScale  = 1;
+    h.gnssHz    = 0;                      // ★ 1단계는 GPS 설정을 안 건다 — 모름
+    h.sogSrc    = 0;
+    h.quatSrc   = 1;
+    h.heelAxis  = gHeelAxis;   h.heelSign  = gHeelSign < 0 ? 1 : 0;
+    h.pitchAxis = gPitchAxis;  h.pitchSign = gPitchSign < 0 ? 1 : 0;
+    h.heelOff   = gHeelOffsetDeg;  h.pitchOff = gPitchOffsetDeg;
+    h.hdgFormula = hlog::kHdgFormulaTilt;
+    h.hdgAxisA = gHdgAxisA;  h.hdgAxisB = gHdgAxisB;
+    h.hdgSignA = gHdgSignA < 0 ? 1 : 0;  h.hdgSignB = gHdgSignB < 0 ? 1 : 0;
+    h.hdgOff   = gHdgOffsetDeg;  h.hdgDecl = gHdgDeclDeg;
+    for (int i = 0; i < 3; ++i) h.magHi[i] = gMagOff[i];
+    h.gnssDyn = 255;                      // ★ 모듈에서 읽은 값만 — 1단계는 모름
+    buildHeadingNote(gSessNote, sizeof gSessNote);
+    hlog::setSessionNote(gSessNote);
+    if (!hlog::start(h)) {
+        hlog::Status st; hlog::getStatus(&st);
+        gRecStartErr = st.lastError ? st.lastError : "알 수 없음";
+        return false;
+    }
+    return true;
+}
+
+static bool recStartFrom(const char* who, uint32_t prev = 0) {
+    const uint32_t t0 = nowMs();
+    const bool ok = logStartNow(prev);
+    if (ok) {
+        hlog::Status st; hlog::getStatus(&st);
+        printf("[REC] 시작 (%s) — %s  %lums\n", who, st.path, (unsigned long)(nowMs() - t0));
+        recSaveOpen(st.session);
+        gRecLastSaveBad = false;
+    } else {
+        printf("[REC] ★ 시작 못 함 (%s) — %s\n", who, gRecStartErr ? gRecStartErr : "알 수 없음");
+    }
+    return ok;
+}
+
+static bool recWantOn(const char* who) {
+    gRecGaveUp = false; gRecRestarts = 0; gRecRestartAt = 0;
+    gWantRec = true;
+    recSaveWant(true);
+    const recctl::Phase ph = hlog::phase();
+    if (ph == recctl::Phase::Recording) return true;
+    if (ph == recctl::Phase::Closing) {
+        printf("[REC] 앞 기록을 닫는 중 — 닫히면 시작합니다 (%s)\n", who);
+        return true;
+    }
+    const bool ok = recStartFrom(who);
+    if (!ok) { gWantRec = false; recSaveWant(false); }
+    return ok;
+}
+
+static void recWantOff(const char* who) {
+    gWantRec = false; gRecGaveUp = false; gRecRestartAt = 0; gRecRestarts = 0;
+    recSaveWant(false);
+    if (hlog::phase() != recctl::Phase::Recording) return;
+    hlog::requestStop();
+    printf("[REC] 멈춤 요청 (%s) — 닫는 중\n", who);
+}
+
+static void recGiveUp(const char* why) {
+    gRecGaveUp = true; gWantRec = false; gRecRestartAt = 0;
+    recSaveWant(false);
+    printf("[REC] ★ %s — 멈춘 채로 둡니다 (REC FAIL)\n", why);
+}
+
+static void recOnResult(const recctl::SessionResult& r, uint32_t now) {
+    gRecFailSession = r.session;
+    recSaveOpen(0);
+    const bool clean = r.drained && r.headerOk && r.firstKind == recctl::kErrNone;
+    gRecLastSaveBad = !clean;
+    printf("[REC] 세션 %u 닫힘 — %s  %u분 %u초%s\n", (unsigned)r.session,
+           clean ? "정상 종료" : "★ 정상 종료 아님",
+           (unsigned)(r.durS / 60), (unsigned)(r.durS % 60),
+           r.lostBytes ? "  · 못 쓴 바이트 있음" : "");
+    if (r.firstKind != recctl::kErrNone) {
+        static const char* kKind[] = {"?", "쓰기 실패", "카드 빠짐", "닫으면서 다 못 씀", "?", "머리글 못 고침"};
+        const char* kind = (r.firstKind <= 5) ? kKind[r.firstKind] : "?";
+        snprintf(gRecFailLine, sizeof gRecFailLine,
+                 "세션 %u %u분%u초째 %s%s | 쓸것 %u 쓴것 %u | errno %d %s | 다시쓰기 %u번 | 카드 %s | %.2fV | 누적 %.1fMB | 못 쓰고 버림 %lu바이트 | 머리글 %s",
+                 (unsigned)r.session, (unsigned)(r.recSec / 60), (unsigned)(r.recSec % 60),
+                 kind, r.fake ? "(시험)" : "",
+                 (unsigned)r.want, (unsigned)r.wrote,
+                 r.err, r.err ? strerror(r.err) : "(이유 안 줌)",
+                 (unsigned)r.tries, r.card ? "있음" : "없음",
+                 gBattMv / 1000.0f, r.bytes / 1048576.0f, (unsigned long)r.lostBytes,
+                 r.headerOk ? "고침" : "못 고침");
+        printf("[REC] ★ 멈춘 이유 — %s\n", gRecFailLine);
+        nv::writeWith([&](nvs_handle_t h) {
+            uint32_t n = 0; nvs_get_u32(h, "rec_fail_n", &n);
+            return nvs_set_str(h, "rec_fail", gRecFailLine) == ESP_OK && nvs_set_u32(h, "rec_fail_n", n + 1) == ESP_OK;
+        });
+        hlog::noteLastFail(gRecFailLine);
+    }
+    switch (recctl::afterSession(gWantRec, r.firstKind, gRecRestarts, kRecRestartMax)) {
+    case recctl::Next::Nothing: break;
+    case recctl::Next::RestartSoon:
+        gRecRestartAt = now + kRecRestartGapMs;
+        printf("[REC] %u초 뒤 새 파일로 다시 겁니다\n", (unsigned)(kRecRestartGapMs / 1000));
+        break;
+    case recctl::Next::GiveUp:
+        recGiveUp("다시 걸기를 다 썼습니다");
+        break;
+    }
+}
+
+// 1단계에는 끄기(깊은잠)가 없다 — 7단계에서 powerOff 를 붙인다.
+static void recControlTick(uint32_t now) {
+    recctl::SessionResult r;
+    if (hlog::poll(&r)) recOnResult(r, now);
+    const recctl::Phase ph = hlog::phase();
+    if (ph == recctl::Phase::Recording) {
+        if (gRecRestarts && now - hlog::recStartedMs() >= kRecRestartOkMs) gRecRestarts = 0;
         return;
     }
-    ESP_LOGI(TAG, "SD 붙음 %.0f ms · %s · %llu MB · %u kHz",
-             (esp_timer_get_time() - t0) / 1000.0, card->cid.name,
-             (unsigned long long)((uint64_t)card->csd.capacity * card->csd.sector_size / (1024 * 1024)),
-             (unsigned)card->real_freq_khz);
+    if (!gWantRec || ph != recctl::Phase::Idle) return;
+    if (gRecRestartAt == 0) {
+        if (!recStartFrom("닫힌 뒤 시작")) { gWantRec = false; recSaveWant(false); }
+        return;
+    }
+    if ((int32_t)(now - gRecRestartAt) < 0) return;
+    ++gRecRestarts;
+    printf("[REC] 새 파일로 다시 겁니다 (%u번째, 앞 세션 %u)\n", gRecRestarts, (unsigned)gRecFailSession);
+    if (recStartFrom("쓰기 실패 뒤 다시 걸기", gRecFailSession)) { gRecRestartAt = 0; return; }
+    if (recctl::afterRestartFailed(gRecRestarts, kRecRestartMax) == recctl::Next::RestartSoon)
+        gRecRestartAt = now + kRecRestartGapMs;
+    else
+        recGiveUp("다시 걸기를 다 썼습니다");
+}
 
-    DIR* d = opendir("/sd/LOGS");
-    if (!d) {
-        ESP_LOGE(TAG, "/sd/LOGS 를 못 연다");
-    } else {
-        int n = 0;
-        uint64_t bytes = 0;
-        struct dirent* e;
-        static char path[300];               // ★ 스택에 안 올린다
-        while ((e = readdir(d)) != nullptr) {
-            snprintf(path, sizeof path, "/sd/LOGS/%s", e->d_name);
-            struct stat st;
-            if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-            ++n;
-            bytes += (uint64_t)st.st_size;
-            // 마지막 몇 개만 이름을 보인다 (firmware-rak rec ls 끝부분과 대 보려고)
-            if (strstr(e->d_name, "S0009") == e->d_name || strstr(e->d_name, "S00046") == e->d_name) {
-                ESP_LOGI(TAG, "  %-34s %8ld 바이트", e->d_name, (long)st.st_size);
-            }
+static void resumeRecordingIfCut() {
+    nvs_handle_t h;
+    if (nvs_open("sail", NVS_READWRITE, &h) != ESP_OK) return;
+    const bool haveNew = nv::has(h, "rec_want");
+    recctl::Persist cur;
+    cur.want = nv::u8(h, "rec_want", 0);
+    cur.open = nv::u32(h, "rec_open", 0);
+    const bool haveOld = nv::has(h, "rec_on");
+    const uint32_t lastSess = nv::u32(h, "sess_n", 0);
+    const recctl::Persist p = recctl::migrate(haveNew, cur, haveOld, haveOld ? nv::u8(h, "rec_on", 0) : 0, lastSess);
+    if (!haveNew) { nvs_set_u8(h, "rec_want", p.want); nvs_set_u32(h, "rec_open", p.open); }
+    if (haveOld) nvs_erase_key(h, "rec_on");
+    const uint8_t tries = nv::u8(h, "rec_try", 0);
+    const uint32_t forced = nv::u32(h, "rec_forced", 0);
+    if (forced) nvs_erase_key(h, "rec_forced");
+    nvs_commit(h);
+    nvs_close(h);
+    if (haveOld) printf("[REC] 옛 표시 rec_on 을 rec_want=%u · rec_open=%u 로 옮겼습니다\n", p.want, (unsigned)p.open);
+    if (forced) printf("[REC] ★ 지난번 세션 %u 는 닫기 전에 사람이 강제로 껐습니다 — 끝이 잘렸을 수 있습니다\n", (unsigned)forced);
+
+    auto setTry = [](uint8_t v) { nv::writeWith([&](nvs_handle_t w) { return nvs_set_u8(w, "rec_try", v) == ESP_OK; }); };
+    switch (recctl::atBoot(p, tries, kResumeMax)) {
+    case recctl::Boot::Nothing:
+        if (tries) setTry(0);
+        return;
+    case recctl::Boot::UnclosedOnly:
+        printf("[REC] 세션 %u 가 마감 안 된 채 남았습니다 — 사람이 멈춘 뒤라 이어 시작하지 않습니다\n", (unsigned)p.open);
+        recSaveOpen(0);
+        return;
+    case recctl::Boot::TooMany:
+        printf("[REC] ★ 이어 시작을 %u번 했는데 계속 끊깁니다 — 멈춥니다.\n", tries);
+        printf("      전원선·배터리 접점을 보세요. rec on 으로 직접 걸 수 있습니다.\n");
+        recSaveWant(false);
+        setTry(0);
+        gRecGaveUp = true;
+        return;
+    case recctl::Boot::Resume:
+        break;
+    }
+    const uint8_t n = (uint8_t)(tries + 1);
+    setTry(n);
+    const uint32_t prev = p.open ? p.open : lastSess;
+    printf("[REC] 지난 세션 %u 가 못 닫히고 끊겼습니다 — 이어서 시작합니다 (%u번째)\n", (unsigned)prev, n);
+    gWantRec = true;
+    gRecFailSession = prev;
+    if (!recStartFrom("켤 때 이어 시작", prev)) gRecRestartAt = nowMs() + kRecRestartGapMs;
+}
+
+// ── NAV 줄 (1단계: GPS 없음 — 시각·전압만, 나머지는 값 없음 표식) ─────────────
+static void logWriteNav(uint32_t now) {
+    hlog::NavSample a;          // 기본값이 전부 "값 없음" 표식이다 (hlog.h NavSample)
+    a.localMs = now;
+    a.battMv  = gBattMv;
+    hlog::writeNav(a);
+}
+
+static void logWriteText(uint32_t now) {
+    hlog::NavSample a;
+    a.localMs = now;
+    a.battMv  = gBattMv;
+    hlog::TextSample t;         // attOk=false · hdg=-1 · 속도 셋 -1 · pvFlag=255 — 없는 값
+    hlog::writeText(a, t);
+}
+
+// ── SD 사용권 (firmware-rak sdFreeFor) ─────────────────────────────────────
+static bool sdFreeFor(const char* what) {
+    const sdcard::Owner o = sdcard::owner();
+    if (o == sdcard::Owner::None) return true;
+    printf("[SD] %s — 카드를 지금 쓰는 곳: %s.%s\n", what, sdcard::ownerName(o),
+           o == sdcard::Owner::Recorder ? " rec off 먼저." :
+           o == sdcard::Owner::Download ? " wifi off 먼저." : "");
+    return false;
+}
+
+// ── 시리얼 명령 ────────────────────────────────────────────────────────────
+static void cmdRec(const char* arg) {
+    if (!strcmp(arg, "on") || !strcmp(arg, "start")) { recWantOn("rec on"); return; }
+    if (!strcmp(arg, "off") || !strcmp(arg, "stop")) {
+        if (hlog::phase() != recctl::Phase::Recording) printf("[REC] 기록 중이 아닙니다\n");
+        recWantOff("rec off");
+        return;
+    }
+    if (!strncmp(arg, "slow ", 5)) {
+        long ms = strtol(arg + 5, nullptr, 10);
+        if (ms < 0) ms = 0;
+        if (ms > 60000) ms = 60000;
+        hlog::testSlowClose((uint32_t)ms);
+        printf("[REC] 시험 — 다음 닫기 직전에 %ld ms 쉽니다\n", ms);
+        return;
+    }
+    if (!strcmp(arg, "mark")) { hlog::mark(); return; }
+    if (!strcmp(arg, "fail clear")) {
+        nv::writeWith([](nvs_handle_t h) {
+            nvs_erase_key(h, "rec_fail"); nvs_erase_key(h, "rec_fail_n"); nvs_erase_key(h, "rec_forced");
+            return true;
+        });
+        gRecFailLine[0] = '\0';
+        hlog::noteLastFail(nullptr);
+        gRecGaveUp = false; gRecRestarts = 0; gRecLastSaveBad = false;
+        hlog::testFailWrites(0);
+        printf("[REC] 멈춤 기록을 지웠습니다\n");
+        return;
+    }
+    if (!strncmp(arg, "fail ", 5)) {
+        long n = strtol(arg + 5, nullptr, 10);
+        hlog::testFailWrites((uint8_t)(n < 0 ? 0 : (n > 200 ? 200 : n)));
+        printf("[REC] 시험 — 다음 %ld번 쓰기를 실패로 흉내 냅니다\n", n);
+        return;
+    }
+    if (!strcmp(arg, "ls") || !strcmp(arg, "list")) { if (sdFreeFor("rec ls")) hlog::listFiles(); return; }
+    if (!strncmp(arg, "rm ", 3)) {
+        long n = strtol(arg + 3, nullptr, 10);
+        if (sdFreeFor("rec rm")) hlog::removeSession((uint32_t)(n < 0 ? 0 : n));
+        return;
+    }
+    if (!strncmp(arg, "tail", 4) || !strncmp(arg, "head", 4)) {
+        const bool head = !strncmp(arg, "head", 4);
+        long sess = 0, n = 20;
+        sscanf(arg + 4, "%ld %ld", &sess, &n);
+        if (n < 1) n = 1;
+        if (n > 400) n = 400;
+        if (sdFreeFor("rec tail")) hlog::tail((uint32_t)(sess < 0 ? 0 : sess), (uint16_t)n, head);
+        return;
+    }
+    if (!strncmp(arg, "dump ", 5)) {
+        char kind[8] = {0};
+        long sess = 0, off = 0, len = 0;
+        if (sscanf(arg + 5, "%ld %7s %ld %ld", &sess, kind, &off, &len) != 4 || sess <= 0 || off < 0 || len <= 0 ||
+            (strcmp(kind, "hlg") != 0 && strcmp(kind, "txt") != 0)) {
+            printf("@DUMP X 형식: rec dump <번호> <hlg|txt> <시작> <바이트>\n");
+            return;
         }
-        closedir(d);
-        ESP_LOGI(TAG, "/LOGS 파일 %d개 · 합쳐서 %.2f MB", n, bytes / 1048576.0);
+        if (sdFreeFor("rec dump")) hlog::dump((uint32_t)sess, kind[0] == 'h', (uint32_t)off, (uint32_t)len);
+        return;
     }
-    uint64_t total = 0, freeB = 0;
-    if (esp_vfs_fat_info("/sd", &total, &freeB) == ESP_OK) {
-        ESP_LOGI(TAG, "카드 전체 %llu MB · 남은 자리 %llu MB",
-                 (unsigned long long)(total / 1048576), (unsigned long long)(freeB / 1048576));
+    if (!strncmp(arg, "hash ", 5)) {
+        char kind[8] = {0};
+        long sess = 0;
+        if (sscanf(arg + 5, "%ld %7s", &sess, kind) != 2 || sess <= 0 ||
+            (strcmp(kind, "hlg") != 0 && strcmp(kind, "txt") != 0)) {
+            printf("@HASH X 형식: rec hash <번호> <hlg|txt>\n");
+            return;
+        }
+        if (sdFreeFor("rec hash")) hlog::hashFile((uint32_t)sess, kind[0] == 'h');
+        return;
     }
-    esp_vfs_fat_sdcard_unmount("/sd", card);
-    spi_bus_free(SPI2_HOST);
-    ESP_LOGI(TAG, "SD 내림 (읽기만 했다)");
+    if (!strncmp(arg, "check", 5)) {
+        long n = strtol(arg + 5, nullptr, 10);
+        if (sdFreeFor("rec check")) hlog::verify((uint32_t)(n < 0 ? 0 : n));
+        return;
+    }
+
+    hlog::Status st; hlog::getStatus(&st);
+    printf("──────────────────────────────────────────\n");
+    printf("  카드          %s\n", st.cardPresent ? "있음" : "없음");
+    if (!st.recording) {
+        printf("  기록          멈춰 있음   (rec on 으로 시작)\n");
+        if (st.lastError) printf("  지난 오류     %s\n", st.lastError);
+        if (st.session)   printf("  지난 세션     %s  %u+%u줄\n", st.path, (unsigned)st.navRows, (unsigned)st.imuRows);
+    } else {
+        const uint32_t sec = (nowMs() - st.startedMs) / 1000;
+        printf("  기록 중       %s\n", st.path);
+        printf("  지난 시간     %u분 %u초\n", (unsigned)(sec / 60), (unsigned)(sec % 60));
+        printf("  NAV 줄        %u   (10 Hz 면 %u 쯤이어야 정상)\n", (unsigned)st.navRows, (unsigned)(sec * 10));
+        printf("  IMU 줄        %u   (100 Hz 면 %u 쯤)\n", (unsigned)st.imuRows, (unsigned)(sec * 100));
+        printf("  쓴 양         %.2f MB\n", st.bytes / 1048576.0);
+    }
+    printf("  ─── 건강 상태 ───\n");
+    printf("  다시 써서 살림 %u번 (이 부팅)\n", (unsigned)hlog::writeRetries());
+    {
+        nvs_handle_t h;
+        char last[240] = "";
+        uint32_t cnt = 0;
+        if (nvs_open("sail", NVS_READONLY, &h) == ESP_OK) {
+            size_t len = sizeof last;
+            if (nvs_get_str(h, "rec_fail", last, &len) != ESP_OK) last[0] = '\0';
+            cnt = nv::u32(h, "rec_fail_n", 0);
+            nvs_close(h);
+        }
+        if (last[0]) printf("  지난 멈춤     모두 %u번. 마지막: %s\n", (unsigned)cnt, last);
+        else         printf("  지난 멈춤     없음\n");
+    }
+    printf("  버린 줄       %u   %s\n", (unsigned)st.dropped, st.dropped ? "★ 구멍이 났습니다" : "(0 이어야 정상)");
+    printf("  기다린 횟수   %u   (버퍼가 찰 뻔한 횟수)\n", (unsigned)st.waited);
+    printf("  최대 멈춤     %u ms  (카드가 제일 오래 안 놓아준 시간)\n", (unsigned)st.maxStallMs);
+    printf("  버퍼 최고     %u %%\n", (unsigned)st.maxFillPct);
+    printf("  IMU FIFO      2단계 전 — 아직 없음\n");
+    printf("──────────────────────────────────────────\n");
+    printf("  rec on / rec off / rec mark\n");
+    printf("  rec ls          카드에 있는 파일 목록\n");
+    printf("  rec check [번호]  보드가 직접 되읽어 검사 (기본: 마지막 세션)\n");
+    printf("  rec tail [번호] [줄수]  TXT 사본 끝 몇 줄 (rec head 는 앞부분)\n");
+    printf("  rec rm <번호>     그 세션의 HLG·TXT 를 지운다 (못 되돌린다)\n");
 }
 
-// ── 저장 버튼 — GPIO2(J11 1번, AIN1). 누르면 GND 로 떨어진다 ──
-static void readButton() {
-    const auto pin = static_cast<gpio_num_t>(rak::kAin1);
-    gpio_set_direction(pin, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(pin, GPIO_PULLUP_ONLY);
-    vTaskDelay(pdMS_TO_TICKS(5));
-    ESP_LOGI(TAG, "저장 버튼 GPIO%d = %d (1 = 안 누름)", rak::kAin1, gpio_get_level(pin));
+static void handleLine(char* line) {
+    // 앞뒤 빈칸 없애고 소문자로 (firmware-rak 은 rec 인자를 toLowerCase 했다)
+    while (*line == ' ') ++line;
+    size_t n = strlen(line);
+    while (n && (line[n - 1] == ' ')) line[--n] = '\0';
+    if (!n) return;
+    if (!strcmp(line, "rec")) { cmdRec(""); return; }
+    if (!strncmp(line, "rec ", 4)) {
+        char* arg = line + 4;
+        while (*arg == ' ') ++arg;
+        for (char* p = arg; *p; ++p) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+        cmdRec(arg);
+        return;
+    }
+    printf("[CMD] 모르는 명령: %s  (1단계에서 되는 것은 rec … 뿐)\n", line);
 }
 
-// ── LED — firmware-rak 과 같게: 초록은 **기록 중일 때만** 1초에 80 ms 깜박인다 (main.cpp loop 1d) ──
-//   ★ 0단계 첫 판은 "작업이 도나" 보려고 0.5초마다 늘 깜박였다. 사용자: "rec 중이 아닌데 연두색 불 깜박이네?"
-//     기록 표시와 뜻이 섞이므로 지웠다. 기록기를 붙이면 hlog::recording() 으로 켠다.
-static void ledsOff() {
+// USB 로 온 글자를 한 줄씩 모은다 (firmware-rak pollSerial — 64자까지)
+static void pollSerial() {
+    static char buf[65];
+    static size_t n = 0;
+    uint8_t c;
+    while (usb_serial_jtag_read_bytes(&c, 1, 0) == 1) {
+        if (c == '\n' || c == '\r') {
+            if (n) { buf[n] = '\0'; handleLine(buf); n = 0; }
+        } else if (n < sizeof buf - 1) {
+            buf[n++] = (char)c;
+        }
+    }
+}
+
+// ── 켤 때 점검 (0단계) — 짧게 ──────────────────────────────────────────────
+static void logBoot() {
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    uint32_t flash = 0;
+    esp_flash_get_size(nullptr, &flash);
+    printf("═══════════════════════════════════════════\n");
+    printf("  firmware-idf 1단계 (기록기) · ESP-IDF %s\n", esp_get_idf_version());
+    printf("  MAC %02X:%02X:%02X:%02X:%02X:%02X · 플래시 %" PRIu32 " MB · PSRAM %u 바이트\n",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], flash / (1024 * 1024), (unsigned)esp_psram_get_size());
+    printf("═══════════════════════════════════════════\n");
+}
+
+static void ledsInit() {
     static const int kLeds[] = {rak::kLedGreen, rak::kLedBlue};
     for (int p : kLeds) {
         gpio_set_direction(static_cast<gpio_num_t>(p), GPIO_MODE_OUTPUT);
@@ -327,17 +597,67 @@ static void ledsOff() {
 }
 
 extern "C" void app_main(void) {
-    ledsOff();
+    // USB 입력을 읽으려면 드라이버를 깔고, printf 도 그 드라이버로 보낸다 (usb_serial_jtag_vfs.h)
+    usb_serial_jtag_driver_config_t ucfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    ucfg.rx_buffer_size = 1024;
+    ucfg.tx_buffer_size = 4096;
+    usb_serial_jtag_driver_install(&ucfg);
+    usb_serial_jtag_vfs_use_driver();
+
+    ledsInit();
     logBoot();
-    checkNvs();
-    sensorPowerOn();
-    gpsUartInit();
-    vTaskDelay(pdMS_TO_TICKS(1000));                            // GPS 가 켜질 시간
-    listenGps(115200, 2000);
-    listenGps(9600, 2000);
-    scanI2c();
-    readBattery();
-    readButton();
-    listSd();
-    ESP_LOGI(TAG, "0단계 끝 — LED 는 꺼 둔다 (기록 중일 때만 초록 깜박임, firmware-rak 과 같게)");
+
+    esp_err_t err = nvs_flash_init();
+    if (err != ESP_OK) printf("[BOOT] ★ NVS 초기화 실패 %s — 지우지 않는다\n", esp_err_to_name(err));
+    reportResetReason();
+    {
+        nvs_handle_t h;
+        if (nvs_open("sail", NVS_READONLY, &h) == ESP_OK) {
+            size_t len = sizeof gRecFailLine;
+            if (nvs_get_str(h, "rec_fail", gRecFailLine, &len) == ESP_OK && gRecFailLine[0]) {
+                hlog::noteLastFail(gRecFailLine);
+                printf("[REC] 지난 기록 실패 (모두 %u번) — %s\n", (unsigned)nv::u32(h, "rec_fail_n", 0), gRecFailLine);
+            } else {
+                gRecFailLine[0] = '\0';
+            }
+            nvs_close(h);
+        }
+    }
+    loadSettings();
+
+    gpio_set_direction(static_cast<gpio_num_t>(rak::kSensorPowerA), GPIO_MODE_OUTPUT);
+    gpio_set_level(static_cast<gpio_num_t>(rak::kSensorPowerA), 1);   // GPS 전원 (2단계에서 켤 때 절차를 붙인다)
+
+    batteryInit();
+    batteryRead();
+    printf("[BATT] %u mV\n", (unsigned)gBattMv);
+
+    hlog::begin();
+    resumeRecordingIfCut();
+    printf("  rec 로 기록 상태 · rec on / rec off\n");
+
+    uint32_t lastNav = nowMs(), lastText = nowMs(), lastHealth = nowMs(), lastBatt = nowMs();
+    bool ledOn = false;
+    for (;;) {
+        const uint32_t now = nowMs();
+        pollSerial();
+        recControlTick(now);
+
+        // NAV 10 Hz — 칸을 더해 나간다 (firmware-rak: lastNav += navMs, 많이 밀리면 지금부터)
+        const uint32_t navMs = 1000u / hlog::kRateNav;
+        if (now - lastNav >= navMs) {
+            lastNav += navMs;
+            if (now - lastNav >= navMs * 5) lastNav = now;
+            if (hlog::recording()) logWriteNav(now);
+        }
+        if (hlog::recording() && now - lastText >= 10000) { lastText = now; logWriteText(now); }
+        if (now - lastHealth >= 1000) { lastHealth = now; hlog::healthCheck(); }
+        if (now - lastBatt >= 1000) { lastBatt = now; batteryRead(); }
+
+        // 초록 LED — 기록 중이면 1초에 80 ms (firmware-rak loop 1d)
+        const bool want = hlog::recording() && (now % 1000) < 80;
+        if (want != ledOn) { ledOn = want; gpio_set_level(static_cast<gpio_num_t>(rak::kLedGreen), want); }
+
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
 }
