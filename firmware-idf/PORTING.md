@@ -56,7 +56,7 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 |---|---|---|---|
 | 0 | 뼈대 — 부팅 로그, 핀, 센서 전원, LED, NVS 읽기, USB 콘솔 | 켜짐 로그 · NVS `sail` 설정값이 firmware-rak 이 쓴 값 그대로 읽힘 · GPS 바이트 들어옴 | ✅ 09-15 (아래) |
 | 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | ✅ 09-15 GPS·IMU 없이 (아래). 남은 것: 기록 중 카드 빼기 · 쓰기 일꾼 스택 남은 양 · IMU 끊김(2단계 뒤) |
-| 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | ❌ |
+| 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | 🔶 켜짐·fix·gpscfg·imu·1분 기록·test gps 통과 (아래). 남은 것: board_rec_test imu·clean (USB 멎어 못 돌림) · 밖에서 fix 잡힌 기록 |
 | 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | ❌ |
 | 4 | 화면 (U8g2) | 같은 화면 | ❌ |
 | 5 | WiFi · HTTP 파일 전송 · mDNS — **TCP 창 키우기** | `/api/files`·`/file/` Range · 해시 · 받기 속도를 firmware-rak 과 같은 자리에서 비교 | ❌ |
@@ -113,6 +113,27 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 - `resume`: 기록 중 포트 열어 리셋 → 켤 때 "세션 103 가 못 닫히고 끊겼습니다 — 이어서" → 104 · 사람이 멈춘 뒤 리셋 → 이어 시작 안 함
 - 시험 세션 95~104 가 카드에 남아 있다 (84~94 와 같이 지울지 사용자 결정 대기)
 - 카드를 붙이고 뗄 때마다 `W gpio: conflict found for GPIO[12]` — 0단계에 적은 IDF SD 드라이버 동작
+
+**2단계 보드 시험 (2026-09-15 17:30~17:45, 커밋 f1fc8ff, 전체 빌드 `-B ~/esp/build-sail`, 이제 stage 폴더 안 씀)**
+- 메인 연결: gps::begin · setWaitHook(워치독 + IMU FIFO) · imu::attach/calibrateGyro · 10 ms FIFO · 100 ms 자력 · 1 Hz 끊김 검사 ·
+  buildNav(위치·도플러 원본·위성·hAcc·자력·방위) · IMU 줄 · TXT(힐·피치·방위·속도 셋) · 기록 시작 때 FIFO 비우기 · 멈출 때 IMU 끊김 정산 ·
+  워치독 30초 (IDF 기본 5초를 `esp_task_wdt_reconfigure`) · 배터리 0.8·0.2 따라가기 · boot_n · 이어 시작 1분 뒤 rec_try 지우기
+  (★ 1단계 판에는 boot_n 올리기와 rec_try 지우기가 빠져 있었다 — 2단계에서 넣음)
+- 켤 때 로그: firmware-rak 과 같은 순서·글자 ([BOOT] · [WDT] 30초 · [PWR] GPIO14 · [GPS] 받는 버퍼 4096 · NAV-PV ACK · 130 ms 첫 프레임 · 선박 4 · [IMU] FIFO · |a| 0.99 g · 자이로 0점)
+- `fix`: 체크섬 통과 448 / 실패 0 (실내라 위성 0) · `gpscfg`: 115200 · 100 ms · 움직임 4 · 정지 문턱 0 · L76K 체크섬 방식
+- `imu`: 가속 +0.03 −0.99 −0.03 g · 자력 약 20 −23 25 µT · 방위 평평 113° / 기울기 보정 114°, 차이 1.3° (수평이라 거의 같아야 맞음) · 힐 축 −X 는 NVS heel_axis 0 그대로
+- 1분 기록 세션 105: **IMU 6,269줄 100.00 Hz · 10 ms 등간격 100% · NAV 10.04 Hz · FIFO 넘침 0 · CRC 0 · 머리글 움직임 종류 4** — firmware-rak 세션 94 와 같은 수준
+- `test gps 5`: 속도 `--.--` · CASIC 거름 0
+- `[시계] GPS 로 맞췄습니다` 가 위성 0 에서 뜬다 — firmware-rak clockFromGps 도 같은 조건(날짜 유효 · 2020년 이후)이라 옮기며 생긴 차이 아님
+- ★ 켤 때 로그 앞 몇 초가 안 보였던 것은 **보드 탓이 아니었다.** 올린 직후 2초 쉬고 포트를 열어 이미 지나간 로그를 못 받았고,
+  pyserial 기본값으로 열면 리셋이 안 될 때가 있다. DTR·RTS 를 내린 채 열면(board_rec_test.py 방식) 0.1초에 ROM 줄부터 다 온다.
+  그걸 모르고 넣었던 "USB 리셋이면 2초 기다리기" 는 뺐다
+- ★★ **17:45 쯤 두 번째로 USB 가 멎었다.** `board_rec_test.py gps` 가 끝난 뒤 `imu`·`clean` 단계에 보드가 한 줄도 안 냄.
+  포트는 열리고 맥은 USB 칩(303A, 3C:DC:75:70:2F:B4)을 계속 본다. 명령(`rec`)에 답 없음 · DTR·RTS 리셋 안 먹음 ·
+  esptool `--before no-reset` / `default-reset` / `usb-reset` 셋 다 `No serial data received` (ROM 다운로드 모드도 아님).
+  17:00 에도 똑같았고 USB 를 뽑았다 꽂아 풀렸다. 원인 [모름]. 둘 다 포트를 여러 번 열고 닫은 뒤였다.
+  IMU FIFO 읽기 루프는 한 번에 sPending 만큼만 돌아 끝이 있다 (imu.cpp fifoNext) — 멈춤 후보에서 뺌.
+  **다음에 할 것: 뽑았다 꽂은 뒤 켤 때 [BOOT] 이유와 코어덤프 검사 줄을 먼저 본다** (워치독·패닉이었으면 거기 남는다)
 
 - 보드 시험 순서 (메인): rec ls → rec check 94 · rec hash 94 hlg (firmware-rak 해시와 같나) → serial_dump + hlog_parse → rec on 1분 → rec check·rec head → board_rec_test.py clean·all → 기록 중 카드 빼기 → 쓰기 일꾼 스택 남은 양
 

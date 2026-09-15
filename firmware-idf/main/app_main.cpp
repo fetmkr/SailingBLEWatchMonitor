@@ -916,13 +916,6 @@ extern "C" void app_main(void) {
     ucfg.tx_buffer_size = 4096;
     usb_serial_jtag_driver_install(&ucfg);
     usb_serial_jtag_vfs_use_driver();
-    // 맥이 포트를 열어 리셋한 경우만, 맥이 다시 붙을 때까지 2초 안에서 기다린다.
-    // 안 기다리면 켤 때 몇 초치 로그가 사라졌다 (1·2단계 시험). 배에서 켤 때(POWERON)는 안 기다린다.
-    if (esp_reset_reason() == ESP_RST_USB) {
-        const uint32_t t0 = nowMs();
-        while (!usb_serial_jtag_is_connected() && nowMs() - t0 < 2000) delayMs(10);
-        delayMs(100);
-    }
 
     esp_err_t err = nvs_flash_init();
     if (err != ESP_OK) printf("[BOOT] ★ NVS 초기화 실패 %s — 지우지 않는다\n", esp_err_to_name(err));

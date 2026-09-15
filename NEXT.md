@@ -13,7 +13,10 @@
 - 빌드: `idf.py -B ~/esp/build-sail` 필수 (경로 빈칸 우회) · `SSL_CERT_FILE` 필요 — memory `firmware-idf-port`
 - 0단계(뼈대) ✅ — 부팅·NVS 28키·GPS·I2C 0x3C/0x68·배터리(firmware-rak 과 1 mV 차)·버튼·SD 목록
 - 1단계(기록기) ✅ GPS·IMU 없이 — 해시가 firmware-rak 과 같음 · 1분 기록 깨끗 · 쓰기 실패 다시 걸기 · 닫기 지연 · 리셋 이어 시작. 보드에 이 판이 있다
-- 다음: 2단계 GPS·IMU 붙이기 (gps.cpp·imu.cpp 코드는 나눠 짠 작업이 끝냄, 컴파일만 됨) → 보드 시험
+- 2단계(GPS·IMU) 🔶 — 켜짐·fix·gpscfg·imu·1분 기록(IMU 100.00 Hz 등간격 100%)·test gps 통과. 보드에 이 판이 있다
+- ★ 17:45 USB 가 두 번째로 멎음 (보드가 아무것도 안 내고 esptool 도 못 붙음). 사용자가 USB 를 뽑았다 꽂아야 함.
+  꽂은 뒤: 켤 때 [BOOT] 이유·코어덤프 줄 보기 → `board_rec_test.py imu` · `clean` → 10분 기록(FIFO 넘침 0)
+- 보드 로그 받기는 DTR·RTS 를 내린 채 포트를 연다 (board_rec_test.py 방식). 기본값으로 열면 리셋이 안 될 때가 있다
 
 ## 지금 상태 (2026-09-15 11:20 기준)
 
