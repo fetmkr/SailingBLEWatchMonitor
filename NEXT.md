@@ -5,6 +5,14 @@
 
 ---
 
+## ★ 지금 하는 일 — 펌웨어를 ESP-IDF v6.1 로 옮기는 중 (2026-09-15 오후~)
+
+- **폴더 `firmware-idf/`** · 계획·단계·결과·막힌 곳은 **`firmware-idf/PORTING.md`** 가 원본이다. 새 세션은 거기부터.
+- 기준 코드: 커밋 `2b18b17` 의 firmware-rak (HLG 1.2). firmware-rak 은 건드리지 않는다.
+- **보드에는 firmware-idf 를 올려 둔다** (사용자 결정 "보드 그냥 새코드로 구현해"). 시험은 단계마다 나눠서.
+- 빌드: `idf.py -B ~/esp/build-sail` 필수 (경로 빈칸 우회) · `SSL_CERT_FILE` 필요 — memory `firmware-idf-port`
+- 0단계(뼈대) ✅ — 부팅·NVS 28키·GPS·I2C 0x3C/0x68·배터리(firmware-rak 과 1 mV 차)·버튼. 다음: SD 목록 → 1단계 기록기
+
 ## 지금 상태 (2026-09-15 11:20 기준)
 
 ### 코드 — 전부 커밋됨

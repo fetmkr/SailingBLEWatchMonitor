@@ -1,0 +1,30 @@
+# firmware-idf 기본 설정 (ESP-IDF v6.1). 이름은 전부 ~/esp/esp-idf 의 Kconfig 에서 확인했다 (2026-09-15).
+# 보드: RAK3112 = ESP32-S3, 플래시 16 MB QIO 80 MHz, PSRAM OPI 8 MB (firmware-rak/rakwireless/boards/rak3112.json)
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ── 플래시 · 파티션 — firmware-rak 과 같은 표 (NVS 0x9000, 코어덤프 0xFF0000) ──
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ── CPU · PSRAM ──
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# ── FreeRTOS 틱 — 아두이노판과 같은 1000 Hz. IDF 기본은 100 이라 1 틱이 10 ms 가 된다 ──
+CONFIG_FREERTOS_HZ=1000
+
+# ── 콘솔 — 보드의 USB 포트(USB Serial/JTAG, /dev/cu.usbmodem*) ──
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ── 코어덤프 — 죽은 이유를 플래시에 남긴다 (memory: esp32-coredump-postmortem) ──
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+
+# ── SD 카드 FAT — 세션 파일 이름이 8.3 보다 길다 (S00046_20260913-1333_nosat.HLG) ──
+#   긴 이름 버퍼는 힙에. 스택에 올리지 않는다 (memory: esp32-stack-and-leak-rules)
+CONFIG_FATFS_LFN_HEAP=y
