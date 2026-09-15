@@ -315,16 +315,19 @@ static void readButton() {
     ESP_LOGI(TAG, "저장 버튼 GPIO%d = %d (1 = 안 누름)", rak::kAin1, gpio_get_level(pin));
 }
 
-static void blinkTask(void*) {
-    const auto pin = static_cast<gpio_num_t>(rak::kLedGreen);
-    gpio_set_direction(pin, GPIO_MODE_OUTPUT);
-    for (bool on = false;; on = !on) {
-        gpio_set_level(pin, on);
-        vTaskDelay(pdMS_TO_TICKS(500));
+// ── LED — firmware-rak 과 같게: 초록은 **기록 중일 때만** 1초에 80 ms 깜박인다 (main.cpp loop 1d) ──
+//   ★ 0단계 첫 판은 "작업이 도나" 보려고 0.5초마다 늘 깜박였다. 사용자: "rec 중이 아닌데 연두색 불 깜박이네?"
+//     기록 표시와 뜻이 섞이므로 지웠다. 기록기를 붙이면 hlog::recording() 으로 켠다.
+static void ledsOff() {
+    static const int kLeds[] = {rak::kLedGreen, rak::kLedBlue};
+    for (int p : kLeds) {
+        gpio_set_direction(static_cast<gpio_num_t>(p), GPIO_MODE_OUTPUT);
+        gpio_set_level(static_cast<gpio_num_t>(p), 0);
     }
 }
 
 extern "C" void app_main(void) {
+    ledsOff();
     logBoot();
     checkNvs();
     sensorPowerOn();
@@ -336,6 +339,5 @@ extern "C" void app_main(void) {
     readBattery();
     readButton();
     listSd();
-    xTaskCreate(blinkTask, "blink", 2048, nullptr, 1, nullptr);
-    ESP_LOGI(TAG, "0단계 끝 — 초록 LED 가 0.5초마다 깜빡이면 작업이 돈다");
+    ESP_LOGI(TAG, "0단계 끝 — LED 는 꺼 둔다 (기록 중일 때만 초록 깜박임, firmware-rak 과 같게)");
 }

@@ -69,6 +69,14 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 - `cmd=52/5 R1 response: command not supported` — IDF `sdspi_transaction.c:80` 의 정보 줄(ESP_LOGI). 카드 초기화가 SDIO 명령을 물어볼 때 SD 카드가 모른다고 답한 것
 
 **보드 운용 (사용자 결정 2026-09-15):** 이제 보드에는 firmware-idf 를 올려 둔다. 시험은 단계마다 나눠서 한다.
+
+- LED: 0단계 첫 판이 "작업이 도나" 보려고 초록을 0.5초마다 **늘** 깜박였다. 사용자 "rec 중이 아닌데 연두색 불 깜박이네?" →
+  지웠다. 켤 때 초록·파랑 끔, 기록기를 붙이면 firmware-rak 과 같게 기록 중에만 1초에 80 ms.
+- 나눠 짜는 작업이 `main/` 에 반쯤 쓴 파일을 넣는 동안 메인은 **`~/esp/stage0`** (0단계 파일만 복사, 절대 경로 include) 을
+  `-B ~/esp/build-stage0` 로 지어 올린다. 합칠 때 지운다.
+- ★ 17:00 쯤부터 보드에 연결이 안 된다 — `Failed to connect to ESP32-S3: No serial data received` 세 번 (default-reset 둘, usb-reset 하나).
+  맥은 USB 칩(303A:1001, 일련번호 3C:DC:75:70:2F:B4)을 계속 본다. 포트를 열어도 0 바이트. 사용자에게 USB·전원 뽑았다 꽂기를 부탁함.
+  LED 고친 판은 빌드만 되고 아직 못 올렸다.
 - 고친 것: 속도 바꿀 때마다 `uart_set_pin` 을 다시 불러 `GPIO 43 is not usable` 경고 → 핀은 한 번, 속도는 `uart_set_baudrate`. 다시 올려 경고 사라짐 확인
 - ★ `Core dump data check failed`: 코어덤프 영역에 옛 아두이노판(IDF 4.4, 판 0x00090100)이 쓴 ELF 코어덤프 23,492 바이트가 있다.
   IDF 6.1 이 형식이 달라 체크섬을 못 맞춘 것. 증거라 `~/esp/coredump_ff0000.bin` 으로 떠 뒀다 (09-11 nimble_host 죽음일 가능성 — 추측)
