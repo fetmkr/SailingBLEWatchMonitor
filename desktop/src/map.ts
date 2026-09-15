@@ -26,10 +26,31 @@
 // MapLibre 6 은 기본 내보내기가 없다. 이름으로 가져온다.
 // [확인: node_modules/maplibre-gl/dist/maplibre-gl.d.ts 의 export { … } 목록]
 import {
-  Map as MlMap, NavigationControl, ScaleControl, setWorkerUrl,
+  Map as MlMap, NavigationControl, ScaleControl, setWorkerUrl, addProtocol,
   type LngLatBoundsLike,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { layers as pmLayers, namedFlavor } from "@protomaps/basemaps";
+import { invoke } from "@tauri-apps/api/core";
+
+// ── 오프라인 지도 (2026-09-15) ────────────────────────────────────────────
+//
+// 사람이 고른 영역을 Source Cooperative 의 Protomaps 원본(PMTiles)에서 잘라 앱 데이터 폴더에 받아 둔다
+// (src-tauri/src/offmap.rs). 지도는 그 파일에서 타일을 꺼내 그린다 — 인터넷을 안 쓴다.
+//
+//   타일      offmap://{z}/{x}/{y} → Rust offmap_tile (받은 영역 파일들 중 그 타일이 있는 곳, gzip 푼 MVT)
+//   스타일    @protomaps/basemaps 5.7.2 layers() · 한국어 이름표 (lang "ko")
+//   글꼴      public/basemaps-assets/fonts (Noto Sans 셋, OFL). 한글은 MapLibre 가 컴퓨터 글꼴로 그린다
+//             [확인: maplibre-gl-shared-dev.mjs codePointUsesLocalIdeographFontFamily 에 U+AC00~D7C6]
+//   아이콘    public/basemaps-assets/sprites/v4 (tangrams/icons, MIT)
+//
+// ★ 해도(OpenSeaMap)·위성(Esri)은 미리 받기를 허락하지 않아 오프라인이 안 된다. 해도를 켜면 인터넷이 필요하다.
+addProtocol("offmap", async (params) => {
+  const m = params.url.match(/^offmap:\/\/(\d+)\/(\d+)\/(\d+)/);
+  if (!m) throw new Error(`오프라인 타일 주소가 이상합니다: ${params.url}`);
+  const data = await invoke<ArrayBuffer>("offmap_tile", { z: +m[1], x: +m[2], y: +m[3] });
+  return { data };
+});
 
 // ── 워커 주소를 우리가 직접 알려 준다 ────────────────────────────────────
 //
@@ -114,6 +135,15 @@ const BASES: Base[] = [
     maxzoom: 19,
     attribution: "&copy; Esri, Maxar, Earthstar Geographics",
   },
+  {
+    id: "offline",
+    label: "오프라인 지도",
+    tiles: [],          // style() 이 따로 만든다 (벡터)
+    maxzoom: 15,
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> · ' +
+      '<a href="https://protomaps.com" target="_blank">Protomaps</a>',
+  },
 ];
 
 const SEAMARK = "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png";
@@ -136,6 +166,10 @@ export class TrackMap {
   private baseId = "osm";
   private seamarkOn = false;
   private colorBySog = true;
+  /** 받은 오프라인 영역 중 가장 깊은 확대. 0 이면 받은 영역이 없다 */
+  private offlineMax = 0;
+  /** 오프라인 지도 색 — 앱 판이 밝으면 light, 아니면 dark */
+  private dark = true;
   private ready = false;
   private pending: (() => void)[] = [];
 
@@ -197,6 +231,7 @@ export class TrackMap {
 
   private style(): any {
     const b = BASES.find((x) => x.id === this.baseId) ?? BASES[0];
+    if (b.id === "offline") return this.offlineStyle(b);
     const sources: any = {
       base: {
         type: "raster", tiles: b.tiles, tileSize: 256,
@@ -214,6 +249,59 @@ export class TrackMap {
       layers.push({ id: "seamark", type: "raster", source: "seamark" });
     }
     return { version: 8, sources, layers };
+  }
+
+  /** 받아 둔 영역으로 그리는 벡터 스타일. 글꼴·아이콘 주소는 앱 안(public)이다. */
+  private offlineStyle(b: Base): any {
+    const flavor = this.dark ? "dark" : "light";
+    // ★ 절대 주소로 준다. 맥은 tauri://localhost, 윈도는 http://tauri.localhost, 개발은 http://localhost:1420
+    const here = location.origin;
+    const style: any = {
+      version: 8,
+      glyphs: `${here}/basemaps-assets/fonts/{fontstack}/{range}.pbf`,
+      sprite: `${here}/basemaps-assets/sprites/v4/${flavor}`,
+      sources: {
+        protomaps: {
+          type: "vector", tiles: ["offmap://{z}/{x}/{y}"],
+          // 받은 영역보다 더 당기면 가장 깊은 타일을 늘려서 보여준다
+          maxzoom: this.offlineMax || b.maxzoom,
+          attribution: b.attribution,
+        },
+      },
+      layers: pmLayers("protomaps", namedFlavor(flavor), { lang: "ko" }),
+    };
+    if (this.seamarkOn) {
+      style.sources.seamark = {
+        type: "raster", tiles: [SEAMARK], tileSize: 256, maxzoom: 18,
+        attribution: '&copy; <a href="https://www.openseamap.org" target="_blank">OpenSeaMap</a>',
+      };
+      style.layers.push({ id: "seamark", type: "raster", source: "seamark" });
+    }
+    return style;
+  }
+
+  /** 받은 영역이 바뀌었을 때. 오프라인 바탕을 보고 있으면 다시 그린다. */
+  setOffline(maxzoom: number) {
+    if (maxzoom === this.offlineMax) return;
+    this.offlineMax = maxzoom;
+    if (this.baseId === "offline") this.reskin();
+  }
+
+  setDark(dark: boolean) {
+    if (dark === this.dark) return;
+    this.dark = dark;
+    if (this.baseId === "offline") this.reskin();
+  }
+
+  /** 영역 [서, 남, 동, 북] 이 보이게 맞춘다 */
+  fitBounds(bb: [number, number, number, number]) {
+    this.map?.fitBounds([[bb[0], bb[1]], [bb[2], bb[3]]], { padding: 20, duration: 400 });
+  }
+
+  /** 지금 보이는 영역 [서, 남, 동, 북]. 지도가 안 떴으면 null */
+  viewBounds(): [number, number, number, number] | null {
+    const g = this.map?.getBounds();
+    return g ? [g.getWest(), g.getSouth(), g.getEast(), g.getNorth()] : null;
   }
 
   /** 항적·배 표시를 지도에 올린다. 바탕을 갈아끼울 때마다 다시 부른다. */

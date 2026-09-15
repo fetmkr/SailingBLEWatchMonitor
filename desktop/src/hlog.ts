@@ -8,7 +8,10 @@
 
 export const HEADER_SIZE = 128;
 export const TYPE_NAV = 0xa1;
-export const NAV_SIZE = 38;
+// v1.0·v1.1 은 38바이트. v1.2(2026-09-15)부터 40바이트 — 36~37 에 보드가 그 순간 보여준 방위(u16, 0.01°).
+// 원본 mag 는 그대로 있다. 보드 표시값을 나란히 남겨서 설정을 몰라도 그때 값을 볼 수 있게 한 것이다.
+export const NAV_SIZE_V1 = 38;
+export const NAV_SIZE_V2 = 40;
 export const TYPE_IMU = 0xb1;
 // v1.0 은 27바이트(쿼터니언 8칸 포함), v1.1 부터 19바이트.
 // 자세는 가속·자이로 원본에서 후처리로 뽑는다 — 원본이 남아 있으면 계산법을
@@ -95,6 +98,8 @@ export interface NavRecord {
   battMv: number;
   event: number;
   mag: [number, number, number];   // µT
+  /** 보드가 이 줄을 만들 때 화면·BLE·TXT 에 쓴 방위 (도). v1.2 전 파일이거나 못 구했으면 null */
+  boardHdgDeg: number | null;
 }
 
 /**
@@ -213,7 +218,8 @@ export function parseHeader(buf: Uint8Array): Header {
   };
 }
 
-function readNav(d: DataView, o: number): NavRecord {
+function readNav(d: DataView, o: number, size: number): NavRecord {
+  const hdg = size >= NAV_SIZE_V2 ? d.getUint16(o + 36, true) : U16_INVALID;
   const lat = d.getInt32(o + 11, true);
   const lon = d.getInt32(o + 15, true);
   const sog = d.getUint16(o + 19, true);
@@ -239,6 +245,7 @@ function readNav(d: DataView, o: number): NavRecord {
       d.getInt16(o + 32, true) / 10,
       d.getInt16(o + 34, true) / 10,
     ],
+    boardHdgDeg: hdg === U16_INVALID ? null : hdg / 100,
   };
 }
 
@@ -273,6 +280,9 @@ export function parse(buf: Uint8Array): Session {
   const imuSize =
     header.verMajor > 1 || (header.verMajor === 1 && header.verMinor >= 1)
       ? IMU_SIZE_V1 : IMU_SIZE_V0;
+  const navSize =
+    header.verMajor > 1 || (header.verMajor === 1 && header.verMinor >= 2)
+      ? NAV_SIZE_V2 : NAV_SIZE_V1;
 
   const nav: NavRecord[] = [];
   const imu: ImuRecord[] = [];
@@ -284,7 +294,7 @@ export function parse(buf: Uint8Array): Session {
   const n = buf.length;
   while (i < n) {
     const t = buf[i];
-    const size = t === TYPE_NAV ? NAV_SIZE : t === TYPE_IMU ? imuSize : 0;
+    const size = t === TYPE_NAV ? navSize : t === TYPE_IMU ? imuSize : 0;
     let ok = false;
 
     if (size && i + size <= n) {
@@ -292,7 +302,7 @@ export function parse(buf: Uint8Array): Session {
         const ms = d.getUint32(i + 1, true);
         // 시각이 크게 뒤로 가면 우연히 CRC 가 맞은 가짜다.
         if (lastMs < 0 || ms + 5000 >= lastMs) {
-          if (t === TYPE_NAV) nav.push(readNav(d, i));
+          if (t === TYPE_NAV) nav.push(readNav(d, i, size));
           else imu.push(readImu(d, i));
           if (ms > lastMs) lastMs = ms;
           i += size;

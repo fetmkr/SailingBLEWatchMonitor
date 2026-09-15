@@ -1,3 +1,5 @@
+mod offmap;
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -47,7 +49,18 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // 영상 고르기. 아이패드에서만 실제로 일한다.
         .plugin(tauri_plugin_videopick::init())
-        .invoke_handler(tauri::generate_handler![greet, caps]);
+        // 오프라인 지도. 고른 영역만 받아 두고 타일을 꺼내 준다 (src/offmap.rs)
+        .manage(offmap::OffmapState::default())
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            caps,
+            offmap::offmap_list,
+            offmap::offmap_estimate,
+            offmap::offmap_download,
+            offmap::offmap_cancel,
+            offmap::offmap_delete,
+            offmap::offmap_tile,
+        ]);
 
     // USB 시리얼. 블루투스가 없는 컴퓨터에서 보드를 깨우는 데 쓴다.
     // 보드는 BLE 와 시리얼이 같은 명령을 쓴다 (PROTOCOL.md §9).

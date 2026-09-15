@@ -893,6 +893,8 @@ dependencies = [
 name = "desktop"
 version = "0.1.0"
 dependencies = [
+ "flate2",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",
@@ -904,6 +906,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-serialplugin",
  "tauri-plugin-videopick",
+ "tokio",
 ]
 
 [[package]]

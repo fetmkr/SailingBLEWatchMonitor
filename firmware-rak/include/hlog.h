@@ -21,10 +21,32 @@ namespace hlog {
 // ── 크기와 표식 ──────────────────────────────────────────────────────────
 constexpr uint8_t kMagic0 = 'H', kMagic1 = 'H', kMagic2 = 'L', kMagic3 = 'G';
 constexpr uint8_t kVerMajor = 1;
-constexpr uint8_t kVerMinor = 1;
+constexpr uint8_t kVerMinor = 2;
 
 constexpr size_t kHeaderSize = 128;
-constexpr size_t kNavSize    = 38;
+
+// ── Type A 가 38 → 40 바이트로 늘었다 (v1.2, 2026-09-15) ─────────────────
+//
+// 보드가 그 순간 화면·BLE·TXT 에 보여준 방위(HDG)를 줄마다 같이 적는다.
+//   36~37  u16  hdg   0.01 도 (0~35999). 0xFFFF = 못 구함
+//   38~39  u16  CRC   0~37 범위
+//
+// "카드에는 원본만" 을 어긴 것이 아니다. 원본(자력 mag)은 그대로 남기고,
+// 보드가 그때 보여준 계산값을 **나란히** 남긴다. 사용자 결정이다.
+//
+// 이유. 세션 46(09-13)에는 방위 설정이 파일에 없었다. 앱이 같은 식을 갖고도
+// 축·오프셋을 몰라서 방위를 못 되살렸다. 값이 줄에 있으면 설정이 틀려도
+// 그때 사람이 본 값은 남는다. 나중에 고친 식으로 다시 계산한 값과 견줄 수도 있다.
+// 계산에 쓴 설정은 머리글 81~105 에 있다.
+//
+// 옛 파일(v1.0·v1.1)은 38바이트다. 읽는 쪽은 머리글 판 번호가 1.2 이상이면 40.
+constexpr size_t kNavSize    = 40;   // v1.2 — 지금
+constexpr size_t kNavSizeV1  = 38;   // v1.0·v1.1 — hdg 칸이 없던 시절
+
+/** 머리글 판 번호(바이트 4·5)로 NAV 줄 크기를 고른다. */
+constexpr size_t navSizeFor(uint8_t verMajor, uint8_t verMinor) {
+    return (verMajor > 1 || (verMajor == 1 && verMinor >= 2)) ? kNavSize : kNavSizeV1;
+}
 
 // ── Type B 가 27 → 19 바이트로 줄었다 (v1.1) ─────────────────────────────
 //
@@ -62,6 +84,7 @@ constexpr uint16_t kCogInvalid    = 0xFFFF;              // 유효 범위 0~3599
 constexpr uint16_t kAccInvalid    = 0xFFFF;              // 655 m. 쓸모없는 정확도
 constexpr uint32_t kItowInvalid   = 0xFFFFFFFF;
 constexpr uint16_t kWeekInvalid   = 0xFFFF;
+constexpr uint16_t kHdgInvalid    = 0xFFFF;              // 방위 못 구함 (0~35999 밖)
 
 // ── 이벤트 비트 (Type A 오프셋 29) ───────────────────────────────────────
 constexpr uint8_t kEvMark      = 0x01; // 마킹 버튼
@@ -178,6 +201,7 @@ struct NavSample {
     uint16_t battMv  = 0;                // ★전압 원시값. 퍼센트는 저장하지 않는다
     uint8_t  event   = 0;
     int16_t  mag[3]  = {0, 0, 0};        // 0.1 µT/LSB (헤더 mag_scale=1)
+    uint16_t hdg     = kHdgInvalid;      // 0.01 도. 보드가 이 순간 보여준 방위 (v1.2)
 };
 
 struct ImuSample {

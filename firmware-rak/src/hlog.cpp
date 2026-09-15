@@ -733,18 +733,17 @@ recctl::Phase phase() {
 
 void testSlowClose(uint32_t ms) { gSlowCloseMs = ms; }
 
-// 항법 한 줄(38바이트)을 링버퍼에 넣는다. 1 Hz 로 부른다.
+// 항법 한 줄(40바이트, v1.2)을 링버퍼에 넣는다. 10 Hz 로 부른다.
 //
 // 값을 바꾸지 않고 **다듬기 전 원본 그대로** 적는다. 앱에 보이는 속도는
 // 다듬고 잡음 바닥을 씌운 값인데 그걸 저장하면 원본을 되살릴 수 없다.
+// 끝의 hdg 만 계산값이다 — 보드가 그 순간 보여준 방위를 원본 옆에 남긴다 (hlog.h).
 //
 // 표식(event)을 여기서 합친다. 버튼을 눌러도 그 자리에서 안 적고 **다음
 // 항법 줄에** 붙는다 (mark 참조). 첫 줄에는 kEvFirst 가 자동으로 붙는다.
 //
-// ★ CRC 를 36 으로 박아 두었다. kNavSize(38)에서 CRC 두 바이트를 뺀 값이다.
-//   줄 크기를 고치면 이 숫자도 같이 고쳐야 한다. 안 고치면 CRC 가 엉뚱한
-//   범위를 덮는데 **에러가 안 난다.** 파서 쪽에서만 깨져 보인다.
-//   (writeImu 는 kImuSize - 2 로 적어서 이 함정이 없다)
+// ★ CRC 범위는 kNavSize - 2 다. 전에는 36 을 박아 두어서 줄 크기를 고치면
+//   CRC 가 엉뚱한 범위를 덮는데 **에러가 안 났다.** v1.2 에서 크기를 늘리며 없앴다.
 void writeNav(const NavSample& s) {
     if (!isRec()) return;
     uint8_t r[kNavSize];
@@ -768,7 +767,8 @@ void writeNav(const NavSample& s) {
     put8(r, o, ev);
 
     for (int i = 0; i < 3; ++i) put16(r, o, (uint16_t)s.mag[i]);
-    const uint16_t c = crc16(r, 36);
+    put16(r, o, s.hdg);
+    const uint16_t c = crc16(r, kNavSize - 2);
     put16(r, o, c);
 
     if (push(r, kNavSize)) ++gNavRows;
@@ -1027,11 +1027,13 @@ void verify(uint32_t session) {
     uint8_t  rec[64];
     // 옛 파일(v1.0)은 IMU 레코드가 27바이트다. 머리글을 보고 고른다.
     const size_t imuSize = (hdr[5] >= 1) ? kImuSize : kImuSizeV0;
+    // v1.1 까지는 NAV 가 38바이트, v1.2 부터 40 (hdg 칸). 머리글을 보고 고른다.
+    const size_t navSize = navSizeFor(hdr[4], hdr[5]);
 
     while (f.available()) {
         const int t = f.read();
         if (t < 0) break;
-        const size_t size = (t == kTypeNav) ? kNavSize : ((t == kTypeImu) ? imuSize : 0);
+        const size_t size = (t == kTypeNav) ? navSize : ((t == kTypeImu) ? imuSize : 0);
         if (size == 0) { ++bad; continue; }   // 한 바이트 밀면서 다시 맞춘다
 
         rec[0] = (uint8_t)t;
@@ -1081,7 +1083,7 @@ void verify(uint32_t session) {
     const uint64_t freeB = SD.totalBytes() - SD.usedBytes();
     sdcard::release(sdcard::Owner::Diagnostic);
 
-    const uint32_t used = kHeaderSize + nav * kNavSize + imu * imuSize;
+    const uint32_t used = kHeaderSize + nav * navSize + imu * imuSize;
     Serial.println("  ─────────────────────────────────────");
     Serial.printf("  NAV 레코드     %u\n", (unsigned)nav);
     Serial.printf("  IMU 레코드     %u\n", (unsigned)imu);

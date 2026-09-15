@@ -27,6 +27,14 @@ tauri-plugin-fs = "2.5.1"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-blec = "0.12.0"
 
+# 오프라인 지도 (src/offmap.rs). 원본 PMTiles 에서 고른 영역만 조각 받기로 떼어 온다.
+# reqwest 는 tauri-plugin-http 가 이미 쓰는 0.12 · rustls 판에 맞췄다 — 새 크레이트가 안 늘어난다
+# [확인: Cargo.lock 의 reqwest 0.12.28 이 hyper-rustls·rustls 를 씀, tauri-plugin-http 기본 기능 rustls-tls].
+# tokio 는 tauri 가 rt·sync 로 이미 쓴다. 다시 해 볼 때 기다리려고 time 만 더 켠다.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+flate2 = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+
 # 영상 고르기. 아이패드에서 애플 사진 고르기를 전체 화면으로 띄우고,
 # 원본을 변환 없이 그대로 받는다. plugins/tauri-plugin-videopick 참고.
 tauri-plugin-videopick = { path = "../plugins/tauri-plugin-videopick" }

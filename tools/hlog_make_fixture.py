@@ -20,7 +20,8 @@ import struct
 import sys
 
 HEADER_SIZE = 128
-TYPE_NAV, NAV_SIZE = 0xA1, 38
+TYPE_NAV, NAV_SIZE = 0xA1, 40          # v1.2 — 36~37 에 보드 방위 hdg (0.01°)
+HDG_INVALID = 0xFFFF
 TYPE_IMU, IMU_SIZE = 0xB1, 19
 KNOTS_PER_MPS = 1.943844
 
@@ -38,7 +39,7 @@ def make_header(session, utc_start, dur_s, nav_rows, imu_rows):
     h = bytearray(HEADER_SIZE)
     h[0:4] = b"HHLG"
     h[4] = 1                                     # ver major
-    h[5] = 1                                     # ver minor (쿼터니언 뺀 판)
+    h[5] = 2                                     # ver minor (v1.2 — NAV 에 hdg 칸)
     struct.pack_into("<H", h, 6, HEADER_SIZE)
     h[8:14] = bytes([0x3C, 0xDC, 0x75, 0x70, 0x2F, 0xB4])
     struct.pack_into("<H", h, 14, 0x0100)        # fw
@@ -70,18 +71,32 @@ def make_header(session, utc_start, dur_s, nav_rows, imu_rows):
     h[68] = 0                                    # pitch_sign = +
     struct.pack_into("<f", h, 69, 0.0)           # heel_off
     struct.pack_into("<f", h, 73, 0.0)           # pitch_off
+    # 방위 설정 (hlog.h kOffHdgFormula 표).
+    # ★ 식은 0(설정 없음)으로 둔다. 줄의 합성 hdg 는 mag 로 계산한 값이 아니다.
+    #   식 2 를 적어 두면 앱이 "머리글 설정으로 재계산" 을 그리는데, 합성 hdg 와 90° 넘게 달라서
+    #   시험용 화면이 틀린 비교를 보여준다 (2026-09-15, 합성 파일 재계산 대조 중앙 90.9°).
+    #   축·부호·오프셋 칸은 읽히는지 보려고 그대로 채운다.
+    h[81] = 0                                    # 식 0 = 설정 없음
+    h[82] = 1                                    # 축 A = Y
+    h[83] = 0                                    # 축 B = X
+    h[84] = 0                                    # 부호 A +
+    h[85] = 0                                    # 부호 B +
+    struct.pack_into("<f", h, 86, 0.0)           # 장착 오프셋
+    struct.pack_into("<f", h, 90, 0.0)           # 편각
+    struct.pack_into("<3f", h, 94, 0.0, 0.0, 0.0)  # 뺀 하드아이언
     struct.pack_into("<H", h, 126, crc16(bytes(h[:126])))
     return bytes(h)
 
 
 def nav_record(ms, itow, week, lat, lon, sog_mms, cog_cdeg, sv, fix,
-               hacc_cm, batt_mv, event, mag):
+               hacc_cm, batt_mv, event, mag, hdg_cdeg=HDG_INVALID):
     r = bytearray(NAV_SIZE)
     r[0] = TYPE_NAV
     struct.pack_into("<IIHiiHHBBHHB", r, 1, ms, itow, week,
                      lat, lon, sog_mms, cog_cdeg, sv, fix, hacc_cm, batt_mv, event)
     struct.pack_into("<3h", r, 30, *mag)
-    struct.pack_into("<H", r, 36, crc16(bytes(r[:36])))
+    struct.pack_into("<H", r, 36, hdg_cdeg)
+    struct.pack_into("<H", r, NAV_SIZE - 2, crc16(bytes(r[:NAV_SIZE - 2])))
     return bytes(r)
 
 
@@ -165,6 +180,11 @@ def main():
             if k == 0:
                 ev |= 0x02                         # 세션 첫 레코드
 
+            # 보드 방위(합성). 침로에서 5° 옆으로 비껴 간다. 20초마다 3초는 못 구함.
+            hdg_cdeg = int(((cog - tack * 5.0) % 360.0) * 100) % 36000
+            if int(t) % 20 < 3:
+                hdg_cdeg = HDG_INVALID
+
             if fix:
                 body += nav_record(
                     ms, tow0 + k * 100, week,
@@ -172,14 +192,14 @@ def main():
                     int(mps * 1000), int(cog * 100) % 36000,
                     11, 1, 80,
                     int(4100 - 200 * (t / dur_s)), ev,
-                    (int(-3.0 * 10), int(-21.0 * 10), int(-17.0 * 10)))
+                    (int(-3.0 * 10), int(-21.0 * 10), int(-17.0 * 10)), hdg_cdeg)
             else:
                 body += nav_record(
                     ms, 0xFFFFFFFF, 0xFFFF,
                     -0x80000000, -0x80000000,
                     0xFFFF, 0xFFFF, 0, 0, 0xFFFF,
                     int(4100 - 200 * (t / dur_s)), ev,
-                    (int(-3.0 * 10), int(-21.0 * 10), int(-17.0 * 10)))
+                    (int(-3.0 * 10), int(-21.0 * 10), int(-17.0 * 10)), hdg_cdeg)
 
     hdr = make_header(args.session,
                       0 if args.no_fix else args.utc,

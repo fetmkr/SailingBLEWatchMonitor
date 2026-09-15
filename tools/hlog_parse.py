@@ -20,7 +20,9 @@ from collections import Counter
 
 MAGIC = b"HHLG"
 HEADER_SIZE = 128
-TYPE_NAV, NAV_SIZE = 0xA1, 38
+TYPE_NAV = 0xA1
+# v1.1 까지 38바이트, v1.2 부터 40 (36~37 에 보드가 보여준 방위 hdg, 0.01°).
+NAV_SIZE_V1, NAV_SIZE_V2 = 38, 40
 TYPE_IMU = 0xB1
 # v1.0 은 27바이트(쿼터니언 8칸 포함), v1.1 부터 19바이트.
 # 자세는 가속·자이로 원본에서 후처리로 뽑는다.
@@ -33,6 +35,7 @@ COG_INVALID = 0xFFFF
 ACC_INVALID = 0xFFFF
 ITOW_INVALID = 0xFFFFFFFF
 WEEK_INVALID = 0xFFFF
+HDG_INVALID = 0xFFFF
 
 KNOTS_PER_MPS = 1.943844
 
@@ -96,6 +99,11 @@ def parse_nav(r: bytes) -> dict:
     (localMs, itow, week, lat, lon, sog, cog,
      numSv, fix, hAcc, batt, event) = struct.unpack_from("<IIHiiHHBBHHB", r, 1)
     mag = struct.unpack_from("<3h", r, 30)
+    # v1.2 줄에만 있다. 옛 줄은 None — 없는 값을 0 으로 채우지 않는다.
+    hdg = None
+    if len(r) >= NAV_SIZE_V2:
+        raw = struct.unpack_from("<H", r, 36)[0]
+        hdg = None if raw == HDG_INVALID else raw / 100.0
     return {
         "type": "NAV", "local_ms": localMs,
         "itow": None if itow == ITOW_INVALID else itow,
@@ -107,6 +115,7 @@ def parse_nav(r: bytes) -> dict:
         "num_sv": numSv, "fix": fix,
         "h_acc_m": None if hAcc == ACC_INVALID else hAcc / 100.0,
         "batt_mv": batt, "event": event, "mag": mag,
+        "hdg_deg": hdg,
     }
 
 
@@ -120,7 +129,7 @@ def parse_imu(r: bytes) -> dict:
     }
 
 
-def walk(buf: bytes, imu_size: int = IMU_SIZE_V1):
+def walk(buf: bytes, imu_size: int = IMU_SIZE_V1, nav_size: int = NAV_SIZE_V2):
     """레코드를 훑는다. (레코드, 파일오프셋, 재동기했나) 를 내놓는다."""
     i = HEADER_SIZE
     n = len(buf)
@@ -128,7 +137,7 @@ def walk(buf: bytes, imu_size: int = IMU_SIZE_V1):
     resynced = False
     while i < n:
         t = buf[i]
-        size = NAV_SIZE if t == TYPE_NAV else (imu_size if t == TYPE_IMU else 0)
+        size = nav_size if t == TYPE_NAV else (imu_size if t == TYPE_IMU else 0)
         ok = False
         if size and i + size <= n:
             want = struct.unpack_from("<H", buf, i + size - 2)[0]
@@ -180,14 +189,16 @@ def main() -> int:
 
     # 옛 파일은 IMU 레코드가 27바이트다. 머리글의 판 번호를 보고 고른다.
     imu_size = IMU_SIZE_V1 if (buf[4], buf[5]) >= (1, 1) else IMU_SIZE_V0
+    # NAV 도 판 번호로 고른다. v1.2 부터 40바이트.
+    nav_size = NAV_SIZE_V2 if (buf[4], buf[5]) >= (1, 2) else NAV_SIZE_V1
 
     navs, imus, resyncs = [], [], 0
-    for rec, _off, was_resync in walk(buf, imu_size):
+    for rec, _off, was_resync in walk(buf, imu_size, nav_size):
         if was_resync:
             resyncs += 1
         (navs if rec["type"] == "NAV" else imus).append(rec)
 
-    used = HEADER_SIZE + len(navs) * NAV_SIZE + len(imus) * imu_size
+    used = HEADER_SIZE + len(navs) * nav_size + len(imus) * imu_size
     lost = len(buf) - used
 
     print("─" * 60)
@@ -231,6 +242,13 @@ def main() -> int:
     if navs:
         mv = [r["batt_mv"] for r in navs]
         print(f"  배터리        {mv[0]} → {mv[-1]} mV")
+        if nav_size == NAV_SIZE_V2:
+            hd = [r["hdg_deg"] for r in navs if r["hdg_deg"] is not None]
+            miss = len(navs) - len(hd)
+            rng = f"{min(hd):.2f} ~ {max(hd):.2f}°" if hd else "값 없음"
+            print(f"  보드 방위     {rng}   없음 {miss:,}/{len(navs):,} ({100.0 * miss / len(navs):.1f}%)")
+        else:
+            print("  보드 방위     이 판(v1.1 이하)에는 칸이 없습니다")
         marks = [r for r in navs if r["event"] & 0x01]
         print(f"  마킹          {len(marks)}회" +
               (f"  (local_ms {', '.join(str(m['local_ms']) for m in marks[:5])})" if marks else ""))
@@ -244,12 +262,12 @@ def main() -> int:
 
     if args.csv:
         with open(args.csv + "_nav.csv", "w") as f:
-            f.write("local_ms,week,itow,lat,lon,sog_kn,cog_deg,num_sv,fix,h_acc_m,batt_mv,event,mx,my,mz\n")
+            f.write("local_ms,week,itow,lat,lon,sog_kn,cog_deg,num_sv,fix,h_acc_m,batt_mv,event,mx,my,mz,hdg_deg\n")
             for r in navs:
                 f.write(",".join("" if v is None else str(v) for v in [
                     r["local_ms"], r["week"], r["itow"], r["lat"], r["lon"],
                     r["sog_kn"], r["cog_deg"], r["num_sv"], r["fix"],
-                    r["h_acc_m"], r["batt_mv"], r["event"], *r["mag"]]) + "\n")
+                    r["h_acc_m"], r["batt_mv"], r["event"], *r["mag"], r["hdg_deg"]]) + "\n")
         with open(args.csv + "_imu.csv", "w") as f:
             f.write("local_ms,ax,ay,az,gx,gy,gz\n")
             for r in imus:

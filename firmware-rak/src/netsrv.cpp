@@ -459,7 +459,8 @@ void handleFiles() {
         const bool closed = (h[hlog::kOffClosed] == 1);
         if (!closed && sz > hlog::kHeaderSize) {
             const uint32_t imuSz = (h[5] >= 1) ? hlog::kImuSize : hlog::kImuSizeV0;
-            const uint32_t perSec = hlog::kNavSize * hlog::kRateNav +
+            const uint32_t navSz = hlog::navSizeFor(h[4], h[5]);   // v1.2 부터 40
+            const uint32_t perSec = navSz * hlog::kRateNav +
                                     imuSz * hlog::kRateImu;
             durS = (sz - hlog::kHeaderSize) / perSec;
         }

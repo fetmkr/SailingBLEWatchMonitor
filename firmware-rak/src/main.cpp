@@ -2277,7 +2277,10 @@ static float headingTiltDeg() {
 //
 // ★ 2026-09-15 까지 화면·BLE·TXT 는 평평 식(flatHeadingDeg), 앱은 또 다른 식이었다.
 //   같은 순간에 세 값이 달랐다. 체크리스트 03(기울여도 방위 유지)·05(OLED·워치·앱 같은 값)를
-//   통과하려면 기울기 보정 식 하나여야 한다. 세션 46 대조: 평평 흩어짐 6.8°, 보정 4.7°.
+//   통과하려면 기울기 보정 식 하나여야 한다.
+//   세션 46 대조 (당시 설정 +Y,+Z,155.6° · 2.5 kn 넘는 47,656줄 · HDG−COG 원형 흩어짐):
+//   평평 13.2°, 기울기 보정 9.0° (2026-09-15 재측정). 전에 적혀 있던 "보정 4.7°" 는
+//   옛 앱 comp(앞=보드 X 가정) 값이라 이 식의 값이 아니었다.
 // ★ 못 구하면 -1 (화면 `---`). 평평 식으로 몰래 바꿔 채우지 않는다.
 // ★ 수평일 때 두 식은 같은 값이다 (roll=pitch=0 이면 hx=앞, hy=오른쪽). 그래서 평평 식으로
 //   잡아 둔 장착 오프셋이 그대로 맞는다. 식은 HLG 머리글 hdg_formula=2 로 남긴다.
@@ -3448,6 +3451,15 @@ static hlog::NavSample buildNav(uint32_t nowMs) {
         a.mag[0] = (int16_t)lroundf(gMag.x * 10.0f);
         a.mag[1] = (int16_t)lroundf(gMag.y * 10.0f);
         a.mag[2] = (int16_t)lroundf(gMag.z * 10.0f);
+    }
+
+    // 보드가 이 순간 화면·BLE·TXT 에 보여주는 방위 (v1.2). 위 mag 와 같은 순간이다.
+    // 못 구하면(-1) 없음 표식. 계산에 쓴 설정은 머리글 81~105 에 있다.
+    const float h = boatHeadingDeg();
+    if (h >= 0.0f) {
+        long cd = lroundf(h * 100.0f);
+        if (cd >= 36000) cd = 0;
+        a.hdg = (uint16_t)cd;
     }
     return a;
 }

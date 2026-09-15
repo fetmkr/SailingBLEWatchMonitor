@@ -29,6 +29,10 @@ def request(s, sess, kind, off, n):
     s.reset_input_buffer()
     s.write(f"rec dump {sess} {kind} {off} {n}\n".encode())
     size, parts, t0 = None, [], time.time()
+    # ★ 이 요청의 S 줄(맞는 파일 종류)을 본 뒤에만 B·E 를 받는다.
+    #   앞 요청(이름 묻기 `rec dump <n> txt 0 1`)의 B·E 가 reset_input_buffer 뒤에 늦게 도착해서,
+    #   HLG 요청이 그걸 제 첫 조각으로 받고 S 를 못 본 채 끝났다 → "크기를 못 받음" (2026-09-15, 줄마다 찍어서 확인).
+    ext = "." + kind.upper()
     while time.time() - t0 < 60:
         ln = s.readline().decode("ascii", "replace").strip()
         if not ln:
@@ -41,8 +45,14 @@ def request(s, sess, kind, off, n):
         if tag == "X":
             raise RuntimeError(rest)
         if tag == "S":
-            size = int(rest.rsplit(" ", 1)[1])
-        elif tag == "B":
+            path, _, sz = rest.rpartition(" ")
+            if not path.upper().endswith(ext):
+                continue                              # 다른 파일의 늦게 온 줄
+            size, parts = int(sz), []
+            continue
+        if size is None:
+            continue                                  # S 전에 온 B·E 는 앞 요청의 것이다
+        if tag == "B":
             try:
                 parts.append(base64.b64decode(rest, validate=True))
             except Exception:

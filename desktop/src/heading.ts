@@ -86,7 +86,7 @@ export function describe(h: {
   hdgOffDeg: number; hdgDeclDeg: number; magHardIron: [number, number, number];
 }): string {
   if (h.hdgFormula === FORMULA_NONE) {
-    return "방위: 이 파일에는 보드의 방위 설정이 없습니다 (2026-09-15 전 펌웨어). HDG 를 그리지 않습니다 — 짐작으로 채우지 않습니다.";
+    return "방위: 이 파일에는 보드의 방위 설정이 없습니다 (2026-09-15 전 펌웨어). 설정을 짐작해서 그리지 않습니다 — 같은 세션 TXT 를 붙이면 보드 기록 HDG 와 추정 설정으로 재계산을 봅니다.";
   }
   const ax = (a: number, s: number) => `${s < 0 ? "−" : "+"}${"XYZ"[a] ?? "?"}`;
   const sgn = (v: number) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}`;

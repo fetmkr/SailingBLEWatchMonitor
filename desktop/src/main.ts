@@ -9,12 +9,17 @@
 import { fetch as tfetch } from "@tauri-apps/plugin-http";
 import * as hlog from "./hlog";
 import * as heading from "./heading";
+import * as btxt from "./boardtxt";
 import * as lib from "./library";
 import * as vid from "./video";
 import * as ble from "./ble";
 import * as usb from "./usb";
 import * as plat from "./platform";
 import { convertFileSrc, invoke, addPluginListener } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { writeFile as fsWriteFile } from "@tauri-apps/plugin-fs";
+import * as sx from "./sessionexport";
 import * as panes from "./panes";
 import * as tl from "./timeline";
 import { TrackMap, type TrackPoint } from "./map";
@@ -32,6 +37,10 @@ let fileMarks: number[] = [];
 let track: TrackPoint[] = [];
 /** 파일 요약(줄 수, Hz, IMU 종류…). 정보를 그릴 때마다 다시 넣는다 */
 let lastHdgNote = "";   // 방위를 무슨 식·설정으로 그렸나 (heading.describe) — 화면에 그대로
+/** 연 세션에 붙은 TXT (보드 기록 HDG · 설정 되찾기의 기준). 없으면 null */
+let openTxt: btxt.BoardTxt | null = null;
+/** 보드 기록 HDG 와 추정 설정 재계산을 어떻게 대 봤나 — 정보 칸에 그대로 */
+let hdgFitHtml = "";
 let metaHtml = "";
 /**
  * 디버그 값을 보여줄지.
@@ -152,7 +161,7 @@ function pickFile(inputId: string): Promise<File | null> {
 /** 고르기 칸이 끝났을 때(골랐든 취소했든) 기다리던 것을 닫는다.
  *  듣는 자리는 앱이 뜰 때 한 번만 단다. 부를 때마다 달면 그것도 쌓인다. */
 function wirePickers() {
-  for (const id of ["pickVideo", "pickData"]) {
+  for (const id of ["pickVideo", "pickData", "pickTxt"]) {
     const el = $(id) as HTMLInputElement;
     const settle = () => {
       const done = waiting.get(id);
@@ -214,6 +223,14 @@ function loadBytes(buf: Uint8Array, name: string): hlog.Session | null {
 
 /** 읽고, 검사하고, 보관함에 넣는다. TRANSFER.md §4 순서 그대로. */
 async function intake(buf: Uint8Array, name: string) {
+  // 전에 이 세션에 TXT 를 붙여 두었으면 같이 읽는다 (다시 받은 경우)
+  openTxt = null;
+  try {
+    const h = hlog.parseHeader(buf);
+    const before = library.entries.find((e) => e.id === lib.entryId(h.module, h.session));
+    const text = before ? await lib.readTxt(before) : null;
+    if (text) openTxt = btxt.parseTxt(text);
+  } catch { /* 머리글을 못 읽으면 loadBytes 가 이유를 보여준다 */ }
   const s = loadBytes(buf, name);
   if (!s) return;
   const c = hlog.check(s);
@@ -255,6 +272,9 @@ function buildSeries(s: hlog.Session) {
   const cog = new Float32Array(s.nav.length);
   const sv = new Float32Array(s.nav.length);
   const hdg = new Float32Array(s.nav.length);
+  // 보드가 그 줄을 만들 때 보여준 방위 (HLG v1.2 부터). 옛 파일은 전부 NaN
+  const boardHdg = new Float32Array(s.nav.length);
+  let boardHdgRows = 0;
   const hacc = new Float32Array(s.nav.length);
   const magX = new Float32Array(s.nav.length);
   const magY = new Float32Array(s.nav.length);
@@ -298,6 +318,8 @@ function buildSeries(s: hlog.Session) {
     // 세 센서를 한 축으로 맞춰 둔다. 그래야 "X 축" 이 어디서나 같은 방향이다.
     magX[i] = r.mag[1]; magY[i] = r.mag[0]; magZ[i] = -r.mag[2];
     batt[i] = r.battMv ? r.battMv / 1000 : NaN;
+    boardHdg[i] = r.boardHdgDeg ?? NaN;
+    if (r.boardHdgDeg !== null) boardHdgRows++;
 
     // ── 방위(HDG) — 보드와 같은 식 ──
     //   가속은 이 줄 시각 직전의 IMU 표본을 쓴다 (보드는 그 순간 들고 있던 가속). 자력이 0 이면 보드가
@@ -452,6 +474,54 @@ function buildSeries(s: hlog.Session) {
   //   박스가 비뚤게 놓인 만큼이 그대로 값에 남는다 (세션 27 은 힐 -7.0도,
   //   트림 +2.1도). 그건 사실이므로 지어내지 않고 그대로 둔다.
 
+  // ── 방위 줄 — 보드가 보여준 값과 다시 계산한 값을 갈라서 ──────────────────
+  //
+  //   HLG v1.2           "보드 기록 HDG" (줄마다) · 단추로 "머리글 설정으로 재계산"
+  //   옛 HLG + TXT       "보드 기록 HDG (TXT 10초)" 줄 하나 더 · HDG 줄은 "추정 설정으로 재계산"
+  //   옛 HLG, 머리글 설정  "머리글 설정으로 재계산"
+  //   옛 HLG 만           비어 있음 (설정을 짐작하지 않는다)
+  //
+  // ★ 설정을 되찾을 때 COG 는 안 쓴다. TXT 의 보드 방위만 기준이다 (boardtxt.ts).
+  const hdgName = n("HDG", "Heading");
+  const hdgRows: tl.Series[] = [];
+  hdgFitHtml = "";
+  if (boardHdgRows > 0) {
+    hdgRows.push({
+      code: "HDG", name: `${hdgName} · 보드 기록 HDG`, unit: "deg",
+      color: sc("hdg", "#ffd166"), xs: navX, ys: boardHdg, limit: [0, 360],
+      ...(hdgCfg ? { alt: { ys: hdg, name: `${hdgName} · 머리글 설정으로 재계산`, tag: "재계산" } } : {}),
+    });
+    hdgFitHtml = `<div class="row dim">보드 기록 HDG: HLG 줄마다 저장된 값 ${boardHdgRows.toLocaleString()}줄 / ${s.nav.length.toLocaleString()}줄</div>`;
+  } else {
+    let ys = hdg;
+    let suffix = hdgCfg ? " · 머리글 설정으로 재계산" : "";
+    if (openTxt) {
+      const pts = btxt.placeRows(openTxt, s, t0);
+      hdgRows.push({
+        code: "BHDG", name: "보드 기록 HDG (TXT 10초)", unit: "deg",
+        color: sc("hdg", "#ffd166"), xs: pts.xs, ys: pts.ys, limit: [0, 360],
+      });
+      let fit: btxt.Fit | null = null;
+      if (!hdgCfg && openTxt.formula === heading.FORMULA_FLAT) {
+        fit = btxt.fitFlat(s, pts);
+        if (fit) {
+          const est = new Float32Array(s.nav.length);
+          for (let i = 0; i < s.nav.length; i++) {
+            const m = s.nav[i].mag;
+            est[i] = m[0] || m[1] || m[2] ? heading.flatHeadingDeg(m, fit.cfg) : NaN;
+          }
+          ys = est;
+          suffix = " · 추정 설정으로 재계산";
+        }
+      }
+      hdgFitHtml = boardTxtHtml(openTxt, pts, fit, s, !!hdgCfg);
+    }
+    hdgRows.push({
+      code: "HDG", name: `${hdgName}${suffix}`, unit: "deg",
+      color: sc("hdg", "#ffd166"), xs: navX, ys, limit: [0, 360],
+    });
+  }
+
   // 이름은 영어가 기본이다. 클래스도 대회도 영어로 돌아가고, 코치가 다른
   // 분석 도구와 나란히 볼 때 말이 맞아야 한다. 누르면 고칠 수 있다.
   //
@@ -477,8 +547,7 @@ function buildSeries(s: hlog.Session) {
     { code: "SOG",   name: n("SOG", "Speed Over Ground"), unit: "kn",
       color: sc("sog", "#4ea1ff"), xs: navX, ys: sog, limit: [0],
       alt: { ys: sogCal, name: n("SOG cal", "SOG from position (5s)"), tag: "cal" } },
-    { code: "HDG",   name: n("HDG", "Heading"), unit: "deg",
-      color: sc("hdg", "#ffd166"), xs: navX, ys: hdg, limit: [0, 360] },
+    ...hdgRows,
     { code: "COG",   name: n("COG", "Course Over Ground"), unit: "deg",
       color: sc("cog", "#77d4e8"), xs: navX, ys: cog, limit: [0, 360],
       alt: { ys: cogCal, name: n("COG cal", "COG from position (5s)"), tag: "cal" } },
@@ -533,6 +602,41 @@ function buildSeries(s: hlog.Session) {
 }
 
 const clamp = (v: number) => (v > 1 ? 1 : v < -1 ? -1 : v);
+
+/** 보드 기록 HDG 를 어떻게 붙였고, 추정 설정이 구간마다 얼마나 맞았나. 숨기지 않고 다 적는다. */
+function boardTxtHtml(t: btxt.BoardTxt, p: btxt.BoardPoints, fit: btxt.Fit | null,
+                      s: hlog.Session, headerCfg: boolean): string {
+  const hms = (ms: number) => {
+    const x = Math.max(0, Math.round(ms / 1000));
+    return `${Math.floor(x / 3600)}:${String(Math.floor(x / 60) % 60).padStart(2, "0")}:${String(x % 60).padStart(2, "0")}`;
+  };
+  const f1 = (v: number) => Number.isFinite(v) ? v.toFixed(1) : "--";
+  const f2 = (v: number) => Number.isFinite(v) ? v.toFixed(2) : "--";
+  const sgn = (v: number) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}`;
+  const ax = (a: number, sg: number) => `${sg < 0 ? "−" : "+"}${"XYZ"[a]}`;
+  const out: string[] = [];
+  out.push(`<div class="row dim">보드 기록 HDG: TXT ${t.rows.length.toLocaleString()}줄 중 ${p.xs.length.toLocaleString()}줄을 그림 ` +
+           `(방위--- ${p.noHdg} · HLG 에 그 번호 줄 없음 ${p.outOfRange}) · TXT 끝의 NAV 줄 번호로 붙임 · ${t.formulaWhy}</div>`);
+  if (s.lostBytes > 0) {
+    out.push(`<div class="row dim">★ 이 HLG 는 못 읽은 바이트가 ${s.lostBytes} 있습니다. NAV 줄이 빠졌으면 뒤쪽 줄 번호가 밀립니다 — 아래 구간 차이를 보세요.</div>`);
+  }
+  if (headerCfg) {
+    out.push(`<div class="row dim">머리글에 방위 설정이 있어 설정을 추정하지 않습니다.</div>`);
+  } else if (!fit) {
+    out.push(`<div class="row dim">추정 설정으로 재계산: 안 함 — ${t.formula !== heading.FORMULA_FLAT
+      ? "TXT 가 기울기 보정 식인데 머리글 설정이 없습니다" : "자력값이 있는 점이 30개보다 적습니다"}</div>`);
+  } else {
+    const c = fit.cfg;
+    out.push(`<div class="row dim">추정 설정으로 재계산 — 평평 식 atan2(${ax(c.axisA, c.signA)}, ${ax(c.axisB, c.signB)}) · ` +
+             `장착각 ${sgn(c.offDeg)}° · 편각 0 (당시 펌웨어에 없음) · ` +
+             `보드 기록과 차이 중앙 ${f2(fit.medianDeg)}° · 90% ${f1(fit.p90Deg)}° (${fit.n.toLocaleString()}점) · ` +
+             `같은 값을 내는 축·부호 ${fit.sameOutput}가지 · 다음 후보 차이 중앙 ${f1(fit.runnerUpMedianDeg)}° · ` +
+             `COG 는 안 씀</div>`);
+    out.push(`<div class="row dim">구간별 차이 (보드 기록 − 재계산) · ` + fit.segments.map((g) =>
+      `${hms(g.fromMs)}~${hms(g.toMs)} ${g.n}점 중앙 ${f2(g.medianDeg)}° 90% ${f1(g.p90Deg)}°`).join(" · ") + `</div>`);
+  }
+  return out.join("");
+}
 
 // ── 마킹 ────────────────────────────────────────────────────────────────
 //
@@ -683,6 +787,7 @@ function renderHeader(s: hlog.Session, name: string, parseMs: number, bytes: num
     <div class="row"><b>${name}</b> <span class="dim">${(bytes / 1048576).toFixed(2)} MB · ${parseMs.toFixed(0)} ms 만에 읽음</span></div>
     <div class="row">세션 ${h.session} · 모듈 ${h.module} · ${when}</div>
     <div class="row dim">${lastHdgNote}</div>
+    ${hdgFitHtml}
     <div class="row dim">
       NAV ${s.nav.length.toLocaleString()}줄 (${c.navHz?.toFixed(2) ?? "?"} Hz) ·
       IMU ${s.imu.length.toLocaleString()}줄 (${c.imuHz?.toFixed(2) ?? "?"} Hz) ·
@@ -755,10 +860,189 @@ function mapUp(): TrackMap | null {
     tmap.setSeamark(($("seamark") as HTMLInputElement).checked);
     tmap.setColorBySog(($("bySog") as HTMLInputElement).checked);
     tmap.setTrack(track);
+    tmap.setDark(document.documentElement.dataset.theme !== "paper");
+    void offLoad();
     // 만드는 중에만 밖에서 만질 수 있게 내놓는다. 배포판에는 없다.
     if (import.meta.env.DEV) (window as any).__map = tmap;
   }
   return tmap;
+}
+
+// ── 오프라인 지도 — 영역 받기 ─────────────────────────────────────────────
+//
+// 지금 지도에 보이는 영역을, 사람이 고른 확대까지 받는다. **받기 전에 크기를 먼저 보여준다.**
+// 받는 일·타일 꺼내기는 Rust (src-tauri/src/offmap.rs). 원본은 Source Cooperative 의 Protomaps
+// (OpenStreetMap, ODbL). 브라우저로 띄운 개발 화면에서는 안 된다 — 이유를 말한다.
+interface OffRegion {
+  id: string; name: string; bbox: [number, number, number, number]; maxzoom: number;
+  bytes: number; tiles: number; created: number; sourceUrl: string; sourceOsmTime: string;
+}
+interface OffEstimate { tiles: number; bytes: number; requests: number }
+interface OffProgress {
+  id: string; phase: "dir" | "tiles" | "write" | "done" | "error" | "cancelled";
+  doneBytes: number; totalBytes: number; doneTiles: number; totalTiles: number; error?: string | null;
+}
+let offRegions: OffRegion[] = [];
+/** 마지막으로 크기를 계산한 조건과 결과 — 같은 조건이어야 받기로 넘어간다 */
+let offEst: { key: string; est: OffEstimate } | null = null;
+let offJob: OffProgress | null = null;
+let offMsg = "";
+let offZoom = 14;
+/** 지우기는 두 번 눌러야 한다. 첫 번째 누른 영역 id */
+let offDelArm: string | null = null;
+
+const offMB = (b: number) => (b / 1048576).toFixed(b < 10485760 ? 1 : 0);
+const offKey = (bb: number[], z: number) => `${bb.map((v) => v.toFixed(4)).join(",")}|${z}`;
+
+async function offLoad() {
+  if (!inApp) { offRegions = []; return; }
+  try {
+    offRegions = await invoke<OffRegion[]>("offmap_list");
+  } catch (e) {
+    offMsg = `받은 영역 목록을 못 읽었습니다 — ${e}`;
+  }
+  tmap?.setOffline(offRegions.reduce((m, r) => Math.max(m, r.maxzoom), 0));
+  if (!$("offPanel").hidden) renderOffPanel();
+}
+
+function onOffProgress(p: OffProgress) {
+  offJob = p;
+  if (p.phase === "done") {
+    offMsg = `받았습니다 — ${offMB(p.doneBytes)} MB · 타일 ${p.doneTiles.toLocaleString()}개`;
+    offJob = null;
+    void offLoad();
+  } else if (p.phase === "error") {
+    offMsg = `받기 실패 — ${p.error ?? "이유 없음"}`;
+    offJob = null;
+  } else if (p.phase === "cancelled") {
+    offMsg = "멈췄습니다. 받다 만 파일은 지웠습니다.";
+    offJob = null;
+  }
+  if (!$("offPanel").hidden) renderOffPanel();
+}
+
+async function offEstimate(): Promise<OffEstimate | null> {
+  const bb = tmap?.viewBounds();
+  if (!bb) { offMsg = "지도가 아직 안 떴습니다."; return null; }
+  offMsg = "크기를 계산하는 중… (원본의 목차만 읽습니다)";
+  renderOffPanel();
+  try {
+    const est = await invoke<OffEstimate>("offmap_estimate", { bbox: bb, maxzoom: offZoom });
+    offEst = { key: offKey(bb, offZoom), est };
+    offMsg = "";
+    return est;
+  } catch (e) {
+    offMsg = `크기를 못 구했습니다 — ${e}`;
+    return null;
+  }
+}
+
+async function offDownload() {
+  if (offJob) { offMsg = "이미 받는 중입니다. 끝나거나 멈춘 뒤에 다시 누르세요."; renderOffPanel(); return; }
+  const bb = tmap?.viewBounds();
+  if (!bb) { offMsg = "지도가 아직 안 떴습니다."; renderOffPanel(); return; }
+  // ★ 크기를 보여주지 않고 받지 않는다. 조건이 바뀌었으면 다시 계산하고 한 번 더 누르게 한다.
+  if (!offEst || offEst.key !== offKey(bb, offZoom)) {
+    await offEstimate();
+    if (offEst) offMsg = "크기를 먼저 보여드립니다. 이대로 받으려면 받기를 한 번 더 누르세요.";
+    renderOffPanel();
+    return;
+  }
+  const name = (($("offName") as HTMLInputElement | null)?.value.trim()) ||
+               `영역 ${new Date().toLocaleString()}`;
+  try {
+    const id = await invoke<string>("offmap_download", { name, bbox: bb, maxzoom: offZoom });
+    offJob = { id, phase: "dir", doneBytes: 0, totalBytes: offEst.est.bytes,
+               doneTiles: 0, totalTiles: offEst.est.tiles };
+    offMsg = "";
+  } catch (e) {
+    offMsg = `받기를 시작 못 했습니다 — ${e}`;
+  }
+  renderOffPanel();
+}
+
+function renderOffPanel() {
+  const box = $("offPanel");
+  if (!inApp) {
+    box.innerHTML = `<div class="offHead"><b>오프라인 지도</b><button id="offClose">닫기</button></div>
+      <div class="dim">앱에서만 됩니다. 브라우저로 띄운 화면에는 파일을 받아 둘 자리가 없습니다.</div>`;
+    ($("offClose") as HTMLButtonElement).onclick = () => { box.hidden = true; };
+    return;
+  }
+  const bb = tmap?.viewBounds();
+  const f3 = (v: number) => v.toFixed(3);
+  const est = offEst && bb && offEst.key === offKey(bb, offZoom) ? offEst.est : null;
+  const prog = offJob
+    ? `받는 중 (${offJob.phase === "dir" ? "목차" : offJob.phase === "write" ? "파일 쓰기" : "타일"}) — ` +
+      `${offMB(offJob.doneBytes)} / ${offMB(offJob.totalBytes)} MB · ` +
+      `타일 ${offJob.doneTiles.toLocaleString()} / ${offJob.totalTiles.toLocaleString()}`
+    : "";
+  box.innerHTML = `
+    <div class="offHead"><b>오프라인 지도 — 영역 받기</b><button id="offClose">닫기</button></div>
+    <div class="dim">지금 지도에 보이는 영역을 받아 둡니다. 받은 영역은 바탕을 "오프라인 지도" 로 두면 인터넷 없이 보입니다.
+      원본: Source Cooperative 의 Protomaps (© OpenStreetMap, ODbL). 해도·위성은 미리 받기를 허락하지 않아 오프라인이 안 됩니다.</div>
+    <div class="offRow">영역: ${bb ? `경도 ${f3(bb[0])} ~ ${f3(bb[2])} · 위도 ${f3(bb[1])} ~ ${f3(bb[3])}` : "지도가 아직 안 떴습니다"}</div>
+    <label class="offRow">최대 확대
+      <select id="offZoom">${[10, 11, 12, 13, 14, 15].map((z) =>
+        `<option value="${z}" ${z === offZoom ? "selected" : ""}>${z}</option>`).join("")}</select>
+      <span class="dim">클수록 자세하고 크기가 커집니다 (한 단계에 약 2배)</span>
+    </label>
+    <label class="offRow">이름 <input id="offName" placeholder="예) 아라뱃길" /></label>
+    <div class="offRow">
+      <button id="offEst">크기 계산</button>
+      <button id="offGet">받기</button>
+      ${offJob ? `<button id="offStop">멈추기</button>` : ""}
+    </div>
+    <div class="offRow">${est
+      ? `예상 크기 <b>${offMB(est.bytes)} MB</b> · 타일 ${est.tiles.toLocaleString()}개 · 요청 ${est.requests.toLocaleString()}번`
+      : '<span class="dim">크기를 아직 계산하지 않았습니다</span>'}</div>
+    ${prog ? `<div class="offRow">${prog}</div>` : ""}
+    ${offMsg ? `<div class="offRow ${/실패|못 /.test(offMsg) ? "bad" : ""}">${esc(offMsg)}</div>` : ""}
+    <div><b>받은 영역</b> <span class="dim">${offRegions.length}개 · ${offMB(offRegions.reduce((s, r) => s + r.bytes, 0))} MB</span></div>
+    ${offRegions.map((r) => `
+      <div class="offItem">
+        <div><b>${esc(r.name)}</b> <span class="dim">확대 ${r.maxzoom}까지 · ${offMB(r.bytes)} MB · 타일 ${r.tiles.toLocaleString()}개</span></div>
+        <div class="dim">경도 ${f3(r.bbox[0])} ~ ${f3(r.bbox[2])} · 위도 ${f3(r.bbox[1])} ~ ${f3(r.bbox[3])} ·
+          받은 날 ${new Date(r.created * 1000).toLocaleDateString()} · 지도 데이터 ${esc(r.sourceOsmTime || "날짜 모름")}</div>
+        <div class="offRow"><button data-go="${r.id}">이 영역 보기</button>
+          <button data-del="${r.id}">${offDelArm === r.id ? "한 번 더 누르면 지웁니다" : "지우기"}</button></div>
+      </div>`).join("")}`;
+
+  ($("offClose") as HTMLButtonElement).onclick = () => { box.hidden = true; };
+  ($("offZoom") as HTMLSelectElement).onchange = (e) => {
+    offZoom = +(e.target as HTMLSelectElement).value;
+    renderOffPanel();
+  };
+  ($("offEst") as HTMLButtonElement).onclick = async () => { await offEstimate(); renderOffPanel(); };
+  ($("offGet") as HTMLButtonElement).onclick = () => void offDownload();
+  const stop = document.getElementById("offStop");
+  if (stop && offJob) stop.onclick = () => void invoke("offmap_cancel", { id: offJob!.id });
+  box.querySelectorAll<HTMLButtonElement>("[data-go]").forEach((b) => {
+    b.onclick = () => {
+      const r = offRegions.find((x) => x.id === b.dataset.go);
+      const m = mapUp();
+      if (!r || !m) return;
+      const sel = $("baseSel") as HTMLSelectElement;
+      sel.value = "offline";
+      m.setBase("offline");
+      m.fitBounds(r.bbox);
+    };
+  });
+  box.querySelectorAll<HTMLButtonElement>("[data-del]").forEach((b) => {
+    b.onclick = async () => {
+      const id = b.dataset.del!;
+      if (offDelArm !== id) { offDelArm = id; renderOffPanel(); return; }
+      offDelArm = null;
+      try {
+        await invoke("offmap_delete", { id });
+        offMsg = "지웠습니다.";
+      } catch (e) {
+        offMsg = `못 지웠습니다 — ${e}`;
+      }
+      await offLoad();
+      renderOffPanel();
+    };
+  });
 }
 
 /** 항적이 바뀌었을 때. 위치가 없으면 안내를 띄운다. */
@@ -1727,6 +2011,8 @@ async function openEntry(id: string) {
   setStatus("읽는 중…");
   openId = id;
   library = lib.noteOpen(library, id);   // 앱을 껐다 켜면 이걸 다시 연다
+  const txt = await lib.readTxt(e);
+  openTxt = txt ? btxt.parseTxt(txt) : null;
   const s2 = loadBytes(await lib.readEntry(e), e.title || e.sailor || e.file);
   // 예전에 0 으로 적어 둔 항목이면 지금 되찾은 값으로 고쳐 준다.
   // 다시 받을 필요가 없다 — 원본은 이미 보관함에 있다.
@@ -1777,6 +2063,14 @@ function renderDetails() {
       <span class="dim">${e.module} · 세션 ${e.session} · ${(e.bytes / 1048576).toFixed(2)} MB</span>
       ${e.verified ? "<span class='good'>검사 통과</span>" : "<span class='bad'>검사 실패</span>"}
     </div>
+    <div class="drow">
+      <span class="dim">${e.txtFile ? "TXT 붙음 — 보드 기록 HDG 를 봅니다" : "TXT 없음 — 붙이면 보드가 그때 보여준 방위를 봅니다"}</span>
+      <button id="attachTxt">${e.txtFile ? "TXT 다시 붙이기" : "TXT 붙이기"}</button>
+    </div>
+    <div class="drow">
+      <button id="exportSess" title="원본 HLG·TXT · CSV · GPX · 메모를 zip 하나로">내보내기</button>
+      <button id="delSess">${sessDelArm === e.id ? "한 번 더 누르면 파일까지 지웁니다" : "세션 지우기"}</button>
+    </div>
     <div id="meta">${e.id === openId ? metaHtml : ""}</div>
     ${FIELDS.map(([k, label, ph]) => `
       <label class="drow"><span>${label}</span>
@@ -1794,6 +2088,97 @@ function renderDetails() {
     library = lib.update(library, e.id, { starred: !e.starred });
     renderSide();
   };
+  ($("attachTxt") as HTMLButtonElement).onclick = () => attachTxt(e.id);
+  ($("exportSess") as HTMLButtonElement).onclick = () => void exportSession(e.id);
+  ($("delSess") as HTMLButtonElement).onclick = () => void deleteSession(e.id);
+}
+
+/** 세션 지우기는 두 번 눌러야 한다. 첫 번째 누른 세션 id */
+let sessDelArm: string | null = null;
+
+/**
+ * 세션을 목록과 파일까지 지운다 (앱 안의 HLG · TXT · 메모). 보드 카드의 원본은 안 건드린다.
+ * 지금 연 세션이면 화면에 남은 그래프·지도가 없는 파일을 가리키게 되므로 앱을 빈 화면으로 다시 띄운다.
+ */
+async function deleteSession(id: string) {
+  const e = library.entries.find((x) => x.id === id);
+  if (!e) return;
+  if (sessDelArm !== id) {
+    sessDelArm = id;
+    renderDetails();
+    setStatus(`세션 ${e.session} — 한 번 더 누르면 앱 안의 파일과 적어 둔 메모까지 지웁니다. 되돌릴 수 없습니다.`, "bad");
+    return;
+  }
+  sessDelArm = null;
+  const wasOpen = openId === id;
+  try {
+    library = await lib.removeWithFiles(library, id);
+  } catch (err) {
+    setStatus(`못 지웠습니다 — ${err}. 목록도 그대로 두었습니다.`, "bad");
+    renderDetails();
+    return;
+  }
+  if (wasOpen) { location.reload(); return; }
+  renderSide();
+  setStatus(`세션 ${e.session} 을 지웠습니다.`, "good");
+}
+
+
+/** 지금 연 세션을 zip 하나로 내보낸다. 저장할 자리는 사람이 고른다. */
+async function exportSession(id: string) {
+  const e = library.entries.find((x) => x.id === id);
+  if (!e || id !== openId || !session) { setStatus("세션을 먼저 여세요.", "bad"); return; }
+  if (!inApp) { setStatus("내보내기는 앱에서만 됩니다. 브라우저 화면에는 저장할 자리를 고르는 창이 없습니다.", "bad"); return; }
+  const base = `${e.module.replace(/:/g, "")}_S${String(e.session).padStart(5, "0")}`;
+  const dest = await saveDialog({
+    title: "세션 내보내기", defaultPath: `${base}.zip`,
+    filters: [{ name: "zip", extensions: ["zip"] }],
+  });
+  if (!dest) return;                         // 사람이 취소했다
+  const t0 = performance.now();
+  try {
+    setStatus("내보내는 중… 원본 읽기");
+    const hlgBytes = await lib.readEntry(e);
+    const txtText = await lib.readTxt(e);
+    const bytes = await sx.buildZip({
+      base, session, series, entry: e, marks, hlgBytes, txtText, openTxt,
+      hdgNote: lastHdgNote,
+      hdgFitText: hdgFitHtml.replace(/<\/div>/g, "\n").replace(/<[^>]+>/g, "").trim(),
+      utcMs: sx.utcOfSession(session),
+    }, (what) => setStatus(`내보내는 중… ${what}`));
+    setStatus("내보내는 중… 파일 쓰기");
+    await fsWriteFile(dest, bytes);
+    setStatus(`내보냈습니다 — ${dest} · ${(bytes.length / 1048576).toFixed(1)} MB · ${((performance.now() - t0) / 1000).toFixed(1)}초`, "good");
+  } catch (err) {
+    setStatus(`내보내기 실패 — ${err}`, "bad");
+  }
+}
+
+/**
+ * 같은 세션의 TXT 를 붙인다. 세션 번호가 다르면 안 붙이고 이유를 말한다.
+ * TXT 는 글자 그대로 보관함에 둔다 (logs/<id>.TXT). HLG 는 안 건드린다.
+ */
+async function attachTxt(id: string) {
+  const e = library.entries.find((x) => x.id === id);
+  if (!e) return;
+  const f = await pickFile("pickTxt");
+  if (!f) return;
+  const text = await f.text();
+  const note = await keepTxt(e, text);
+  setStatus(`${f.name} — ${note.msg}`, note.ok ? "good" : "bad");
+}
+
+/** TXT 를 검사해서 붙이고 다시 연다. 보드에서 받을 때와 손으로 붙일 때 같은 길. */
+async function keepTxt(e: lib.Entry, text: string): Promise<{ ok: boolean; msg: string }> {
+  const t = btxt.parseTxt(text);
+  if (t.session === null) return { ok: false, msg: "TXT 머리에서 세션 번호를 못 찾아 안 붙였습니다" };
+  if (t.session !== e.session) {
+    return { ok: false, msg: `세션 번호가 다릅니다 (TXT ${t.session}, HLG ${e.session}) — 안 붙였습니다` };
+  }
+  if (!t.rows.length) return { ok: false, msg: "TXT 에서 기록 줄을 하나도 못 읽어 안 붙였습니다" };
+  library = await lib.putTxt(library, e.id, text);
+  await openEntry(e.id);
+  return { ok: true, msg: `세션 ${t.session} TXT ${t.rows.length.toLocaleString()}줄을 붙였습니다` };
 }
 
 /**
@@ -1977,10 +2362,23 @@ async function fetchFile(name: string, size?: number) {
     const sec = (performance.now() - t0) / 1000;
     setProgress(`${name} 검사하는 중…`);
     await intake(buf, name);
+    // 같은 이름의 TXT 도 받아 붙인다. 보드 목록에는 TXT 가 안 나오지만 /file/ 은 준다 (netsrv.cpp).
+    // 못 받아도 HLG 는 이미 들어갔다 — 이유만 덧붙인다.
+    let txtNote = "";
+    const ent = entryNow();
+    if (ent && /\.HLG$/i.test(name)) {
+      try {
+        const tr = await askBoard(`/file/${name.replace(/\.HLG$/i, ".TXT")}`, 60000);
+        if (tr.ok) txtNote = ` · TXT ${(await keepTxt(ent, await tr.text())).msg}`;
+        else txtNote = ` · TXT 못 받음 (HTTP ${tr.status})`;
+      } catch (e) {
+        txtNote = ` · TXT 못 받음 (${boardWhy(e)})`;
+      }
+    }
     setProgress(null);
     setStatus(
       `${name} 받았습니다 — ${MB(buf.length)} MB, ${sec.toFixed(1)}초 ` +
-      `(${(buf.length / 1024 / sec).toFixed(0)} KB/초)`, "good");
+      `(${(buf.length / 1024 / sec).toFixed(0)} KB/초)${txtNote}`, "good");
   } catch (e) {
     setProgress(null);
     const also = othersDoing();
@@ -2070,6 +2468,7 @@ function applyTheme() {
   const real = theme !== "auto" ? theme
              : sysLight.matches ? "paper" : darkPick;
   document.documentElement.dataset.theme = real;
+  tmap?.setDark(real !== "paper");     // 오프라인 지도 색도 판을 따라간다
   if (theme !== "auto" && theme !== "paper") {
     darkPick = theme;
     localStorage.setItem(DARK_KEY, theme);
@@ -2833,6 +3232,18 @@ function wire() {
   ($("bySog") as HTMLInputElement).onchange = (e) =>
     mapUp()?.setColorBySog((e.target as HTMLInputElement).checked);
   $("mapFit").onclick = () => mapUp()?.fit();
+  $("offBtn").onclick = () => {
+    const box = $("offPanel");
+    box.hidden = !box.hidden;
+    if (!box.hidden) { void offLoad(); renderOffPanel(); }
+  };
+  // 오프라인 바탕을 골랐는데 받은 영역이 없으면 빈 지도가 된다. 이유를 말한다.
+  baseSel.addEventListener("change", () => {
+    if (baseSel.value === "offline" && !offRegions.length) {
+      setStatus("받은 오프라인 영역이 없습니다 — 지도 아래 '영역 받기' 를 누르세요.", "bad");
+    }
+  });
+  if (inApp) void listen<OffProgress>("offmap-progress", (ev) => onOffProgress(ev.payload));
   document.querySelectorAll<HTMLElement>("#dirSeg button").forEach((b) => {
     b.onclick = () => {
       centerDir = b.dataset.dir as panes.Dir;
@@ -3459,6 +3870,8 @@ if (import.meta.env.DEV) {
 if (import.meta.env.DEV) {
   void lib.load().then((l) => { if (!l.lastOpen) void loadSample(); });
 }
+
+
 
 
 

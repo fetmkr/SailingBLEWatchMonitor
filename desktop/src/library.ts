@@ -18,7 +18,7 @@
 // **원본과 붙인 값을 갈라 두는 게 핵심이다.**
 
 import {
-  BaseDirectory, mkdir, readFile, readTextFile, writeFile, writeTextFile, exists,
+  BaseDirectory, mkdir, readFile, readTextFile, writeFile, writeTextFile, exists, remove as fsRemove,
 } from "@tauri-apps/plugin-fs";
 import type { Header } from "./hlog";
 
@@ -83,6 +83,15 @@ export interface Entry {
   markNotes?: Record<string, string>;   // 시각(ms) → 메모
   markHidden?: number[];                // 감춘 파일 마킹의 시각(ms)
   markAdded?: { ms: number; note: string }[];
+
+  /**
+   * 같은 세션의 TXT 사본 (logs/<id>.TXT). 없으면 undefined.
+   *
+   * 옛 HLG(2026-09-15 전 펌웨어)에는 보드가 보여준 방위도, 계산에 쓴 설정도 없다.
+   * TXT 에는 보드가 그때 계산한 방위가 10초마다 있다. 그걸 **보드 기록 HDG** 로 보여주고,
+   * 설정을 되찾는 기준으로 쓴다. 원본 HLG 는 안 건드린다.
+   */
+  txtFile?: string;
 }
 
 export interface Library {
@@ -191,6 +200,35 @@ export async function readEntry(e: Entry): Promise<Uint8Array> {
   return new Uint8Array(b);
 }
 
+/** TXT 사본을 그 세션 옆에 둔다. 글자 그대로 저장한다 — 고치지 않는다. */
+export async function putTxt(lib: Library, id: string, text: string): Promise<Library> {
+  const file = `${DIR}/${id}.TXT`;
+  if (inApp) {
+    await mkdir(DIR, { baseDir: BaseDirectory.AppData, recursive: true });
+    await writeTextFile(file, text, { baseDir: BaseDirectory.AppData });
+  } else {
+    memFiles.set(file, new TextEncoder().encode(text));
+  }
+  const e = lib.entries.find((x) => x.id === id);
+  if (e) e.txtFile = file;
+  await save(lib);
+  return lib;
+}
+
+/** TXT 사본을 읽는다. 없으면 null. */
+export async function readTxt(e: Entry): Promise<string | null> {
+  if (!e.txtFile) return null;
+  try {
+    if (!inApp) {
+      const b = memFiles.get(e.txtFile);
+      return b ? new TextDecoder().decode(b) : null;
+    }
+    return await readTextFile(e.txtFile, { baseDir: BaseDirectory.AppData });
+  } catch {
+    return null;
+  }
+}
+
 export async function hasFile(e: Entry): Promise<boolean> {
   if (!inApp) return memFiles.has(e.file);
   try {
@@ -235,6 +273,29 @@ export async function remove(lib: Library, id: string): Promise<Library> {
   // 파일은 남긴다. 목록에서만 뺀다 — 실수로 훈련 기록이 날아가면 안 된다.
   const i = lib.entries.findIndex((e) => e.id === id);
   if (i >= 0) lib.entries.splice(i, 1);
+  await save(lib);
+  return lib;
+}
+
+/**
+ * 세션을 **파일까지** 지운다 (2026-09-15, 사용자 결정 "목록과 파일 둘 다, 두 번 눌러야 함").
+ *
+ * 앱 안의 HLG · 붙인 TXT · 적어 둔 메모가 사라진다. 되돌릴 수 없다. 보드 카드의 원본은 안 건드린다.
+ * 파일이 이미 없으면 그건 실패로 치지 않는다. 다른 이유로 못 지우면 목록도 그대로 두고 던진다 —
+ * 목록에서만 빠지고 파일이 남으면 용량만 차지하고 아무도 모르게 된다.
+ */
+export async function removeWithFiles(lib: Library, id: string): Promise<Library> {
+  const e = lib.entries.find((x) => x.id === id);
+  if (!e) return lib;
+  const files = [e.file, e.txtFile].filter((f): f is string => !!f);
+  for (const f of files) {
+    if (!inApp) { memFiles.delete(f); continue; }
+    if (await exists(f, { baseDir: BaseDirectory.AppData })) {
+      await fsRemove(f, { baseDir: BaseDirectory.AppData });
+    }
+  }
+  lib.entries.splice(lib.entries.indexOf(e), 1);
+  if (lib.lastOpen === id) lib.lastOpen = undefined;
   await save(lib);
   return lib;
 }

@@ -743,6 +743,28 @@ canvas {
 }
 
 /* 위치가 없는 세션이면 지도 대신 이 말을 덮어 둔다 */
+/* 오프라인 지도 — 영역 받기 칸. 지도 위에 뜬다 */
+#offPanel {
+  position: absolute; right: 8px; bottom: 52px; z-index: 5;
+  width: min(380px, calc(100% - 16px)); max-height: 72%; overflow: auto;
+  background: var(--tl-plot); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; font-size: var(--fs-sm);
+  display: flex; flex-direction: column; gap: 8px;
+}
+/* ★ 위의 display:flex 가 hidden 속성(브라우저 기본 display:none)을 이긴다. 닫혀 있어도 빈 까만 띠(380×22)로
+   떠 있었다 (2026-09-15, DOM 으로 잼). hidden 이면 확실히 숨긴다. */
+#offPanel[hidden] { display: none; }
+#offPanel .offRow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; word-break: keep-all; }
+#offPanel .offHead { display: flex; justify-content: space-between; align-items: center; }
+#offPanel button, #offPanel select, #offPanel input { min-height: var(--ctl); }
+#offPanel input, #offPanel select {
+  background: var(--input); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 5px; padding: 3px 6px; font-size: var(--fs-sm);
+}
+#offPanel .offItem { border-top: 1px solid var(--line); padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+#offPanel .bad { color: var(--bad, #ff6b6b); }
+
 #mapNone {
   position: absolute; inset: 0; display: none;
   align-items: center; justify-content: center; text-align: center;

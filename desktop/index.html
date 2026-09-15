@@ -99,7 +99,9 @@
               <label class="chk"><input id="seamark" type="checkbox" /> 해도</label>
               <label class="chk"><input id="bySog" type="checkbox" checked /> 속도 색칠</label>
               <button id="mapFit" title="항적 전체가 보이게">항적 맞춤</button>
+              <button id="offBtn" title="지금 보이는 영역을 받아 인터넷 없이 봅니다">영역 받기</button>
             </div>
+            <div id="offPanel" hidden></div>
             <div id="mapNone" class="dim">위치가 없는 세션입니다.</div>
           </div>
         </div>
@@ -245,6 +247,7 @@
         맥에서는 아무 차이가 없다. 고르기 창이 하나뿐이다. -->
     <input id="pickVideo" type="file" hidden />
     <input id="pickData"  type="file" accept=".HLG,.hlg" hidden />
+    <input id="pickTxt"   type="file" accept=".TXT,.txt" hidden />
 
     <div id="transport">
       <button id="play" title="재생 · 멈춤">▶</button>
