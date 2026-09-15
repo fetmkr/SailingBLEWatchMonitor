@@ -5,10 +5,13 @@
 WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 PlatformIO 는 최신 7.1.3 도 아두이노 2.0.17 이다.
 **도구:** ESP-IDF v6.1 공식 `idf.py` (사용자 결정 2026-09-15). 설치는 `~/esp/esp-idf`, 도구는 `~/.espressif`.
 
+    C=/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/certifi/cacert.pem
+    export SSL_CERT_FILE=$C REQUESTS_CA_BUNDLE=$C          # python.org Python 에 인증서 파일이 없다
     . ~/esp/esp-idf/export.sh
     cd firmware-idf
-    idf.py build
-    idf.py -p /dev/cu.usbmodem1101 flash monitor
+    idf.py -B ~/esp/build-sail build                        # ★ -B 필수 — 저장소 경로 빈칸 우회
+    idf.py -B ~/esp/build-sail -p /dev/cu.usbmodem1101 flash
+    # 로그는 pyserial 로 포트를 열어 받는다 (열면 리셋). idf.py monitor 는 대화형이라 안 씀
 
 ## 규칙
 
@@ -53,6 +56,14 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 |---|---|---|---|
 | 0 | 뼈대 — 부팅 로그, 핀, 센서 전원, LED, NVS 읽기, USB 콘솔 | 켜짐 로그 · NVS `sail` 설정값이 firmware-rak 이 쓴 값 그대로 읽힘 · GPS 바이트 들어옴 | ✅ 09-15 (아래) |
 
+| 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | ❌ |
+| 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | ❌ |
+| 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | ❌ |
+| 4 | 화면 (U8g2) | 같은 화면 | ❌ |
+| 5 | WiFi · HTTP 파일 전송 · mDNS — **TCP 창 키우기** | `/api/files`·`/file/` Range · 해시 · 받기 속도를 firmware-rak 과 같은 자리에서 비교 | ❌ |
+| 6 | LoRa (RadioLib, 칩 버그 셋) | 두 보드 사이 주고받기 | ❌ |
+| 7 | 전원·깊은잠·버튼·코어덤프 | 헛깸 0 · 끄는 순서 · 코어덤프 0xFF0000 | ❌ |
+
 **0단계 결과 (2026-09-15, 보드 3C:DC:75:70:2F:B4)**
 - 부팅: IDF v6.1 · QIO 80 MHz 16 MB · PSRAM 8 MB 메모리 시험 통과 · 240 MHz · 파티션 표 firmware-rak 과 같음
 - NVS `sail` 28키 그대로 읽힘 — hdg_a 1 · hdg_b 2 · hdg_off 155.700 (세션 46 분석 값과 같음) · sess_n 94 (오늘 마지막 시험 세션) · float 는 아두이노 Preferences 대로 4바이트 blob
@@ -83,13 +94,6 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 - ★ 빌드 출력은 `idf.py -B ~/esp/build-sail` 로 둔다. 저장소 경로의 빈칸·굽은 따옴표(`hojun’s mbp`) 때문에 picolibc.specs 경로가 깨진다
   (ESP-IDF 문서 "does not support spaces in the paths"). **우회책**이다 — 근본 해결은 빈칸 없는 경로로 저장소를 옮기는 것
 - ★ install.sh 는 python.org Python 3.13 에 인증서 파일이 없어 `CERTIFICATE_VERIFY_FAILED`. 명령에만 `SSL_CERT_FILE=<certifi cacert.pem>` 을 줘서 설치 (시스템 설정은 안 바꿈)
-| 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | ❌ |
-| 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | ❌ |
-| 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | ❌ |
-| 4 | 화면 (U8g2) | 같은 화면 | ❌ |
-| 5 | WiFi · HTTP 파일 전송 · mDNS — **TCP 창 키우기** | `/api/files`·`/file/` Range · 해시 · 받기 속도를 firmware-rak 과 같은 자리에서 비교 | ❌ |
-| 6 | LoRa (RadioLib, 칩 버그 셋) | 두 보드 사이 주고받기 | ❌ |
-| 7 | 전원·깊은잠·버튼·코어덤프 | 헛깸 0 · 끄는 순서 · 코어덤프 0xFF0000 | ❌ |
 
 ## 작업 나누기 (1·2단계, 2026-09-15)
 
