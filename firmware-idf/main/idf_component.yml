@@ -1,0 +1,5 @@
+## firmware-idf 가 IDF 컴포넌트 매니저로 받는 부품 (PORTING.md 라이브러리 표)
+dependencies:
+  idf: ">=5.3.0"
+  # BLE — firmware-rak 의 NimBLE-Arduino 2.5.1 자리. 같은 저자(h2zero)의 IDF 판
+  h2zero/esp-nimble-cpp: "2.5.0"

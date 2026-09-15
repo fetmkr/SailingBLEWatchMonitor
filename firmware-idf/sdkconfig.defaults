@@ -28,3 +28,20 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 # ── SD 카드 FAT — 세션 파일 이름이 8.3 보다 길다 (S00046_20260913-1333_nosat.HLG) ──
 #   긴 이름 버퍼는 힙에. 스택에 올리지 않는다 (memory: esp32-stack-and-leak-rules)
 CONFIG_FATFS_LFN_HEAP=y
+
+# ── BLE (NimBLE) — firmware-rak 이 실제로 쓴 NimBLE-Arduino nimconfig.h 값에 맞춘다 (3단계 보고) ──
+#   이름은 ~/esp/esp-idf/components/bt/Kconfig · host/nimble/Kconfig.in · controller/esp32c3/Kconfig.in 에서 확인 (2026-09-15)
+#   ★ 호스트 작업 스택 4096 — firmware-rak 실제 값 (CLAUDE.md 의 "5120" 은 틀린 기록, PORTING.md)
+#   ★ 기본 송신 P9 는 광고 전 기본값. 코드의 setPower(ESP_PWR_LVL_P9) 는 firmware-rak 과 같이 실제 +12 dBm (사용자 결정 대기)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=3
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=4096
+CONFIG_BT_NIMBLE_PINNED_TO_CORE_0=y
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=255
+CONFIG_BT_NIMBLE_MAX_BONDS=3
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+CONFIG_BT_NIMBLE_LOG_LEVEL_NONE=y
+CONFIG_BT_CTRL_BLE_MAX_ACT=6
+CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P9=y

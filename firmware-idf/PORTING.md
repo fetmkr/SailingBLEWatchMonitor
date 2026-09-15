@@ -57,7 +57,7 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | 0 | 뼈대 — 부팅 로그, 핀, 센서 전원, LED, NVS 읽기, USB 콘솔 | 켜짐 로그 · NVS `sail` 설정값이 firmware-rak 이 쓴 값 그대로 읽힘 · GPS 바이트 들어옴 | ✅ 09-15 (아래) |
 | 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | ✅ 09-15 GPS·IMU 없이 (아래). 남은 것: 기록 중 카드 빼기 · 쓰기 일꾼 스택 남은 양 · IMU 끊김(2단계 뒤) |
 | 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | 🔶 켜짐·fix·gpscfg·imu·1분 기록·test gps 통과 (아래). 남은 것: board_rec_test imu·clean (USB 멎어 못 돌림) · 밖에서 fix 잡힌 기록 |
-| 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | ❌ |
+| 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | 🔶 코드·메인 연결 · 빌드 경고 0 (USB 멎어 보드 시험 전) |
 | 4 | 화면 (U8g2) | 같은 화면 | ❌ |
 | 5 | WiFi · HTTP 파일 전송 · mDNS — **TCP 창 키우기** | `/api/files`·`/file/` Range · 해시 · 받기 속도를 firmware-rak 과 같은 자리에서 비교 | ❌ |
 | 6 | LoRa (RadioLib, 칩 버그 셋) | 두 보드 사이 주고받기 | ❌ |
@@ -171,6 +171,16 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 - ★ **사용자에게 물을 것 1 — 송신 출력.** firmware-rak 도 `setPower(ESP_PWR_LVL_P9)` 에 열거값(11)을 dBm 자리에 넣어 실제로는 **+12 dBm** 이다 [확인: 보고 — 두 판 NimBLEDevice.cpp setPower 몸통 같음]. 옮긴 코드는 그대로 둠
 - ★ **고칠 것 2 — CLAUDE.md 의 "nimble_host 스택 5120" 은 틀렸다.** firmware-rak 실제 값은 NimBLE-Arduino 기본 4096 [확인: 보고 — .pio nimconfig.h:217]. 09-11 nimble_host PANIC 과 맞는 크기. (CLAUDE.md 는 사용자 확인 뒤 고친다)
 - 보드 시험 순서: 광고 로그 → 맥 스캐너로 이름·UUID·제조사 11바이트·seq → 아이폰 연결·39바이트 10 Hz → 워치 2/3 → 제어 help/status 가 루프에서 → 한 대 끊기 → verify.sh → name·hz 재부팅 유지
+
+**3단계 메인 연결 (2026-09-15, 보드 없이 빌드만)**
+- app_main: `ble::loadIdentity` (loadSettings 뒤) · 배너에 이름·module_id·notify · `batteryPercent` + gBattPct 0.8·0.2 · `buildExtra`/`buildTelemetry` (main.cpp 3834-3882 그대로) ·
+  켤 때 `ble::start` (resumeRecordingIfCut 바로 앞) · 루프: `takeControlLine` → `controlLine` · `ble::pump` · notify 주기 칸 더하기 `publish` · 1 Hz `refreshAdvPayload` ·
+  시리얼 `info` · `hz <1~100>` · `name <이름>` (firmware-rak 글자)
+- controlLine: `status` · `help` 만. wifi …·magcal 은 firmware-rak 이 모르는 줄에 하던 대로 `err unknown …` (5단계·magcal 옮길 때 채움).
+  ★ `status` 의 `ip` 칸은 firmware-rak `netsrv::ipText()` 자리인데 5단계 전이라 `-` 로 보낸다 — firmware-rak 이 꺼져 있을 때 무엇을 보냈는지는 [모름], 5단계에서 맞춘다
+- sdkconfig.defaults 에 BT 12줄 (이름 전부 IDF Kconfig 에서 확인). ★ 저장소의 `firmware-idf/sdkconfig` 는 옛 설정이 남아 BT 가 꺼진 채라,
+  다음 전체 빌드 전에 지우고(빌드가 다시 만든다) defaults 로 새로 만들어야 한다
+- 링크 확인: display.cpp 가 아직 짓는 중이라 `~/esp/stage3` (display 뺀 SRCS, 자체 sdkconfig) 를 `-B ~/esp/build-stage3` 로 지음 → **경고 0 · 0xb8220 (88% 남음)** · BT_ENABLED=y · 호스트 스택 4096 · 연결 3 반영
 
 - ★ **보드를 다시 꽂을 때까지 누구도 포트·esptool 을 열지 않는다.** 꽂은 뒤에도 조사 보고의 "한 번만 열어 볼 것" 부터.
 - 나눠 짜는 쪽은 **커밋하지 않는다**, **보드·시리얼 포트를 열지 않는다**, `app_main.cpp`·`CMakeLists.txt` 를 안 만진다.

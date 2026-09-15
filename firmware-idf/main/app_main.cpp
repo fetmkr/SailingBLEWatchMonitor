@@ -45,6 +45,7 @@
 #include "rec_control.h"
 #include "sdcard.h"
 
+#include "ble.h"
 #include "gps.h"
 #include "imu.h"
 
@@ -222,6 +223,25 @@ static float readBatteryVolts() {
     if (!ok) return 0.0f;
     return (sum / (float)ok / 1000.0f) / rak::kBattDivider * rak::kBattCorrection;
 }
+
+// 방전 곡선 표에서 잔량을 찾는다. 표 사이는 직선으로 잇는다 (firmware-rak batteryPercent 그대로)
+static float batteryPercent(float volts) {
+    if (volts >= rak::kBattCurve[0].volts) return 100.0f;
+    const int last = rak::kBattCurveLen - 1;
+    if (volts <= rak::kBattCurve[last].volts) return 0.0f;
+    for (int i = 0; i < last; i++) {
+        const float vHi = rak::kBattCurve[i].volts;
+        const float vLo = rak::kBattCurve[i + 1].volts;
+        if (volts <= vHi && volts >= vLo) {
+            const float pHi = rak::kBattCurve[i].percent;
+            const float pLo = rak::kBattCurve[i + 1].percent;
+            const float t   = (volts - vLo) / (vHi - vLo);
+            return pLo + (pHi - pLo) * t;
+        }
+    }
+    return 0.0f;   // 여기까지 오면 표가 잘못 적힌 것이다
+}
+static float gBattPct = 0.0f;
 
 // ── 자세·방위 (firmware-rak 과 같은 식 · 같은 입력) ────────────────────────
 static float wrap180(float deg) { return hdg::wrap180(deg); }
@@ -654,6 +674,92 @@ static void checkSensors() {
         hlog::noteDropped(recctl::imuGapRows(gapFrom, hlog::recStartedMs(), nowMs()));
 }
 
+// ── BLE 로 내보낼 값 (firmware-rak buildExtra · buildTelemetry, main.cpp 3834-3882) ──
+// ★ 값이 없으면 없다고 보낸다. SOG·COG 는 fix 일 때만, HEEL·9축은 IMU 가 붙어 있을 때만.
+static sail::TelemetryExtra buildExtra() {
+    const gps::State& gs = gps::state();
+    TinyGPSPlus& p = gps::parser();
+    sail::TelemetryExtra e;
+    e.gpsFix     = gs.fix;
+    e.imuOk      = imu::ok();
+    e.magOk      = imu::magFresh();
+    e.recording  = hlog::recording();
+    e.recFailed  = recctl::showFailed(gWantRec, hlog::phase(), gRecGaveUp, gRecLastSaveBad);
+    e.satellites = p.satellites.isValid() ? (uint8_t)p.satellites.value() : 0;
+    // 위성을 못 잡으면 L76K 가 25.5 같은 값을 채워 보낸다 — 정확도가 아니다
+    float hdop = p.hdop.isValid() ? (float)p.hdop.hdop() : -1.0f;
+    if (!gs.fix || hdop > 20.0f) hdop = -1.0f;
+    e.hdop = hdop;
+    e.headingDeg = boatHeadingDeg();
+    e.pitchDeg   = currentPitchDeg();
+    const imu::Vec& a = imu::acc();
+    const imu::Vec& g = imu::gyr();
+    const imu::Vec& m = imu::mag();
+    e.accX = a.x; e.accY = a.y; e.accZ = a.z;
+    e.gyrX = g.x; e.gyrY = g.y; e.gyrZ = g.z;
+    e.magX = m.x; e.magY = m.y; e.magZ = m.z;
+    e.battVolts = gBattVolts;
+    return e;
+}
+
+static sail::Telemetry buildTelemetry(uint32_t ms) {
+    const gps::State& gs = gps::state();
+    sail::Telemetry t;
+    t.moduleID = ble::moduleId();
+    t.uptimeMs = ms;
+    // 속도는 "화면 속도" 규칙을 거친다 — 멈추면 0, 튀면 --.--
+    t.sogValid = gs.fix && gs.sogShownOk;
+    t.cogValid = gs.fix;
+    if (gs.fix) {
+        t.sogKn  = gs.sogShownKn;
+        t.cogDeg = (gs.cogDamped >= 0.0f) ? gs.cogDamped : (float)gps::parser().course.deg();
+    }
+    t.heelValid = imu::ok();
+    if (imu::ok()) t.heelDeg = currentHeelDeg();
+    t.battPct = gBattPct;
+    return t;
+}
+
+// ── BLE 제어 특성으로 들어온 줄 (firmware-rak controlLine) ──────────────────
+// ★ 콜백이 아니라 루프가 부른다. ble.cpp 콜백은 줄을 베껴 두기만 한다.
+// 아직 없는 것: wifi …(5단계) · magcal — firmware-rak 이 모르는 줄에 하던 대로 "err unknown" 으로 답한다.
+static void controlLine(const char* raw) {
+    while (*raw == ' ' || *raw == '\t') ++raw;
+    char line[192];
+    snprintf(line, sizeof line, "%s", raw);
+    size_t n = strlen(line);
+    while (n && (line[n - 1] == ' ' || line[n - 1] == '\t' || line[n - 1] == '\r')) line[--n] = '\0';
+    if (!n) return;
+    // WiFi 비밀번호는 로그에 안 남긴다.
+    if (!strncmp(line, "wifi pass ", 10)) printf("[CTL] ← wifi pass ****\n");
+    else printf("[CTL] ← %s\n", line);
+
+    char out[240];
+    if (!strcmp(line, "wifi status") || !strcmp(line, "status")) {
+        // 5단계 전이라 WiFi 는 늘 꺼져 있다. ip 칸은 firmware-rak netsrv::ipText() 자리 — 켜기 전 값은 5단계에서 맞춘다.
+        snprintf(out, sizeof out, "status name %s mode %s ip %s rec %s idle %lus left %lus",
+                 ble::fullName(), "off", "-", hlog::recording() ? "on" : "off", 0ul, 0ul);
+        ble::controlSay(out);
+        return;
+    }
+    if (!strcmp(line, "help")) {
+        ble::controlSay("cmds: wifi ssid|pass|scan|on|ap|off|status | magcal on|stop|clear");
+        return;
+    }
+    snprintf(out, sizeof out, "err unknown %s", line);
+    ble::controlSay(out);
+}
+
+static void printIdentity() {
+    char mac[20];
+    ble::formatMac(mac, sizeof mac);
+    printf("[ID ] 이름 %s | module_id %u (0x%02X) | MAC %s\n", ble::fullName(), ble::moduleId(), ble::moduleId(), mac);
+    printf("[ID ] notify %.1f Hz (%ums) | adv %.1f Hz\n", 1000.0f / ble::notifyPeriodMs(),
+           (unsigned)ble::notifyPeriodMs(), 1000.0f / sail::kAdvRefreshMs);
+    if (gSensorPowerPin) printf("[PWR] 센서 전원 GPIO%d (ON)\n", gSensorPowerPin);
+    else                 printf("[PWR] 센서 전원 꺼짐\n");
+}
+
 // ── SD 사용권 (firmware-rak sdFreeFor) ─────────────────────────────────────
 static bool sdFreeFor(const char* what) {
     const sdcard::Owner o = sdcard::owner();
@@ -880,7 +986,28 @@ static void handleLine(char* line) {
         gps::sendAndWatch(body);
         return;
     }
-    printf("[CMD] 모르는 명령: %s  (2단계에서 되는 것: rec … · imu · fix · gps · gpscfg · gpshz · sog · navpv · nmea · test imu/gps)\n", line);
+    if (!strcmp(line, "info")) { printIdentity(); return; }
+    if (!strncmp(line, "hz ", 3)) {
+        const long hz = strtol(line + 3, nullptr, 10);
+        if (hz < 1 || hz > 100) { printf("[ID ] 1~100 Hz 범위로 입력하세요. 예) hz 20\n"); return; }
+        if (!ble::setNotifyPeriodMs((uint32_t)(1000.0f / hz + 0.5f)))
+            printf("[ID ] ★ 보드에 못 적었습니다 — 껐다 켜면 옛 값으로 돌아갑니다\n");
+        printf("[ID ] notify 주기 → %.1f Hz (%ums)\n", 1000.0f / ble::notifyPeriodMs(), (unsigned)ble::notifyPeriodMs());
+        return;
+    }
+    if (!strncmp(line, "name ", 5)) {
+        char* arg = line + 5;
+        while (*arg == ' ') ++arg;
+        if (!*arg) { printf("[ID ] 이름이 비어 있습니다. 예) name hojun\n"); return; }
+        if (strlen(arg) > sail::kMaxUserNameLen)
+            printf("[ID ] 이름이 너무 깁니다 (최대 %u자). 잘라서 저장합니다.\n", (unsigned)sail::kMaxUserNameLen);
+        if (!ble::saveIdentity(arg)) printf("[ID ] ★ 보드에 못 적었습니다 — 껐다 켜면 옛 이름으로 돌아갑니다\n");
+        printIdentity();
+        ble::requestAdvApply();   // 광고 이름이 바뀌었으니 다시 올린다
+        printf("[ID ] 저장 완료 — 앱에서 모듈을 다시 선택해야 합니다.\n");
+        return;
+    }
+    printf("[CMD] 모르는 명령: %s  (3단계에서 되는 것: rec … · imu · fix · gps · gpscfg · gpshz · sog · navpv · nmea · test imu/gps · info · hz · name)\n", line);
 }
 
 // USB 로 온 글자를 한 줄씩 모은다 (firmware-rak pollSerial — 64자까지)
@@ -903,7 +1030,9 @@ static void logBoot() {
     uint32_t flash = 0;
     esp_flash_get_size(nullptr, &flash);
     printf("═══════════════════════════════════════════\n");
-    printf("  firmware-idf 2단계 (기록기 + GPS·IMU) · ESP-IDF %s\n", esp_get_idf_version());
+    printf("  %s — firmware-idf 3단계 (기록기 + GPS·IMU + BLE) · ESP-IDF %s\n", ble::fullName(), esp_get_idf_version());
+    printf("  module_id %u (0x%02X) · notify %.1fHz / adv refresh %.1fHz\n", ble::moduleId(), ble::moduleId(),
+           1000.0f / ble::notifyPeriodMs(), 1000.0f / sail::kAdvRefreshMs);
     printf("  MAC %02X:%02X:%02X:%02X:%02X:%02X · 플래시 %" PRIu32 " MB · PSRAM %u 바이트\n",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], flash / (1024 * 1024), (unsigned)esp_psram_get_size());
     printf("═══════════════════════════════════════════\n");
@@ -943,6 +1072,7 @@ extern "C" void app_main(void) {
     }
 
     loadSettings();
+    ble::loadIdentity();   // NVS name · notify_ms
     logBoot();
 
     // 센서 전원부터. 없으면 GPS 가 통째로 죽어 있다 (IMU 는 늘 켜진 VDD)
@@ -950,6 +1080,7 @@ extern "C" void app_main(void) {
 
     batteryInit();
     gBattVolts = readBatteryVolts();
+    gBattPct   = batteryPercent(gBattVolts);
 
     nv::writeWith([](nvs_handle_t h) {
         uint32_t n = 0; nvs_get_u32(h, "boot_n", &n);
@@ -973,6 +1104,8 @@ extern "C" void app_main(void) {
 
     printf("[SRC] SOG/COG 는 GPS 가 위성을 잡았을 때만 값이 있습니다 (못 잡으면 무효)\n");
     printf("      HEEL·9축은 IMU 가 붙어 있을 때만 값이 있습니다\n");
+
+    ble::start(buildTelemetry(nowMs()), buildExtra());
 
     // ★ 제일 마지막에 본다. 센서·카드가 다 올라온 뒤여야 한다.
     resumeRecordingIfCut();
@@ -1001,7 +1134,10 @@ extern "C" void app_main(void) {
         if (now - lastBatt >= 1000) {
             lastBatt = now;
             const float freshV = readBatteryVolts();
-            if (freshV > 0.0f) gBattVolts = (gBattVolts > 0.0f) ? gBattVolts * 0.8f + freshV * 0.2f : freshV;
+            if (freshV > 0.0f) {
+                gBattVolts = (gBattVolts > 0.0f) ? gBattVolts * 0.8f + freshV * 0.2f : freshV;
+                gBattPct   = gBattPct * 0.8f + batteryPercent(freshV) * 0.2f;
+            }
             checkSensors();
             hlog::healthCheck();
         }
@@ -1020,6 +1156,21 @@ extern "C" void app_main(void) {
             if (now - lastNav >= navMs * 5) lastNav = now;
             gps::updateFix();
             if (hlog::recording()) logWriteNav(now);
+        }
+
+        // BLE — 제어 줄은 루프에서 처리 · 광고 다시 걸기 · notify 주기 (칸을 더해 나간다) · 1 Hz 광고 갱신
+        {
+            char ctl[192];
+            while (ble::takeControlLine(ctl, sizeof ctl)) controlLine(ctl);
+            ble::pump();
+            static uint32_t lastNotify = 0, lastAdv = 0;
+            const uint32_t period = ble::notifyPeriodMs();
+            if (now - lastNotify >= period) {
+                lastNotify += period;
+                if (now - lastNotify >= period * 5) lastNotify = now;
+                ble::publish(buildTelemetry(now), buildExtra());
+            }
+            if (now - lastAdv >= sail::kAdvRefreshMs) { lastAdv = now; ble::refreshAdvPayload(); }
         }
 
         feedWatchdog();   // 여기까지 왔으면 살아 있다
