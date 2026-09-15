@@ -164,6 +164,14 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | **화면 (4)** | `main/display.h/.cpp` · `components/u8g2*` | `-B ~/esp/build-sail-disp` |
 | **USB 멎음 조사** | 읽기·웹만 | — |
 
+**3단계 BLE 코드 보고 (2026-09-15, 커밋 전)** — `main/ble.h/.cpp` · `main/idf_component.yml` (esp-nimble-cpp 2.5.0). ble.cpp 경고 0 컴파일, 링크는 display.cpp 가 u8g2.h 를 못 찾아 아직.
+- API: `ble::loadIdentity` · `start(t,e)`/`stop` · `pump()`(광고 다시 걸기) · `publish(t,e)` · `refreshAdvPayload()` · `takeControlLine(buf,cap)` · `controlSay` · `setNotifyPeriodMs` · `saveIdentity` · `requestAdvApply`.
+  controlLine 몸통(wifi·magcal·status)은 안 옮김 (5단계·메인). buildTelemetry/buildExtra 는 메인이 main.cpp 3834-3882 에서 옮긴다. batteryPercent 도.
+- sdkconfig 제안: BT_ENABLED · BT_NIMBLE_ENABLED · MAX_CONNECTIONS 3 · HOST_TASK_STACK 4096 · PINNED_TO_CORE_0 · ATT_PREFERRED_MTU 255 · MAX_BONDS 3 · NVS_PERSIST · LOG_LEVEL_NONE · CTRL_BLE_MAX_ACT 6 · CTRL_DFT_TX_POWER_LEVEL_P9
+- ★ **사용자에게 물을 것 1 — 송신 출력.** firmware-rak 도 `setPower(ESP_PWR_LVL_P9)` 에 열거값(11)을 dBm 자리에 넣어 실제로는 **+12 dBm** 이다 [확인: 보고 — 두 판 NimBLEDevice.cpp setPower 몸통 같음]. 옮긴 코드는 그대로 둠
+- ★ **고칠 것 2 — CLAUDE.md 의 "nimble_host 스택 5120" 은 틀렸다.** firmware-rak 실제 값은 NimBLE-Arduino 기본 4096 [확인: 보고 — .pio nimconfig.h:217]. 09-11 nimble_host PANIC 과 맞는 크기. (CLAUDE.md 는 사용자 확인 뒤 고친다)
+- 보드 시험 순서: 광고 로그 → 맥 스캐너로 이름·UUID·제조사 11바이트·seq → 아이폰 연결·39바이트 10 Hz → 워치 2/3 → 제어 help/status 가 루프에서 → 한 대 끊기 → verify.sh → name·hz 재부팅 유지
+
 - ★ **보드를 다시 꽂을 때까지 누구도 포트·esptool 을 열지 않는다.** 꽂은 뒤에도 조사 보고의 "한 번만 열어 볼 것" 부터.
 - 나눠 짜는 쪽은 **커밋하지 않는다**, **보드·시리얼 포트를 열지 않는다**, `app_main.cpp`·`CMakeLists.txt` 를 안 만진다.
 - 필요한 IDF 부품이 `REQUIRES` 에 없으면 메인에게 말한다.
