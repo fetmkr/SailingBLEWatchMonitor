@@ -58,7 +58,7 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | 1 | SD + HLG 기록기 (hlog, rec_control, SD 사용권) | `board_rec_test.py all` 같은 결과 · 같은 입력으로 HLG 머리글·줄 형식 같음 · `rec check`·`rec hash` | ✅ 09-15 GPS·IMU 없이 (아래). 남은 것: 기록 중 카드 빼기 · 쓰기 일꾼 스택 남은 양 · IMU 끊김(2단계 뒤) |
 | 2 | GPS (CASIC·NMEA·NAV-PV) · IMU (FIFO 100 Hz·자력계) | `gps`·`fix`·`imu` 출력 · 세션 94 처럼 1분 기록해 itow 100 ms · IMU 등간격 | 🔶 켜짐·fix·gpscfg·imu·1분 기록·test gps 통과 (아래). 남은 것: board_rec_test imu·clean (USB 멎어 못 돌림) · 밖에서 fix 잡힌 기록 |
 | 3 | BLE (광고·텔레메트리 39바이트·제어 특성) | 아이폰·워치가 붙어 값 받음 · `verify.sh` 벡터 | 🔶 코드·메인 연결 · 빌드 경고 0 (USB 멎어 보드 시험 전) |
-| 4 | 화면 (U8g2) | 같은 화면 | ❌ |
+| 4 | 화면 (U8g2) | 같은 화면 | 🔶 코드·메인 연결 · 맥에서 11장면 프레임버퍼 firmware-rak 과 같음 · 빌드 경고 0 (보드 시험 전) |
 | 5 | WiFi · HTTP 파일 전송 · mDNS — **TCP 창 키우기** | `/api/files`·`/file/` Range · 해시 · 받기 속도를 firmware-rak 과 같은 자리에서 비교 | ❌ |
 | 6 | LoRa (RadioLib, 칩 버그 셋) | 두 보드 사이 주고받기 | ❌ |
 | 7 | 전원·깊은잠·버튼·코어덤프 | 헛깸 0 · 끄는 순서 · 코어덤프 0xFF0000 | ❌ |
@@ -185,6 +185,15 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 - sdkconfig.defaults 에 BT 12줄 (이름 전부 IDF Kconfig 에서 확인). ★ 저장소의 `firmware-idf/sdkconfig` 는 옛 설정이 남아 BT 가 꺼진 채라,
   다음 전체 빌드 전에 지우고(빌드가 다시 만든다) defaults 로 새로 만들어야 한다
 - 링크 확인: display.cpp 가 아직 짓는 중이라 `~/esp/stage3` (display 뺀 SRCS, 자체 sdkconfig) 를 `-B ~/esp/build-stage3` 로 지음 → **경고 0 · 0xb8220 (88% 남음)** · BT_ENABLED=y · 호스트 스택 4096 · 연결 3 반영
+
+**4단계 화면 코드 보고 (2026-09-15, 커밋 전)** — `main/display.h/.cpp` · `components/u8g2/` (U8g2 2.36.18 C 원본, firmware-rak PlatformIO 판과 같은 판, BSD-2. 글꼴은 쓰는 셋만 `clib/u8g2_fonts_sail.c`)
+- ★ 라이브러리 표 고침: `u8g2-hal-esp-idf` 는 안 씀 — 자체 I2C 드라이버를 세워 IMU 버스를 나눠 못 쓴다 [추측: 그 HAL 소스는 안 읽음]. U8g2 C + 우리 I2C 콜백(`imu::bus()` 공유, 400 kHz, 한 번에 128바이트까지)
+- 맥 대조 [확인]: 같은 U8g2 C 에 firmware-rak display_rak.cpp(아두이노 흉내) 와 새 display.cpp(IDF 흉내)를 넣고 11장면 그림 → **프레임버퍼 1024바이트 전부 같음**, `oledw` 16개 폭도 같음. 다시 돌리기: scratchpad `oledcmp/build.sh`
+- 다른 점: I2C 보내기 실패를 센다(`displayI2cErrors`, firmware-rak 은 버렸다) · 화면이 IMU 보다 먼저 시작하면 `imu::begin()` 이 버스를 만든다 · 한 장 그리는 시간 [모름] (firmware-rak 33.6 ms)
+- 메인 연결 (보드 없이 빌드만): 켤 때 IMU 뒤 `displayBegin` + 부트 문구 · 1 Hz `displayHealthCheck` · 그리기 기록 중 1초·평소 250 ms, DisplayState 는 firmware-rak 5833-5871 그대로
+  (속도·침로·힐은 `ble::latest()`, 모드 글자는 `gps::state().dyModel` 과 `kBoatMode`) · 배 번호 NVS `boat` 읽기 · 저전압 3.0 V · 명령 `oled` · `oledw` · REQUIRES `u8g2`.
+  버튼 막대(gBtnOwnsScreen)는 7단계. `~/esp/stage3` 에 display 넣어 링크 → **경고 0 · 0xce4f0 (87% 남음)**
+- 보드 시험: [OLED] 붙음·부트 문구 → 평소 화면 firmware-rak 과 같나 → oledw 폭 58 89 66 87 121 74 57 98 74 58 74 82 103 113 105 89 → 화면 켠 채 10분 기록 IMU 100 Hz·FIFO 넘침 0·I2C 오류 0 → 화면 뽑기·꽂기
 
 - ★ **보드를 다시 꽂을 때까지 누구도 포트·esptool 을 열지 않는다.** 꽂은 뒤에도 조사 보고의 "한 번만 열어 볼 것" 부터.
 - 나눠 짜는 쪽은 **커밋하지 않는다**, **보드·시리얼 포트를 열지 않는다**, `app_main.cpp`·`CMakeLists.txt` 를 안 만진다.

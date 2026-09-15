@@ -46,6 +46,7 @@
 #include "sdcard.h"
 
 #include "ble.h"
+#include "display.h"
 #include "gps.h"
 #include "imu.h"
 
@@ -100,6 +101,7 @@ static uint8_t gPitchAxis = 2;  static float gPitchSign = 1.0f;  static float gP
 static uint8_t gHdgAxisA = 1, gHdgAxisB = 0;
 static float   gHdgSignA = 1.0f, gHdgSignB = 1.0f, gHdgOffsetDeg = 0.0f, gHdgDeclDeg = 0.0f;
 static int     gSensorPowerPin = rak::kSensorPowerA;
+static uint8_t gBoatId = 0;   // 로라 배 번호 (PROTOCOL.md §10.11). 0 = 번호 없음. 화면 B-- 에 그린다
 
 static void loadSettings() {
     uint8_t damp = 2;
@@ -107,6 +109,7 @@ static void loadSettings() {
     nvs_handle_t h;
     if (nvs_open("sail", NVS_READONLY, &h) == ESP_OK) {
         gSensorPowerPin = (int)nv::i32(h, "pwr_pin", rak::kSensorPowerA);
+        gBoatId         = nv::u8 (h, "boat", 0);
         // 힐 기준각의 키가 heel_off → heel_off2 로 바뀌었다. 옛 키는 안 읽는다 (firmware-rak 과 같음).
         gHeelAxis       = nv::u8 (h, "heel_axis", 1);
         gHeelSign       = nv::i8 (h, "heel_sgn", -1) < 0 ? -1.0f : 1.0f;
@@ -242,6 +245,7 @@ static float batteryPercent(float volts) {
     return 0.0f;   // 여기까지 오면 표가 잘못 적힌 것이다
 }
 static float gBattPct = 0.0f;
+static constexpr float kBattWarnVolts = 3.0f;   // 저전압 경고 (사용자 결정, firmware-rak main.cpp:65)
 
 // ── 자세·방위 (firmware-rak 과 같은 식 · 같은 입력) ────────────────────────
 static float wrap180(float deg) { return hdg::wrap180(deg); }
@@ -987,6 +991,18 @@ static void handleLine(char* line) {
         return;
     }
     if (!strcmp(line, "info")) { printIdentity(); return; }
+    if (!strcmp(line, "oledw")) { diag::oledWidths(); return; }
+    // 화면을 나중에 꽂았을 때 다시 붙인다. 재부팅할 필요 없다.
+    if (!strcmp(line, "oled")) {
+        if (sail::displayBegin()) {
+            printf("[OLED] 붙었습니다 — 화면에 값이 나옵니다.\n");
+            sail::displayBootMessage(ble::fullName(), "hello");
+        } else {
+            printf("[OLED] 0x3C 응답 없음. J12 헤더(2.54mm I2C)에 꽂혀 있나요?\n");
+            printf("       센서 슬롯 A~D 가 아닙니다.\n");
+        }
+        return;
+    }
     if (!strncmp(line, "hz ", 3)) {
         const long hz = strtol(line + 3, nullptr, 10);
         if (hz < 1 || hz > 100) { printf("[ID ] 1~100 Hz 범위로 입력하세요. 예) hz 20\n"); return; }
@@ -1102,6 +1118,14 @@ extern "C" void app_main(void) {
         printf("[IMU] !! 응답 없음 — 힐·9축은 무효로 보냅니다. 꽂히면 저절로 붙입니다\n");
     }
 
+    // 화면은 J12 헤더에 꽂는다. 없어도 그냥 지나간다. I2C 버스는 IMU 와 나눠 쓴다 (imu::bus)
+    if (sail::displayBegin()) {
+        printf("[OLED] RAK1921 붙음 (128x64)\n");
+        sail::displayBootMessage(ble::fullName(), "starting...");
+    } else {
+        printf("[OLED] 없음 — J12 헤더에 꽂으면 자동으로 잡힙니다\n");
+    }
+
     printf("[SRC] SOG/COG 는 GPS 가 위성을 잡았을 때만 값이 있습니다 (못 잡으면 무효)\n");
     printf("      HEEL·9축은 IMU 가 붙어 있을 때만 값이 있습니다\n");
 
@@ -1139,6 +1163,7 @@ extern "C" void app_main(void) {
                 gBattPct   = gBattPct * 0.8f + batteryPercent(freshV) * 0.2f;
             }
             checkSensors();
+            sail::displayHealthCheck();   // firmware-rak checkSensors 끝에서 불렀다
             hlog::healthCheck();
         }
         recControlTick(now);
@@ -1156,6 +1181,48 @@ extern "C" void app_main(void) {
             if (now - lastNav >= navMs * 5) lastNav = now;
             gps::updateFix();
             if (hlog::recording()) logWriteNav(now);
+        }
+
+        // 화면. 기록 중에는 1 Hz — 한 장에 I2C 가 묶여 IMU 를 못 읽는다 (firmware-rak 실측 33.6 ms, 4 Hz 면 IMU 78 Hz)
+        {
+            static uint32_t lastDraw = 0;
+            const uint32_t drawPeriod = hlog::recording() ? 1000 : 250;
+            if (now - lastDraw >= drawPeriod) {
+                lastDraw = now;
+                const gps::State& gs = gps::state();
+                const sail::Telemetry& lt = ble::latest();
+                TinyGPSPlus& p = gps::parser();
+                auto modeChar = [](uint8_t m) -> char {
+                    return m == 0 ? 'h' : m == 1 ? 's' : m == 2 ? 'p' : m == 3 ? 'c' : m == 4 ? 'b' : '?';
+                };
+                sail::DisplayState ds;
+                ds.userName     = ble::userName();
+                ds.bleConnected = ble::connected();
+                ds.bleNotifying = ble::subscribed();
+                ds.battVolts    = gBattVolts;
+                ds.boatId       = gBoatId;
+                ds.recording    = hlog::recording();
+                ds.recFailed    = recctl::showFailed(gWantRec, hlog::phase(), gRecGaveUp, gRecLastSaveBad);
+                ds.recClosing   = hlog::phase() == recctl::Phase::Closing;
+                ds.battLow      = kBattWarnVolts > 0.0f && gBattVolts > 0.0f && gBattVolts < kBattWarnVolts;
+                ds.recSeconds   = ds.recording ? (now - hlog::recStartedMs()) / 1000 : 0;
+                ds.sogKn        = lt.sogKn;   // 다듬고 잡음 바닥까지 적용된 값
+                // ★ 정해 둔 모드(선박 4)와 다를 때만 속도 줄에 띄운다. 전압 옆 칸은 늘.
+                ds.gnssMode     = (gs.dyModel == gps::kBoatMode) ? 0 : modeChar(gs.dyModel);
+                ds.gnssModeNow  = modeChar(gs.dyModel);
+                ds.cogDeg       = lt.cogDeg;
+                ds.headingDeg   = boatHeadingDeg();
+                ds.heelDeg      = lt.heelDeg;
+                ds.pitchDeg     = currentPitchDeg();
+                ds.imuOk        = imu::ok();
+                ds.magOk        = imu::magOk();
+                ds.sogValid     = lt.sogValid;
+                ds.heelValid    = lt.heelValid;
+                ds.gpsFix       = gs.fix;
+                ds.satellites   = p.satellites.isValid() ? (int)p.satellites.value() : 0;
+                ds.hdop         = p.hdop.isValid() ? (float)p.hdop.hdop() : -1.0f;
+                sail::displayUpdate(ds);   // 버튼 막대(gBtnOwnsScreen)는 7단계에서
+            }
         }
 
         // BLE — 제어 줄은 루프에서 처리 · 광고 다시 걸기 · notify 주기 (칸을 더해 나간다) · 1 Hz 광고 갱신
