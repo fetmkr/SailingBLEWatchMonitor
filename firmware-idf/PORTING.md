@@ -147,6 +147,15 @@ WiFi 파일 받기가 241~574 KB/초에 묶인 이유다 (NEXT.md 11). 공식 Pl
 | **GPS·IMU** | `main/gps.h/.cpp` · `main/imu.h/.cpp` · `components/tinygpsplus/` | GPS: UART1 115200, 켤 때 9600→115200 절차·PCAS·CASIC(CFG-MSG NAV-PV 10Hz, 선박 모드 4)·NMEA(TinyGPS++)·NAV-PV 값, firmware-rak `gpsPoll` 과 같은 결과. IMU: MPU-9250 FIFO 100 Hz · AK8963 자력(축 정렬·하드아이언 빼기 전후) · 단위 g · °/s · µT 가 firmware-rak 과 같게. 루프가 부르는 `poll()`/`drain()` 모양 (콜백에서 일 안 함). 빌드는 `-B ~/esp/build-sail-sens` |
 | **메인** | `main/app_main.cpp` · `main/CMakeLists.txt` · `sdkconfig.defaults` · `PORTING.md` | 시리얼 명령 줄 받기, 기록 제어(rec_control.h, recWantOn/Off, 이어 시작, NVS rec_want·rec_open), buildNav/buildImu 로 둘을 잇기, 보드 올리기·시험·커밋 |
 
+**3·4단계 나눠 짜기 (2026-09-15 17:50~, USB 멎은 동안 — 사용자 "USB 연결 없이 할거 해")**
+
+| 누가 | 파일 | 빌드 |
+|---|---|---|
+| **BLE (3)** | `main/ble.h/.cpp` · `main/idf_component.yml` (esp-nimble-cpp) · sdkconfig 추가 줄은 제안만 | `-B ~/esp/build-sail-ble` |
+| **화면 (4)** | `main/display.h/.cpp` · `components/u8g2*` | `-B ~/esp/build-sail-disp` |
+| **USB 멎음 조사** | 읽기·웹만 | — |
+
+- ★ **보드를 다시 꽂을 때까지 누구도 포트·esptool 을 열지 않는다.** 꽂은 뒤에도 조사 보고의 "한 번만 열어 볼 것" 부터.
 - 나눠 짜는 쪽은 **커밋하지 않는다**, **보드·시리얼 포트를 열지 않는다**, `app_main.cpp`·`CMakeLists.txt` 를 안 만진다.
 - 필요한 IDF 부품이 `REQUIRES` 에 없으면 메인에게 말한다.
 - 막히면 추측으로 채우지 말고 무엇이 모르는지 적어 보고한다.
