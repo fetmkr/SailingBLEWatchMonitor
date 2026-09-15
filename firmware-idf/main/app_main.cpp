@@ -27,6 +27,7 @@
 #include "driver/i2c_master.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#include "hal/usb_serial_jtag_ll.h"   // 드라이버 전에 남은 인터럽트 켜짐을 끈다 (app_main 첫머리)
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
@@ -2112,6 +2113,18 @@ static void logBoot() {
 
 extern "C" void app_main(void) {
     // USB 입력을 읽으려면 드라이버를 깔고, printf 도 그 드라이버로 보낸다 (usb_serial_jtag_vfs.h)
+    // ★ 진단 (2026-09-15): 다시 꽂은 뒤 드라이버를 까는 순간 USB 인터럽트가 안 멈춰 인터럽트 워치독으로 되풀이 재시작했다
+    //   (PORTING.md). 까기 직전에 인터럽트 켜짐·걸림 레지스터를 날것으로 찍는다 — 어느 비트인지 짐작하지 않고 본다.
+    //   드라이버 전이라 이 줄은 드라이버 없는 콘솔 길로 나간다.
+    printf("[USB] 드라이버 전  int_ena 0x%08" PRIx32 "  int_st 0x%08" PRIx32 "  int_raw 0x%08" PRIx32 "\n",
+           USB_SERIAL_JTAG.int_ena.val, USB_SERIAL_JTAG.int_st.val, USB_SERIAL_JTAG.int_raw.val);
+    // ★ 고침: IDF 드라이버의 인터럽트 처리기는 IN_EMPTY 와 OUT_RECV_PKT 만 지운다 (usb_serial_jtag.c:55-154).
+    //   아두이노 HWCDC(firmware-rak) 는 BUS_RESET 도 켰다 (HWCDC.cpp:344-345). 이 칸은 코어 리셋으로 안 지워지고
+    //   배터리가 붙어 있으면 USB 를 뽑아도 칩 전원이 안 끊겨 그대로 남는다 [추측 — 위 줄이 찍는 int_ena 로 확인].
+    //   다시 꽂으면 버스 리셋이 걸리고, 아무도 안 지워 처리기가 끝없이 다시 불린다.
+    //   드라이버가 다루는 두 칸 말고는 켜짐을 끄고, 남은 버스 리셋 걸림을 지운 뒤 깐다. 드라이버가 필요한 걸림(IN_EMPTY)은 안 건드린다.
+    usb_serial_jtag_ll_disable_intr_mask(~(uint32_t)(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY | USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT));
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_BUS_RESET);
     usb_serial_jtag_driver_config_t ucfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     ucfg.rx_buffer_size = 1024;
     ucfg.tx_buffer_size = 4096;
