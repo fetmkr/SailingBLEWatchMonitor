@@ -43,6 +43,11 @@
 #include "imu_math.h"
 #include "prefs_util.h"
 #include "heading_math.h"
+#include "heading_tilt.h"
+#include "sog_policy.h"
+#include "rec_control.h"
+#include "sdcard.h"
+#include "diagnostics.h"
 #include "mag_sample.h"
 #include "magcal.h"
 #include "netsrv.h"
@@ -55,6 +60,9 @@ static Preferences gPrefs;
 
 // 다듬기 세기와 잡음 바닥. 설정에서 먼저 읽으므로 여기 둔다.
 static float gBattPct   = 100.0f; // 1 Hz 로 갱신
+// 저전압 경고 기준 (V). 이 밑이면 화면 5줄 전압 옆에 LOW (체크리스트 13).
+// ★ 3.0 V 는 사용자가 정한 값이다 (2026-09-15). 0 이면 경고 안 함.
+static constexpr float kBattWarnVolts = 3.0f;
 // 잔량(%) 옆에 전압을 같이 내보낸다. 3.8~3.9 V 구간은 방전 곡선이 거의
 // 평평해서, 전압이 조금만 떨어져도 퍼센트가 크게 내려앉는다. 퍼센트만 보면
 // 배터리가 갑자기 닳는 것처럼 보인다. 둘을 나란히 봐야 판단이 선다.
@@ -81,13 +89,19 @@ static uint8_t     gModuleID = 1;
 static uint8_t  gBoatId       = 0;
 static uint32_t gBoatIdSetAt  = 0; // 바꾼 시각. 30초 동안 flags 로 알린다
 
-// 기록이 저절로 멈췄나 (쓰기 실패·카드 빠짐·켤 때 이어 시작 실패).
-// 참이면 BLE flags bit5 가 서고 앱 배경이 빨개진다. 기록이 다시 돌면 내린다.
-static bool     gRecFailed      = false;
-static uint32_t gRecFailSession = 0;   // 멈춘 세션. 다시 걸 때 앞 세션 번호로 적는다
-static uint32_t gRecRestartAt   = 0;   // 0 이면 다시 걸 계획 없음
-static uint8_t  gRecRestarts    = 0;   // 이 부팅에서 다시 건 횟수
+// ── 기록: 원하는 상태와 실제 상태 (rec_control.h) ──────────────────────
+// gWantRec 는 단추 · rec on/off · 앱 · 끄기만 바꾼다. 실제 상태는 hlog::phase().
+// 루프(recControlTick)가 둘을 맞춘다. REC FAIL · BLE bit5 는 recctl::showFailed 로 둘에서 뽑는다.
+static bool     gWantRec        = false;
+static bool     gRecGaveUp      = false;   // 다시 걸기를 포기했다 — 사람이 rec on/off 할 때까지 REC FAIL
+static bool     gRecLastSaveBad = false;   // 마지막으로 끝난 세션이 끝까지 저장되지 않았다 — 다음 기록이 돌 때까지 REC FAIL
+static uint32_t gRecFailSession = 0;       // 마지막으로 끝난 세션. 다시 걸 때 앞 세션 번호로 적는다
+static uint32_t gRecRestartAt   = 0;       // 다시 걸 시각. 0 = 계획 없음 (정책 타이머일 뿐 상태가 아니다)
+static uint8_t  gRecRestarts    = 0;       // 이 부팅에서 다시 건 횟수
 static char     gRecFailLine[200] = {0};
+// 끄기 — 닫기를 기다리는 중
+static uint32_t gOffRequestedAt = 0;       // 0 이면 요청 없음
+static bool     gOffForceArmed  = false;   // 15초 넘게 못 닫았다. 한 번 더 5초 누르면 미완료로 끈다
 // 마지막 기록 시작이 왜 실패했나. 버튼·시리얼·자동 복구가 같은 말을 쓴다 (recStartFrom).
 static const char* gRecStartErr      = nullptr;
 static const char* gRecStartErrShort = nullptr;   // 화면 한 줄용
@@ -529,20 +543,6 @@ static float batteryPercent(float volts) {
     return 0.0f; // 여기까지 오면 표가 잘못 적힌 것이다
 }
 
-static void printBattery() {
-    uint32_t mv = 0;
-    float    v  = readBatteryVolts(&mv);
-    Serial.println("──────────────────────────────────────────");
-    Serial.printf("  GPIO%d 실측       %u mV\n", rak::kBattAdcPin, (unsigned)mv);
-    Serial.printf("  분압 되짚기       ÷ %.2f\n", rak::kBattDivider);
-    Serial.printf("  배터리 전압       %.3f V  (약 %.0f%%)\n", v, batteryPercent(v));
-    Serial.println("──────────────────────────────────────────");
-    Serial.println("  잔량은 리튬폴리머 방전 곡선으로 환산합니다 (직선 아님).");
-    Serial.println("──────────────────────────────────────────");
-    Serial.println("  ★ USB 가 꽂혀 있으면 충전 중이라 실제보다 높게 나옵니다.");
-    Serial.println("    진짜 잔량은 USB 를 뽑고 재야 합니다.");
-    Serial.println("  멀티미터 값과 어긋나면 board_rak.h 의 kBattCorrection 조정.");
-}
 
 // ── I2C 스캔 ─────────────────────────────────────────────────────────────
 //
@@ -577,6 +577,13 @@ static const char* guessI2CDevice(uint8_t addr) {
 static bool gSawDisplay = false;
 static bool gSawImu     = false;
 
+// 스캔이 본 것을 적는다 — 진단이 운영 표시(gSaw*)에 직접 쓰지 않게 이 두 함수로만 (NEXT 6)
+static void busSawReset() { gSawDisplay = false; gSawImu = false; }
+static void busSawAddr(uint8_t addr) {
+    if (addr == rak::kAddrDisplay) gSawDisplay = true;
+    if (addr == rak::kAddrImu)     gSawImu     = true;
+}
+
 static int scanBus(TwoWire& bus, const char* label, int sda, int scl) {
     bus.begin(sda, scl, 100000);
     Serial.printf("  %s (SDA GPIO%d / SCL GPIO%d)\n", label, sda, scl);
@@ -587,8 +594,7 @@ static int scanBus(TwoWire& bus, const char* label, int sda, int scl) {
         if (bus.endTransmission() == 0) {
             const char* guess = guessI2CDevice(addr);
             Serial.printf("    0x%02X  %s\n", addr, guess[0] ? guess : "(알 수 없음)");
-            if (addr == rak::kAddrDisplay) gSawDisplay = true;
-            if (addr == rak::kAddrImu)     gSawImu     = true;
+            busSawAddr(addr);
             found++;
         }
     }
@@ -597,8 +603,7 @@ static int scanBus(TwoWire& bus, const char* label, int sda, int scl) {
 }
 
 static void doScan() {
-    gSawDisplay = false;
-    gSawImu     = false;
+    busSawReset();
 
     Serial.println("──────────────────────────────────────────");
     Serial.printf("  I2C 스캔 — 센서 전원 %s\n",
@@ -757,6 +762,8 @@ static void gpsApplyBoatMode() {
     Serial.println("[GPS] ★★ 선박 모드를 못 걸었습니다 — 저속이 0 으로 뭉개집니다");
 }
 
+static void gpsApplyNavPv();   // 아래 gpsPoll 옆. 켤 때와 센서 전원을 다시 켤 때 같은 절차
+
 static void gpsBegin() {
     // 지금 모듈이 어느 속도로 말하는지 알 수 없다. 방금 전원이 들어왔으면
     // 9600 이지만, 보드만 리셋되고 모듈은 안 꺼졌다면 이미 115200 이다.
@@ -800,12 +807,7 @@ static void gpsBegin() {
     // 화면 속도가 이걸 쓴다 (아래 "화면 속도"). 북·동 속도와 칩이 밝힌 오차가
     // 여기에만 있다. 88바이트 × 10 = 초당 880 바이트, 115200bps 의 8% 쯤이다.
     // 원래는 1 Hz 였다 (2026-09-13 에 올림).
-    {
-        const uint8_t on[4] = {0x01, 0x03, 1, 0};
-        casicSend(0x06, 0x01, on, 4);
-        delay(80);
-    }
-
+    gpsApplyNavPv();
     gpsApplyBoatMode();
 }
 
@@ -902,7 +904,38 @@ static uint32_t gCasicRejected = 0;
 
 static void sogShownUpdate(uint32_t nowMs);    // 아래 "화면 속도" 항목
 
+static void gpsPoll();
+
+// NAV-PV 를 측위마다(10 Hz) 내보내게 한다. 화면 속도가 이걸 쓴다 — 북·동 속도와 칩이 밝힌 오차가
+// 여기에만 있다. 88바이트 × 10 = 초당 880 바이트, 115200bps 의 8% 쯤이다.
+//
+// ★ 옛 코드는 켤 때(gpsBegin)만 걸었다. `power` 로 모듈 전원을 껐다 켜면 모듈이 기본(끔)으로
+//   돌아가서 화면 속도가 RMC 쪽으로 물러선 채 남았다 (NEXT 3번). 선박 모드와 같은 절차로
+//   두 자리에서 부르고, 걸고 나서 **실제로 프레임이 오는지** 본다.
+static void gpsApplyNavPv() {
+    uint8_t on[4] = {0x01, 0x03, 1, 0};
+    casicSetAcked(0x06, 0x01, on, 4, "CFG-MSG NAV-PV 10Hz");
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 1500) {
+        gpsPoll();
+        if (gPvAtMs && (int32_t)(gPvAtMs - t0) >= 0) break;
+        delay(10);
+    }
+    if (gPvAtMs && (int32_t)(gPvAtMs - t0) >= 0)
+        Serial.printf("[GPS] ✓ NAV-PV 받는 중 (%lums 만에 첫 프레임)\n", (unsigned long)(gPvAtMs - t0));
+    else
+        Serial.println("[GPS] ★ NAV-PV 가 1.5초 안에 안 옵니다 — 화면 속도는 RMC 로 물러섭니다");
+}
+
+// 시험: 이때까지 GPS 바이트를 읽어서 버린다 — 모듈이 끊긴 것과 같다 (test gps <초>, 체크리스트 12).
+//   끝나면 그대로 다시 받는다. 오래된 값이 무효로 가는지(3초·NAV-PV 2초), 돌아오면 살아나는지 본다.
+static uint32_t gGpsPauseUntil = 0;
+
 static void gpsPoll() {
+    if ((int32_t)(millis() - gGpsPauseUntil) < 0) {
+        while (Serial1.available()) Serial1.read();
+        return;
+    }
     static char   line[100];
     static size_t n = 0;
 
@@ -1073,16 +1106,12 @@ static void dampingUpdate(float rawSog, float rawCog, uint32_t nowMs) {
 //
 // ★ 숫자(0.5 / 0.8 / 0.2 / 30초 / 1 kn)는 책상 위 몇 분 자료로 정했다.
 //   물 위에서 다시 맞춘다. SD 에는 원본(pv)과 오차(a)를 같이 적는다.
-static constexpr float    kSogBadAccKn = 1.0f;
-static constexpr float    kSlowEnterKn = 0.5f;
-static constexpr float    kSlowLeaveKn = 0.8f;
-static constexpr float    kRestCutKn   = 0.2f;
-static constexpr uint32_t kSlowWinMs   = 30000;
-static constexpr uint32_t kShortWinMs  = 3000;
-static constexpr uint32_t kPvStaleMs   = 2000;
+// 경계: 입력(gpsPoll 이 gPv* 에 넣음) → 품질(sog::sampleOk) → 추정(느린 모드·성분 평균) → 표시(gSogShown*).
+// 규칙과 숫자는 sog_policy.h 한 곳. 여기는 상태와 순서만.
+static const sog::Policy  kSog;
 static constexpr int      kPvRing      = 320;   // 10 Hz × 30초 + 여유
 
-struct PvSample { uint32_t ms; float n, e; };
+using PvSample = sog::Sample;
 static PvSample gPvRing[kPvRing];               // static — 스택에 안 올린다
 static int      gPvHead = 0, gPvCount = 0;
 static uint32_t gPvSeenAt    = 0;
@@ -1096,21 +1125,13 @@ static uint32_t gSogBadCount = 0;
 
 // 최근 winMs 안, notBefore 이후 표본으로 성분 평균을 내고 그 크기(노트).
 static float pvMeanKn(uint32_t nowMs, uint32_t winMs, uint32_t notBefore) {
-    float sn = 0.0f, se = 0.0f;
-    int k = 0;
-    for (int i = 0; i < gPvCount; ++i) {
-        const PvSample& s = gPvRing[(gPvHead - 1 - i + kPvRing) % kPvRing];
-        if (nowMs - s.ms > winMs || s.ms < notBefore) break;
-        sn += s.n; se += s.e; ++k;
-    }
-    if (k == 0) return -1.0f;
-    return sqrtf(sn * sn + se * se) / k * 1.943844f;
+    return sog::vectorMeanKn(gPvRing, kPvRing, gPvHead, gPvCount, nowMs, winMs, notBefore);
 }
 
 static void sogShownUpdate(uint32_t nowMs) {
     // NAV-PV 가 끊겼으면 원래 길로 돌아간다. 화면이 통째로 비면 안 된다.
-    // (power 명령으로 GPS 전원이 오르내리면 NAV-PV 출력 설정이 사라진다)
-    if (gPvAtMs == 0 || nowMs - gPvAtMs > kPvStaleMs) {
+    // (power 명령으로 GPS 전원이 오르내리면 모듈 설정이 풀린다 — 이제 gpsApplyNavPv 로 다시 건다)
+    if (sog::pvStale(gPvAtMs, nowMs, kSog)) {
         gSlowMode   = false;
         gSogShownOk = gGpsFix;
         gSogShownKn = sogOut();
@@ -1122,8 +1143,8 @@ static void sogShownUpdate(uint32_t nowMs) {
     }
     gPvSeenAt = gPvAtMs;
 
-    const bool bad = !gPvVelValid || gPvAccKn < 0.0f || gPvAccKn > kSogBadAccKn;
-    if (bad) {
+    // 품질
+    if (!sog::sampleOk(gPvVelValid, gPvAccKn, kSog)) {
         ++gSogBadCount;
         dampingReset();                         // 튄 값이 다듬기에 남지 않게
         if (!(gSogShownOk && gSogShownKn == 0.0f)) gSogShownOk = false;
@@ -1134,17 +1155,16 @@ static void sogShownUpdate(uint32_t nowMs) {
     gPvHead = (gPvHead + 1) % kPvRing;
     if (gPvCount < kPvRing) ++gPvCount;
 
-    gSogShortKn = pvMeanKn(nowMs, kShortWinMs, 0);
-    if (!gSlowMode && gSogShortKn >= 0.0f && gSogShortKn < kSlowEnterKn) {
-        gSlowMode = true;
-        gSlowSinceMs = gPvAtMs;
-    } else if (gSlowMode && gSogShortKn > kSlowLeaveKn) {
-        gSlowMode = false;
-    }
+    // 추정
+    gSogShortKn = pvMeanKn(nowMs, kSog.shortWinMs, 0);
+    const bool slow = sog::nextSlowMode(gSlowMode, gSogShortKn, kSog);
+    if (slow && !gSlowMode) gSlowSinceMs = gPvAtMs;
+    gSlowMode = slow;
 
+    // 표시
     if (gSlowMode) {
-        gSogLongKn  = pvMeanKn(nowMs, kSlowWinMs, gSlowSinceMs);
-        gSogShownKn = (gSogLongKn < kRestCutKn) ? 0.0f : gSogLongKn;
+        gSogLongKn  = pvMeanKn(nowMs, kSog.slowWinMs, gSlowSinceMs);
+        gSogShownKn = sog::slowShownKn(gSogLongKn, kSog);
     } else {
         gSogLongKn  = -1.0f;
         gSogShownKn = sogOut();
@@ -2144,22 +2164,28 @@ static void imuUpdate() {
 //     2) 자기 편각   — 자북과 진북의 차이 (한국은 약 8도 서편)
 //   배에 달고 실제 방위와 대조한 뒤에 보정을 넣는다.
 /** 자력계의 한 축 값을 축 번호로 꺼낸다. */
+// 지금 NVS 설정을 식 입력 하나로 묶는다. 보드·앱이 같은 함수(heading_tilt.h)를 쓴다.
+static hdg::HeadingCfg hdgCfgNow() {
+    hdg::HeadingCfg c;
+    c.axisA = gHdgAxisA; c.axisB = gHdgAxisB;
+    c.signA = gHdgSignA; c.signB = gHdgSignB;
+    c.offDeg = gHdgOffsetDeg; c.declDeg = gHdgDeclDeg;
+    return c;
+}
+
 static float magAxis(uint8_t axis) {
     return axis == 0 ? gMag.x : axis == 1 ? gMag.y : gMag.z;
 }
 
-static float headingDeg() {
+static float flatHeadingDeg() {
     if (!magFresh()) return -1.0f;           // 새 표본이 없으면 방위도 없다
-    const float a = magAxis(gHdgAxisA) * gHdgSignA;
-    const float b = magAxis(gHdgAxisB) * gHdgSignB;
-    // 방위 = 자력 atan2 + 장착 오프셋 + 자기 편각 (편각 기본 0)
-    const float h = hdg::wrap360(atan2f(a, b) * 180.0f / (float)M_PI + gHdgOffsetDeg + gHdgDeclDeg);
-    return isfinite(h) ? h : -1.0f;
+    const float m[3] = { gMag.x, gMag.y, gMag.z };
+    return hdg::flatHeadingDeg(m, hdgCfgNow());   // atan2(A·sA, B·sB) + 장착 오프셋 + 편각
 }
 
 // ── 기울기를 보정한 방위 (INSLIB 에서 가져온 식) ─────────────────────────
 //
-// ★ 위의 headingDeg() 는 자력계 두 축을 그냥 atan2 한다. **배가 기울면 틀린다.**
+// ★ 위의 flatHeadingDeg() 는 자력계 두 축을 그냥 atan2 한다. **배가 기울면 틀린다.**
 //   자기장은 한국에서 아래로 53° 로 꽂힌다. 배가 누우면 그 아래 성분이 옆 축으로
 //   새어 들어와서 방위를 밀어 버린다.
 //
@@ -2240,54 +2266,34 @@ static bool magFrameToFRD(const float v[3], float* f, float* r, float* d);
 static bool gravityRollPitch(float* roll, float* pitch);
 
 static float headingTiltDeg() {
-    // ★ headingDeg() 와 같은 기준을 쓴다 (magFresh). 힐·피치와 1 g 검사는 gravityRollPitch 하나에 있다 —
-    //   hdgtilt 의 힐 칸·자이로 적분이 여기와 다른 표본을 받지 않게.
+    // 식은 heading_tilt.h 한 곳 (앱 heading.ts 와 벡터로 맞춰 본다). 여기는 입력만 모은다.
     if (!magFresh() || !gImuOk) return -1.0f;
-    float roll, pitch;
-    if (!gravityRollPitch(&roll, &pitch)) return -1.0f;
+    const float acc[3] = { gAcc.x, gAcc.y, gAcc.z };
+    const float m[3]   = { gMag.x, gMag.y, gMag.z };
+    return hdg::tiltHeadingDeg(acc, m, hdgCfgNow());
+}
 
-    // 자력을 (앞, 오른쪽, 아래) 로 옮긴다
-    const float m[3] = { gMag.x, gMag.y, gMag.z };
-    float mf, mr, md;
-    if (!magFrameToFRD(m, &mf, &mr, &md)) return -1.0f;
-
-    // INSLIB 의 ahrs_mag_detilt 를 그대로 옮긴 부분
-    const float cr = cosf(roll),  sr = sinf(roll);
-    const float ct = cosf(pitch), st = sinf(pitch);
-    const float ty = cr * mr - sr * md;
-    const float tz = sr * mr + cr * md;
-    const float hx = ct * mf + st * tz;
-    const float hy = ty;
-
-    const float h = hdg::wrap360(atan2f(-hy, hx) * 180.0f / (float)M_PI + gHdgOffsetDeg + gHdgDeclDeg);
-    return isfinite(h) ? h : -1.0f;
+// ── 배의 방위 — 화면·BLE·TXT 가 읽는 단 하나 ─────────────────────────────
+//
+// ★ 2026-09-15 까지 화면·BLE·TXT 는 평평 식(flatHeadingDeg), 앱은 또 다른 식이었다.
+//   같은 순간에 세 값이 달랐다. 체크리스트 03(기울여도 방위 유지)·05(OLED·워치·앱 같은 값)를
+//   통과하려면 기울기 보정 식 하나여야 한다. 세션 46 대조: 평평 흩어짐 6.8°, 보정 4.7°.
+// ★ 못 구하면 -1 (화면 `---`). 평평 식으로 몰래 바꿔 채우지 않는다.
+// ★ 수평일 때 두 식은 같은 값이다 (roll=pitch=0 이면 hx=앞, hy=오른쪽). 그래서 평평 식으로
+//   잡아 둔 장착 오프셋이 그대로 맞는다. 식은 HLG 머리글 hdg_formula=2 로 남긴다.
+static float boatHeadingDeg() {
+    return headingTiltDeg();
 }
 
 // 자력 좌표 벡터 → (앞, 오른쪽, 아래). 방위 축 설정을 쓴다. 설정이 잘못이면 false.
 static bool magFrameToFRD(const float v[3], float* f, float* r, float* d) {
-    const float dSg = magDownSign();
-    if (dSg == 0.0f) return false;
-    *f =  v[gHdgAxisB] * gHdgSignB;
-    *r = -v[gHdgAxisA] * gHdgSignA;
-    *d =  v[magDownAxis()] * dSg;
-    return true;
+    return hdg::toFRD(v, hdgCfgNow(), f, r, d);
 }
 
 // 가속으로 잰 힐(φ)·피치(θ), 라디안. headingTiltDeg 와 같은 기준이다.
 static bool gravityRollPitch(float* roll, float* pitch) {
-    float a[3];
-    accInMagFrame(a);
-    float f, r, d;
-    if (!magFrameToFRD(a, &f, &r, &d)) return false;
-    const float gf = -f, gr = -r, gd = -d;          // 가속은 위를 가리킨다 → 뒤집어 중력
-    const float gn = sqrtf(gf * gf + gr * gr + gd * gd);
-    // ★ 가속도계가 중력만 잰다고 가정하는 식이다. 크기가 1 g 에서 0.15 g 넘게 벗어나면
-    //   운동 가속이 섞인 것이라 기울기를 못 믿는다. (크기가 1 g 여도 방향이 틀릴 수 있다 —
-    //   옆가속 0.2 g 면 15° 틀린다. 이 문턱은 명백한 경우만 거른다.)
-    if (gn < 0.2f || fabsf(gn - 1.0f) > 0.15f) return false;
-    *roll  = atan2f(gr, gd);
-    *pitch = atan2f(-gf, sqrtf(gr * gr + gd * gd));
-    return true;
+    const float acc[3] = { gAcc.x, gAcc.y, gAcc.z };
+    return hdg::gravityRollPitch(acc, hdgCfgNow(), roll, pitch);   // 1 g ±0.15 문턱도 거기 하나
 }
 
 // ── 뱃머리 방위 변화율 (°/s) ────────────────────────────────────────────
@@ -2327,7 +2333,7 @@ static void printImuLine() {
     // 두 방위를 나란히 찍는다. 어느 쪽을 쓸지 정하기 전까지는 재기만 한다.
     // (속도의 도플러 대 위치차분과 같은 방식이다)
     if (magFresh()) {
-        const float flat = headingDeg(), tilt = headingTiltDeg();
+        const float flat = flatHeadingDeg(), tilt = headingTiltDeg();
         if (tilt >= 0.0f)
             Serial.printf("   방위 비교  평평 %5.1f°  |  기울기보정 %5.1f°  |  차이 %+5.1f°\n",
                           flat, tilt, wrap180(tilt - flat));
@@ -2339,18 +2345,24 @@ static void printImuLine() {
 }
 
 // 지금 자세를 평형(힐 0°, 피치 0°)으로 삼는다. 배를 물에 띄우고 평형일 때 쓴다.
+// 지금 자세를 평형 기준각으로 삼고 NVS 에 남긴다. 저장됐으면 true.
+// 진단 출력(doLevel)과 나눠 둔다 — 운영 설정을 바꾸는 곳은 이 함수 하나다 (NEXT 6).
+static bool setLevelFromNow() {
+    imuUpdate();
+    gHeelOffsetDeg  = rawHeelDeg();
+    gPitchOffsetDeg = rawPitchDeg();
+    return prefs::writeWith(gPrefs, "sail", [](Preferences& p) {
+        return prefs::wrote(p.putFloat("heel_off2", gHeelOffsetDeg), sizeof(float)) &&
+               prefs::wrote(p.putFloat("pitch_off", gPitchOffsetDeg), sizeof(float));
+    });
+}
+
 static void doLevel() {
     if (!gImuOk) {
         Serial.println("[IMU] 붙어 있지 않습니다.");
         return;
     }
-    imuUpdate();
-    gHeelOffsetDeg  = rawHeelDeg();
-    gPitchOffsetDeg = rawPitchDeg();
-    const bool saved = prefs::writeWith(gPrefs, "sail", [](Preferences& p) {
-        return prefs::wrote(p.putFloat("heel_off2", gHeelOffsetDeg), sizeof(float)) &&
-               prefs::wrote(p.putFloat("pitch_off", gPitchOffsetDeg), sizeof(float));
-    });
+    const bool saved = setLevelFromNow();
 
     const AxisName hAx(gHeelAxis, gHeelSign), pAx(gPitchAxis, gPitchSign);
     Serial.println("──────────────────────────────────────────");
@@ -2365,6 +2377,9 @@ static void doLevel() {
     Serial.println("  ★ 배를 물에 띄우고 평형일 때 다시 한 번 잡으세요.");
     Serial.println("    책상에서 잡은 기준은 배 위에서 맞지 않습니다.");
 }
+
+// IMU 칩 온도를 적는다 — 진단이 운영 값에 직접 쓰지 않게 (NEXT 6)
+static void noteImuTemp(float c) { gImuTempC = c; }
 
 static void doImu() {
     Serial.println("──────────────────────────────────────────");
@@ -2381,7 +2396,7 @@ static void doImu() {
 
     Serial.println("  가속도·자이로  OK");
     Serial.printf("  자력계         %s\n", gMagOk ? "OK" : "응답 없음");
-    gImuTempC = gImu.getTemperature();
+    noteImuTemp(gImu.getTemperature());
     Serial.printf("  칩 온도        %.1f °C\n", gImuTempC);
     Serial.println("  5초 동안 값을 보여줍니다. 보드를 좌우로 기울여 보세요.");
     Serial.println("  ─────────────────────────────────────");
@@ -2428,235 +2443,8 @@ static void doCalib() {
     Serial.println("──────────────────────────────────────────");
 }
 
-// ── SD카드 확인 (RAK15002, IO 슬롯) ──────────────────────────────────────
-static void doSd() {
-    Serial.println("──────────────────────────────────────────");
-    Serial.printf("  RAK15002 SD — SPI (CLK%d MISO%d MOSI%d CS%d)\n",
-                  rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
+// SD 진단(sd · sdbench)은 diagnostics.cpp 로 옮겼다 (NEXT 6).
 
-    // 카드 삽입 감지. LOW 일 때 카드가 들어 있다 (내부 풀업).
-    pinMode(rak::kSdCardDetect, INPUT_PULLUP);
-    delay(10);
-    int cd = digitalRead(rak::kSdCardDetect);
-    Serial.printf("  카드 감지 GPIO%d = %s\n", rak::kSdCardDetect,
-                  cd == LOW ? "LOW (카드 있음)" : "HIGH (카드 없음?)");
-
-    feedWatchdog();
-    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-
-    // 4 MHz 로 시작한다. 붙고 나서 필요하면 올린다.
-    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
-        Serial.println("  마운트 실패.");
-        Serial.println("");
-        Serial.println("  ★ 진짜 이유는 바로 위의 [E] 로 시작하는 줄에 있습니다.");
-        Serial.println("    라이브러리가 FatFs 오류 번호를 그대로 찍어 줍니다.");
-        Serial.println("");
-        Serial.println("    (13) There is no valid FAT volume");
-        Serial.println("        → 카드는 읽히는데 FAT 가 아니다. 64GB 이상은 공장에서");
-        Serial.println("          exFAT 로 나오고 우리 빌드는 exFAT 를 안 읽는다.");
-        Serial.println("          맥에서 FAT32 로 다시 포맷하면 된다:");
-        Serial.println("            diskutil list");
-        Serial.println("            diskutil eraseDisk FAT32 SAIL MBRFormat /dev/diskN");
-        Serial.println("");
-        Serial.println("    (3) The physical drive cannot work / (1) hard error");
-        Serial.println("        → SPI 가 안 통한다. 카드가 덜 꽂혔거나 모듈이");
-        Serial.println("          IO 슬롯이 아닌 곳에 꽂혔다 (IO 슬롯 전용).");
-        Serial.println("──────────────────────────────────────────");
-        return;
-    }
-
-    uint8_t     t = SD.cardType();
-    const char* typeName = (t == CARD_MMC)    ? "MMC"
-                           : (t == CARD_SD)   ? "SDSC"
-                           : (t == CARD_SDHC) ? "SDHC/SDXC"
-                                              : "알 수 없음";
-    Serial.printf("  카드 종류  %s\n", typeName);
-    Serial.printf("  크기       %llu MB\n", SD.cardSize() / (1024ULL * 1024ULL));
-
-    // 쓰기까지 돼야 기록에 쓸 수 있다.
-    File f = SD.open("/sail_test.txt", FILE_WRITE);
-    if (f) {
-        f.printf("sailing monitor write test, uptime %lu ms\n", (unsigned long)millis());
-        f.close();
-        Serial.println("  쓰기       OK (/sail_test.txt)");
-    } else {
-        Serial.println("  쓰기       실패 — 카드가 쓰기 잠금이거나 가득 찼을 수 있습니다");
-    }
-
-    SD.end();
-    Serial.println("──────────────────────────────────────────");
-}
-
-// ── SD 쓰기 속도 실측 (sdbench) ──────────────────────────────────────────
-//
-// 계획(SDLOG.md §4)이 기대는 숫자를 짐작하지 않고 잰다. 알아야 할 것은 둘이다.
-//
-//   1) 평균 속도   — 초당 1.5 KB 를 감당하나
-//   2) **한 번 쓸 때 제일 오래 걸린 시간** — 이게 진짜 문제다.
-//      평균이 아무리 빨라도 가끔 200 ms 씩 멈추면 10 Hz notify 가 끊긴다.
-//
-// 그래서 실제 기록과 같은 모양으로 쓴다. 153바이트짜리 줄을 512바이트씩 모아
-// 한 번에 내보내고, 5초치마다 flush 한다.
-static void doSdBench(uint32_t rows) {
-    Serial.println("──────────────────────────────────────────");
-    Serial.printf("  SD 쓰기 실측 — %u줄 (10 Hz 로 %.0f초치)\n",
-                  (unsigned)rows, rows / 10.0f);
-
-    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
-        Serial.println("  마운트 실패 — 먼저 sd 로 확인하세요.");
-        Serial.println("──────────────────────────────────────────");
-        return;
-    }
-    SD.mkdir("/SAIL");
-    SD.remove("/SAIL/BENCH.CSV");
-
-    File f = SD.open("/SAIL/BENCH.CSV", FILE_WRITE);
-    if (!f) {
-        Serial.println("  파일을 못 열었습니다.");
-        SD.end();
-        Serial.println("──────────────────────────────────────────");
-        return;
-    }
-
-    // 실제 기록 줄과 길이를 맞춘 본보기 (SDLOG.md §3 의 예시 그대로 153바이트)
-    static const char kSample[] =
-        "1234500,1787492994100,1,37.5123456,126.9123456,5.53,5.61,315.0,11,1.4,"
-        "0.05,-12.3,2.1,344,-0.034,0.012,-1.005,0.2,0.4,-0.1,3.0,-21.2,-16.7,"
-        "68,3.91,0,A3F2\n";
-    const size_t lineLen = strlen(kSample);
-
-    char     buf[1024];
-    size_t   used      = 0;
-    uint32_t maxWrite  = 0, maxFlush = 0;
-    uint32_t writes    = 0, flushes  = 0;
-    uint64_t bytes     = 0;
-    uint32_t sinceFlush = 0;
-
-    // 얼마나 자주 얼마나 오래 멈추는지. 평균만 보면 원인을 못 찾는다.
-    //   칸 경계 (ms):  1, 2, 5, 10, 20, 50, 100, 200, 그 위
-    static const uint32_t kEdge[8] = {1, 2, 5, 10, 20, 50, 100, 200};
-    uint32_t hist[9] = {0};
-
-    // 제일 오래 걸린 여덟 번이 파일의 어느 자리에서 났나.
-    //   일정한 간격이면 → FAT 갱신이나 클러스터 경계 (우리 탓)
-    //   들쭉날쭉하면    → 카드가 속으로 정리하는 것 (카드 탓)
-    uint32_t worstMs[8]  = {0};
-    uint64_t worstAt[8]  = {0};
-
-    const uint32_t t0 = millis();
-    for (uint32_t i = 0; i < rows; ++i) {
-        memcpy(buf + used, kSample, lineLen);
-        used += lineLen;
-
-        if (used >= 512) {
-            const uint32_t a = millis();
-            f.write((const uint8_t*)buf, used);
-            const uint32_t dt = millis() - a;
-            bytes += used;
-            used = 0;
-            ++writes;
-
-            if (dt > maxWrite) maxWrite = dt;
-            int b = 8;
-            for (int k = 0; k < 8; ++k) { if (dt < kEdge[k]) { b = k; break; } }
-            hist[b]++;
-
-            // 제일 느린 여덟 개를 자리와 함께 남긴다
-            if (dt > worstMs[7]) {
-                int k = 7;
-                while (k > 0 && worstMs[k - 1] < dt) {
-                    worstMs[k] = worstMs[k - 1];
-                    worstAt[k] = worstAt[k - 1];
-                    --k;
-                }
-                worstMs[k] = dt;
-                worstAt[k] = bytes;
-            }
-
-            // 5초치(50줄)마다 디스크에 못박는다. 전원이 끊겨도 여기까지는 남는다.
-            if (++sinceFlush >= 50) {
-                sinceFlush = 0;
-                const uint32_t bb = millis();
-                f.flush();
-                const uint32_t df = millis() - bb;
-                if (df > maxFlush) maxFlush = df;
-                ++flushes;
-            }
-        }
-        if ((i & 0xFF) == 0) feedWatchdog();
-    }
-    if (used > 0) { f.write((const uint8_t*)buf, used); bytes += used; }
-    f.flush();
-    const uint32_t elapsed = millis() - t0;
-    const uint32_t size    = f.size();
-    f.close();
-
-    const uint64_t totalB = SD.totalBytes();
-    const uint64_t usedB  = SD.usedBytes();
-    SD.end();
-
-    const float sec  = elapsed / 1000.0f;
-    const float kbps = (bytes / 1024.0f) / (sec > 0 ? sec : 1);
-
-    Serial.println("  ─────────────────────────────────────");
-    Serial.printf("  쓴 양            %llu 바이트 (파일 %u)\n",
-                  (unsigned long long)bytes, (unsigned)size);
-    Serial.printf("  걸린 시간        %.2f 초\n", sec);
-    Serial.printf("  평균 속도        %.0f KB/초\n", kbps);
-    Serial.printf("  우리가 쓸 양     1.5 KB/초  →  여유 %.0f배\n", kbps / 1.5f);
-    Serial.printf("  카드 전체 %llu MB  쓴 자리 %llu MB\n",
-                  (unsigned long long)(totalB / 1048576ULL),
-                  (unsigned long long)(usedB / 1048576ULL));
-    Serial.println("  ─────────────────────────────────────");
-    Serial.printf("  한 번 쓰기       %u번,  제일 오래 %u ms\n",
-                  (unsigned)writes, (unsigned)maxWrite);
-    Serial.printf("  flush            %u번,  제일 오래 %u ms\n",
-                  (unsigned)flushes, (unsigned)maxFlush);
-
-    Serial.println("  ─── 얼마나 오래 멈췄나 ───");
-    static const char* kLabel[9] = {
-        "     ~1 ms", "  1~2 ms", "  2~5 ms", " 5~10 ms", "10~20 ms",
-        "20~50 ms", "50~100 ms", "100~200 ms", "200 ms 위"};
-    for (int k = 0; k < 9; ++k) {
-        if (!hist[k]) continue;
-        Serial.printf("  %-10s %7u번  (%.3f%%)\n",
-                      kLabel[k], (unsigned)hist[k], 100.0f * hist[k] / writes);
-    }
-
-    Serial.println("  ─── 제일 오래 멈춘 자리 ───");
-    Serial.println("  일정한 간격이면 FAT 갱신·클러스터 경계, 들쭉날쭉하면 카드 사정이다.");
-    uint64_t prev = 0;
-    // 자리 순서로 다시 보여 준다 (간격을 눈으로 보려고)
-    for (int a = 0; a < 8; ++a) {
-        for (int b2 = a + 1; b2 < 8; ++b2) {
-            if (worstAt[b2] && (!worstAt[a] || worstAt[b2] < worstAt[a])) {
-                uint64_t ta = worstAt[a]; worstAt[a] = worstAt[b2]; worstAt[b2] = ta;
-                uint32_t tm = worstMs[a]; worstMs[a] = worstMs[b2]; worstMs[b2] = tm;
-            }
-        }
-    }
-    for (int k = 0; k < 8; ++k) {
-        if (!worstMs[k]) continue;
-        Serial.printf("  %3u ms  파일 %8.2f MB 자리", (unsigned)worstMs[k],
-                      worstAt[k] / 1048576.0);
-        if (prev) Serial.printf("   (앞것과 %.2f MB 차이)", (worstAt[k] - prev) / 1048576.0);
-        Serial.println();
-        prev = worstAt[k];
-    }
-
-    Serial.println("  ─────────────────────────────────────");
-    const uint32_t worst = maxWrite > maxFlush ? maxWrite : maxFlush;
-    if (worst < 100) {
-        Serial.printf("  제일 오래 멈춘 시간 %u ms — notify 주기 100 ms 안이다.\n",
-                      (unsigned)worst);
-    } else {
-        Serial.printf("  ★ 제일 오래 멈춘 시간 %u ms — notify 주기 100 ms 를 넘는다.\n",
-                      (unsigned)worst);
-        Serial.println("    메인 루프에서 직접 쓰면 안 된다. 쓰기 작업을 따로 띄운다.");
-    }
-    Serial.println("──────────────────────────────────────────");
-}
 
 
 // ── 저장 버튼 ────────────────────────────────────────────────────────────
@@ -2784,12 +2572,14 @@ static constexpr uint32_t kRtcMagic = 0x5A5AC0DE;
 
 static void armButtonWake();                       // 아래 "끄기 (깊은잠)" 항목
 static void controlSay(const char* line);          // 아래 "BLE 제어" 항목
-static void doSleepStat();                         // 아래 "잠자기 기록" 항목
 static void sleepLogToCard();
 static bool logStartNow(uint32_t prevSession = 0);  // 아래 "기록 (hlog)" 항목
 // 버튼·시리얼·켤 때 이어 시작·쓰기 실패 뒤 다시 걸기가 **모두** 이것으로 시작한다.
-// 결과를 같은 말로 찍고, 실패면 gRecFailed 를 세운다 (앱 배경 빨강).
+// 결과를 같은 말로 찍는다. 성공하면 NVS rec_open 에 세션 번호를 적는다. 실패 뒤 할 일은 부른 쪽이 정한다.
 static bool recStartFrom(const char* who, uint32_t prev = 0);
+static bool recWantOn(const char* who);    // 원하는 상태 → 기록
+static void recWantOff(const char* who);   // 원하는 상태 → 멈춤. 닫기는 요청만 한다
+static void requestPowerOff(bool force);   // 닫힌 뒤 잠든다. force 는 사람이 두 번째로 고른 강제 끄기
 static void feedWatchdog();                        // 아래 "워치독" 항목
 
 static void buttonBegin() {
@@ -2810,7 +2600,7 @@ static void buttonBegin() {
     }
 }
 
-static void goToSleep(uint32_t testWakeSec = 0);   // 아래 "끄기 (깊은잠)" 항목
+static void goToSleep(uint32_t testWakeSec = 0, bool leaveCard = false);   // 아래 "끄기 (깊은잠)" 항목
 
 // 누른 시간을 막대 퍼센트로. 5초를 가득 찬 것으로 본다.
 static int btnPct(uint32_t heldMs) {
@@ -2854,14 +2644,11 @@ static void buttonPoll(uint32_t nowMs) {
     if (gBtnDown && !gBtnLongDone && nowMs - gBtnDownAt >= kBtnLongMs) {
         gBtnLongDone = true;
         if (hlog::recording()) {
-            // ★ stop() 은 다 쓸 때까지 최대 15초 루프를 붙잡는다 (hlog.cpp).
-            //   그 동안 막대가 얼어붙는다. 그래서 **부르기 전에** 화면을 먼저
-            //   그려서, 멈춘 그 한 장이 무슨 일이 벌어지는지 말하게 한다.
+            // 멈추라고 요청만 한다. 닫기는 일꾼이 하고 루프는 안 멈춘다 (닫는 동안 1줄에 SAVING).
             gBtnOwnsScreen = true;
             sail::displayHoldBar(btnPct(nowMs - gBtnDownAt), "기록 종료", "저장 중");
             Serial.println("[BTN] 길게 — 기록 종료");
-            gRecRestartAt = 0;       // 사람이 멈췄다
-            hlog::stop();
+            recWantOff("단추");
         } else {
             // 아직 시작하지 않는다. 5초를 넘기면 끄기로 갈 사람일 수 있다.
             gBtnStartOnUp = true;
@@ -2883,8 +2670,10 @@ static void buttonPoll(uint32_t nowMs) {
             gBtnStartOnUp = false;      // 예약해 둔 기록 시작을 버린다
             gBtnOwnsScreen = true;
             sail::displayHoldBar(100, "끄는 중", nullptr);
-            goToSleep();                // 여기서 안 돌아오는 게 정상이다
-            // 버튼이 안 떨어져서 못 끄고 돌아온 경우다.
+            // 기록이 닫혀 있으면 여기서 잠든다. 닫는 중이면 닫힌 뒤 루프가 재운다.
+            // 15초 넘게 못 닫아 "5초 더 누르면 끔" 을 띄운 뒤라면 이번 누름이 강제 끄기다.
+            requestPowerOff(gOffForceArmed);
+            // 버튼이 안 떨어져서 못 끄고 돌아왔거나, 닫기를 기다리는 중이다.
             gBtnOwnsScreen = false;
             gBtnLongDone = true;
             gBtnIgnoreUntilUp = true;
@@ -2907,7 +2696,10 @@ static void buttonPoll(uint32_t nowMs) {
         if (gBtnStartOnUp) {
             gBtnStartOnUp = false;
             Serial.printf("[BTN] 놓음(%ums) — 기록 시작\n", (unsigned)held);
-            const bool okS = recStartFrom("단추");
+            // ★ 사람의 시작 요청은 한 진입점(recWantOn)으로 — rec on 과 같은 원하는 상태·NVS rec_want 를 세운다.
+            //   옛 코드는 여기만 recStartFrom 을 직접 불러서, 단추로 시작한 세션은 쓰기 실패 뒤 다시 걸기도
+            //   전원 끊김 뒤 이어 시작도 안 됐다 (2026-09-15 검토 1번).
+            const bool okS = recWantOn("단추");
             gBtnOwnsScreen = true;
             // ★ 결과대로 보여준다. 옛 코드는 실패해도 "기록 시작" 을 띄웠다.
             //   실패는 3초 보여준다. 물 위에서 한 번에 읽혀야 한다.
@@ -2939,9 +2731,9 @@ static void buttonPoll(uint32_t nowMs) {
 //   나중에 카드를 뽑아 읽을 수도 있다.
 static void sleepLogToCard() {
     if (gRtcMagic != kRtcMagic || gRtcSleptUs == 0) return;
-    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) return;
+    if (!sdcard::acquire(sdcard::Owner::Diagnostic)) return;     // 카드는 사용권으로 쥔다 (sdcard.h)
     File f = SD.open("/SLEEP.TXT", FILE_APPEND);
-    if (!f) return;
+    if (!f) { sdcard::release(sdcard::Owner::Diagnostic); return; }
     const double sec = (double)gRtcSleptUs / 1e6;
     // ★ 깰 때 전압과 거기서 나온 낙차는 안 적는다. 못 믿는 값이다 (doSleepStat 참고).
     f.printf("잔시간 %.1fs  잘때 %umV  GPS바이트 %u  "
@@ -2950,6 +2742,7 @@ static void sleepLogToCard() {
              (unsigned)gRtcGpsBytes, (unsigned)gRtcSleeps,
              (unsigned)gRtcFalse, (unsigned)gRtcFull);
     f.close();
+    sdcard::release(sdcard::Owner::Diagnostic);
 }
 
 // ── `magcal` — 자력계 치우침 재기 ────────────────────────────────────────
@@ -2969,20 +2762,19 @@ static char gSessNote[420];
 static void buildHeadingNote(char* out, size_t n) {
     const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
     snprintf(out, n,
-             "# 방위(화면·BLE·TXT): 평평 — atan2(자력 %s, 자력 %s) + 장착 오프셋 %+.2f° + 자기 편각 %+.2f°. 기울기 보정 없음\n"
+             "# 방위(화면·BLE·TXT): 기울기 보정(INSLIB ahrs_mag_detilt) — 축 atan2(자력 %s, 자력 %s) 기준, 중력은 그때 가속도, |a| 가 1 g ±0.15 밖이면 방위 없음. + 장착 오프셋 %+.2f° + 자기 편각 %+.2f°\n"
              "# 자력: HLG 의 mag 는 하드아이언을 뺀 값 — 뺀 오프셋 %.2f %.2f %.2f uT (반지름 %.1f, 잔차 %.2f)\n"
              "# 가속→자력 축: 자력 X=가속 Y, Y=가속 X, Z=−가속 Z\n",
              aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg,
              gMagOff[0], gMagOff[1], gMagOff[2], gMagRadius, gMagResid);
 }
-// 기록 중 방위·자력 설정이 바뀌면 TXT 에 한 줄 남긴다. 옛 코드는 아무 흔적이 없었다.
-static void noteHeadingConfigChanged(const char* what) {
-    if (!hlog::recording()) return;
-    char line[240];
-    const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
-    snprintf(line, sizeof(line), "%s → 축 %s %s, 오프셋 %+.2f°, 편각 %+.2f°, 자력 오프셋 %.2f %.2f %.2f uT",
-             what, aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg, gMagOff[0], gMagOff[1], gMagOff[2]);
-    hlog::noteEvent(line);
+// 기록 중에는 방위·자력·힐·피치 설정을 못 바꾼다 (2026-09-15 검토 4번).
+// HLG 머리글은 시작 때 설정 하나만 담는다. 도중에 바꾸면 보드 화면·워치와 앱 재생이 어긋난다.
+// (옛 코드는 바꾸게 두고 TXT 에만 적었는데, 앱은 TXT 를 안 읽는다)
+static bool settingsLockedWhileRecording(const char* what) {
+    if (hlog::phase() == recctl::Phase::Idle) return false;
+    Serial.printf("[설정] %s — 기록 중에는 못 바꿉니다 (파일 머리글과 어긋남). rec off 뒤에 바꾸세요.\n", what);
+    return true;
 }
 
 static bool magCalSave() {
@@ -3050,14 +2842,15 @@ static void magCalCmd(const String& arg, char* out, size_t n) {
         return;
     }
     if (arg == "clear") {
+        if (settingsLockedWhileRecording("magcal clear")) return;
         gMagOff[0] = gMagOff[1] = gMagOff[2] = 0.0f;
         gMagRadius = gMagResid = 0.0f;
         const bool ok = magCalSave();
-        noteHeadingConfigChanged("magcal clear");
         snprintf(out, n, ok ? "magcal 지웠습니다 (치우침 0)" : "magcal 지웠지만 보드에 못 적었습니다");
         return;
     }
     if (arg == "stop") {
+        if (settingsLockedWhileRecording("magcal stop")) return;
         if (!gMagCalOn) {
             snprintf(out, n, "magcal 모으는 중이 아닙니다 — magcal on 부터 누르세요");
             return;
@@ -3086,7 +2879,6 @@ static void magCalCmd(const String& arg, char* out, size_t n) {
         gMagRadius = fit.r;
         gMagResid  = fit.resid;
         const bool saved = magCalSave();
-        noteHeadingConfigChanged("magcal stop");
         snprintf(out, n, "magcal %s — 치우침 %.1f %.1f %.1f uT | 반지름 %.1f±%.2f uT | 두께 %.1f | 점 %d",
                  saved ? "저장" : "적용(보드에 못 적음)",
                  gMagOff[0], gMagOff[1], gMagOff[2], gMagRadius, gMagResid,
@@ -3118,63 +2910,6 @@ static void magCalTick(uint32_t nowMs) {
     controlSay(msg);      // 시리얼과 BLE 양쪽으로 나간다
 }
 
-// `sleepstat` — 지난번에 정말 잤나.
-//
-// 자는 보드는 아무 말도 못 한다. 그래서 잠들기 직전에 RTC 메모리에 적어 둔 것을
-// 깨어난 뒤에 읽는다. 여기서 갈리는 것은 두 가지다.
-//
-//   헛깬 횟수가 많다  → 자다 깨다를 반복한 것이다. 버튼 핀이 뜨고 있다
-//   시간당 낙차가 크다 → 자는 동안 뭔가가 켜져 있다
-//
-// 낙차는 배터리 용량을 몰라도 쓸 수 있다. 리튬폴리머는 3.7~3.9 V 구간이
-// 제일 평평해서, 거기서 시간당 10 mV 넘게 빠지면 µA 급이 아니다.
-static void doSleepStat() {
-    Serial.println("──────────────────────────────────────────");
-    if (gRtcMagic != kRtcMagic) {
-        Serial.println("  아직 한 번도 안 잤습니다 (off 명령이나 버튼 5초)");
-        Serial.println("──────────────────────────────────────────");
-        return;
-    }
-    Serial.printf("  잠든 횟수         %u\n", (unsigned)gRtcSleeps);
-    Serial.printf("  헛깸(5초 못 채움) %u   ← 크면 버튼 핀이 뜨는 것이다\n",
-                  (unsigned)gRtcFalse);
-    Serial.printf("  5초 채워 켜짐     %u\n", (unsigned)gRtcFull);
-
-    if (gRtcSleptUs == 0) {
-        Serial.println("  아직 깨어난 적이 없습니다.");
-        Serial.println("──────────────────────────────────────────");
-        return;
-    }
-    const double sec = (double)gRtcSleptUs / 1e6;
-    Serial.printf("  마지막으로 잔 시간 %.1f 초 (%.2f 시간)\n", sec, sec / 3600.0);
-    // ★ 깰 때 전압은 안 보여준다.
-    //
-    //   깬 직후에는 배터리 값이 틀리게 읽힌다. 얼마나 잤느냐에 따라 다르게
-    //   틀린다 — 5분 자면 2198, 60분 자면 3393 mV 로 나왔다. 5분만 자도
-    //   전압이 15 mV **올라가** 있다. 배터리가 저절로 충전될 리 없다.
-    //   [확인: 2026-09-09~10, off 300 과 13시간짜리 두 판]
-    //
-    //   원인을 못 찾았다. 세 가지를 짚었는데 셋 다 아니었다 (핀 떼어놓기,
-    //   디지털 입력 버퍼 끄기, 3V3_S 켜기).
-    //
-    //   ★ 그런데 이걸 화면에 숫자로 뱉어 뒀더니 **내가 그 위에 13시간짜리
-    //     측정을 쌓았다.** 문서에 "못 믿는 값" 이라고 적어 뒀는데도 그랬다.
-    //     적어 두는 걸로는 안 막힌다. 안 보여주는 것으로 막는다.
-    //     이 저장소의 원칙 그대로다 — 값이 없으면 없다고 보여준다.
-    Serial.printf("  잘 때 %u mV\n", (unsigned)gRtcSleepMv);
-    Serial.println("  깰 때  --   (깬 직후 값은 못 믿는다. 원인 미상)");
-    Serial.printf("  깨자마자 GPS 가 뱉은 바이트  %u\n", (unsigned)gRtcGpsBytes);
-    Serial.println(gRtcGpsBytes > 0
-        ? "  ★ 0 이 아닙니다 — 자는 동안 3V3_S 가 안 꺼졌습니다. GPS 가 계속 돌았습니다."
-        : "  0 입니다 — 3V3_S 는 제대로 꺼져 있었습니다.");
-
-    Serial.println("  ※ 시간당 낙차는 안 계산한다. 깰 때 값을 못 믿으므로");
-    Serial.println("    거기서 나오는 숫자도 못 믿는다. 잠자기 전류를 재려면");
-    Serial.println("    멀티미터를 배터리 선에 물려야 한다 (POWER.md).");
-    Serial.println("  ※ ADC 소스 임피던스가 2.5 MΩ 라 mV 단위는 흔들립니다.");
-    Serial.println("  ※ USB 를 꽂은 채로 재면 충전 때문에 값이 무의미합니다.");
-    Serial.println("──────────────────────────────────────────");
-}
 
 // `hdgtilt` — 기울기 보정이 제대로 되는지 손으로 기울여 확인한다.
 //
@@ -3215,7 +2950,7 @@ static void doHeadingTilt() {
         //   실제로 그렇게 재서 힐이 20줄 내내 +46.5° 로 똑같이 나왔다 (2026-09-09).
         imuDrainFifo();
         imuUpdate();
-        const float flat = headingDeg(), tilt = headingTiltDeg();
+        const float flat = flatHeadingDeg(), tilt = headingTiltDeg();
         if (flat >= 0.0f && flatN < 32) flatS[flatN++] = flat;
         if (tilt >= 0.0f && tiltN < 32) tiltS[tiltN++] = tilt;
         float roll = NAN, pitch = NAN;
@@ -3273,29 +3008,6 @@ static void doHeadingTilt() {
     Serial.println("──────────────────────────────────────────");
 }
 
-// `oledw` — 화면에 쓸 한글 줄이 실제로 들어가나 재본다.
-//
-// 눈대중으로 자리를 잡지 않는다. 그리고 **글꼴에 없는 글자는 폭 0 으로 나온다.**
-// 그래서 폭을 재면 빠진 글자까지 같이 잡아낸다. 한글 한 자는 16px, 빈칸과
-// 숫자는 8px 여야 맞다.
-static void doOledWidth() {
-    static const char* kLines[] = {
-        "켜는 중", "놓으면 취소", "켜집니다",
-        "누르면 꺼짐", "놓으면 기록시작", "기록 멈춤",
-        "끄는 중", "기록 저장 중", "기록 종료", "저장 중",
-        "기록 시작", "꺼졌습니다", "5초 눌러 켜기",
-        "버튼이 눌린 채", "끄지 않습니다", "손을 떼세요",
-    };
-    Serial.println("──────────────────────────────────────────");
-    Serial.println("  화면 글자 폭 (128px 안에 들어가야 한다)");
-    Serial.println("  한글 16px · 빈칸/숫자 8px. 0 이 섞이면 글꼴에 없는 글자다.");
-    for (const char* t : kLines) {
-        const int w = sail::displayTextWidth(t);
-        Serial.printf("  %-20s %4d px  %s\n", t, w,
-                      w < 0 ? "화면 없음" : (w <= 128 ? "OK" : "★ 넘침"));
-    }
-    Serial.println("──────────────────────────────────────────");
-}
 
 // 자는 동안 버튼이 보드를 깨울 수 있게 걸어 둔다.
 //
@@ -3373,31 +3085,22 @@ static void armButtonWake() {
 // Core and WisBlock Sensor on it, the sleep current is lower than 10 µA"].
 // testWakeSec 이 0 이 아니면 그 초 뒤에 **스스로** 깬다. 재보려고 만든 길이다.
 // 사람이 버튼을 눌러 줄 때까지 기다리면 한 번 재는 데 사람이 붙어 있어야 한다.
-static void goToSleep(uint32_t testWakeSec) {
+static void goToSleep(uint32_t testWakeSec, bool leaveCard) {
     Serial.println("[SLEEP] 끕니다");
 
-    // 1) 기록부터 닫는다. 최대 15초 걸린다.
-    if (hlog::recording()) {
-        sail::displayHoldBar(100, "끄는 중", "기록 저장 중");
-        hlog::stop();
-        feedWatchdog();
-    }
-    // 사람이 껐다. 기록 중이 아니었어도 이어 시작 표시를 지운다.
-    // 저절로 멈춘 뒤 끄면 표시가 남아서, 다음에 켤 때 기록이 제멋대로 시작됐다.
-    //
-    // ★ 단, 닫기가 아직 안 끝났으면(카드가 답이 없어 15초 초과) 표시를 남기고 카드도 안 뗀다.
-    //   파일이 열린 채라 끊긴 세션이 맞고, 일꾼이 쓰는 중에 SD.end() 를 부르면 해제된
-    //   메모리를 만질 수 있다 (2026-09-14 리뷰).
-    if (hlog::busy()) {
-        Serial.println("[SLEEP] ★ 기록 파일이 아직 안 닫혔습니다 — 이어 시작 표시를 남기고 카드는 안 뗍니다");
+    // 1) 기록은 여기 오기 전에 닫혀 있다 (requestPowerOff 가 닫힐 때까지 루프에서 기다린다).
+    //    이어 시작 의도(rec_want)는 끄기를 요청할 때 이미 0 이다.
+    // ★ 강제 끄기(leaveCard)거나 아직 닫는 중이면 카드를 안 뗀다. 일꾼이 쓰는 중에 SD.end() 를
+    //   부르면 해제된 메모리를 만질 수 있다 (2026-09-14 리뷰). 일꾼도 지우지 않는다.
+    if (leaveCard || hlog::busy()) {
+        Serial.println("[SLEEP] ★ 기록 파일이 아직 안 닫혔습니다 — 카드는 안 뗍니다 (미완료 세션)");
     } else {
-        hlog::clearCutFlag();
         // 1b) SD 카드를 놓아준다.
         //
         // ★ 카드는 3V3_S 가 아니라 VDD 에 물려 있다. 3V3_S 를 내려도 안 꺼진다.
         //   [확인: 2026-09-08, `power off` 뒤에도 `sd` 가 카드를 찾고 글씨까지 썼다]
         //   SPI 를 안 놓아주면 칩셀렉트가 눌린 채로 남아 카드가 계속 깨어 있다.
-        SD.end();
+        sdcard::endForSleep();
     }
 
     // 2) 무전기. 안 재우면 자는 동안 혼자 듣느라 수 mA 를 먹는다.
@@ -3770,7 +3473,7 @@ static void logWriteText(uint32_t nowMs) {
     t.attOk    = gImuOk;
     t.heelDeg  = currentHeelDeg();
     t.pitchDeg = currentPitchDeg();
-    t.hdgDeg   = headingDeg();
+    t.hdgDeg   = boatHeadingDeg();
     // 1노트 아래에서 어느 길이 살아남는지 보려고 셋을 같이 남긴다 (hlog.h 참고).
     // ★ 표식이 4 이상일 때만 값을 넣는다. 3 은 옛날 값이라 넣으면 거짓말이 된다.
     t.sogPvKn  = (gPvVelValid && gPvSpeedKn >= 0) ? gPvSpeedKn : -1.0f;
@@ -3821,6 +3524,14 @@ bool logStartNow(uint32_t prevSession) {
     h.pitchSign = (gPitchSign < 0.0f) ? 1 : 0;
     h.heelOff   = gHeelOffsetDeg;
     h.pitchOff  = gPitchOffsetDeg;
+    // 방위를 다시 구할 설정 — 화면·BLE·TXT 가 쓰는 boatHeadingDeg 의 식과 입력
+    h.hdgFormula = hlog::kHdgFormulaTilt;
+    h.hdgAxisA = gHdgAxisA;  h.hdgAxisB = gHdgAxisB;
+    h.hdgSignA = (gHdgSignA < 0.0f) ? 1 : 0;
+    h.hdgSignB = (gHdgSignB < 0.0f) ? 1 : 0;
+    h.hdgOff   = gHdgOffsetDeg;
+    h.hdgDecl  = gHdgDeclDeg;
+    for (int i = 0; i < 3; ++i) h.magHi[i] = gMagOff[i];
     // 모듈에서 실제로 읽은 값만 적는다. 못 읽었으면 255(모름). NVS 는 안 본다.
     h.gnssDyn = gGpsDyModel;
     buildHeadingNote(gSessNote, sizeof(gSessNote));
@@ -3842,6 +3553,36 @@ bool logStartNow(uint32_t prevSession) {
     return true;
 }
 
+// ── 기록 제어 — 원하는 상태(gWantRec)와 실제 상태(hlog::phase) ────────────
+//
+// NVS 두 칸 (rec_control.h Persist)
+//   rec_want  켜면 다시 걸 의도. 사람이 시작하면 1, 멈추거나 끄면 그 순간 0
+//   rec_open  마감 안 된 세션 번호. 시작하면 번호, 결과를 받으면 0
+// 옛 rec_on 한 칸은 두 뜻이 섞여서, 사람이 멈춘 세션을 켤 때 이어받는 버그가 났다 (세션 58).
+static void recSaveWant(bool want) {
+    if (!prefs::writeWith(gPrefs, "sail", [&](Preferences& p) {
+            return prefs::wrote(p.putUChar("rec_want", want ? 1 : 0), 1);
+        }))
+        Serial.println("[REC] ★ 이어 시작 의도(rec_want)를 못 적었습니다");
+}
+static void recSaveOpen(uint32_t session) {
+    if (!prefs::writeWith(gPrefs, "sail", [&](Preferences& p) {
+            return prefs::wrote(p.putUInt("rec_open", session), 4);
+        }))
+        Serial.println("[REC] ★ 열린 세션(rec_open)을 못 적었습니다");
+}
+
+// IMU 가 끊겨 있던 동안의 100 Hz 표본은 기록에 없다. 머리글 dropped 에 어림으로 더한다.
+// 다시 붙을 때 · 기록을 멈출 때 부른다. 정산한 시각으로 옮겨 두어 같은 구간을 두 번 세지 않는다.
+// 기록 시작 전에 끊긴 시간은 세지 않는다.
+static uint32_t gImuLostAt     = 0;   // 0 이면 붙어 있다
+static uint32_t gImuPauseUntil = 0;   // 시험: 이때까지 IMU 가 없는 척한다 (test imu <초>)
+static void settleImuGap(uint32_t untilMs) {
+    if (!gImuLostAt) return;
+    if (hlog::recording()) hlog::noteDropped(recctl::imuGapRows(gImuLostAt, hlog::recStartedMs(), untilMs));
+    gImuLostAt = untilMs;
+}
+
 static bool recStartFrom(const char* who, uint32_t prev) {
     const uint32_t t0 = millis();
     const bool ok = logStartNow(prev);
@@ -3849,14 +3590,71 @@ static bool recStartFrom(const char* who, uint32_t prev) {
         hlog::Status st; hlog::getStatus(&st);
         Serial.printf("[REC] 시작 (%s) — %s  %lums\n", who, st.path,
                       (unsigned long)(millis() - t0));
-        gRecFailed = false;
+        recSaveOpen(st.session);
+        gRecLastSaveBad = false;   // 새 세션이 돈다. 앞 세션 저장 실패는 NVS rec_fail 과 TXT 머리에 남아 있다
     } else {
         Serial.printf("[REC] ★ 시작 못 함 (%s) — %s\n", who,
                       gRecStartErr ? gRecStartErr : "알 수 없음");
-        gRecFailed = true;
-        if (prev) gRecFailSession = prev;
     }
     return ok;
+}
+
+static bool recWantOn(const char* who) {
+    gRecGaveUp = false; gRecRestarts = 0; gRecRestartAt = 0;
+    gWantRec = true;
+    recSaveWant(true);
+    const recctl::Phase ph = hlog::phase();
+    if (ph == recctl::Phase::Recording) return true;
+    if (ph == recctl::Phase::Closing) {
+        Serial.printf("[REC] 앞 기록을 닫는 중 — 닫히면 시작합니다 (%s)\n", who);
+        return true;
+    }
+    const bool ok = recStartFrom(who);
+    if (!ok) { gWantRec = false; recSaveWant(false); }   // 사람이 건 시작이 안 됐다. 이유는 화면·시리얼에 이미 냈다
+    return ok;
+}
+
+static void recWantOff(const char* who) {
+    gWantRec = false; gRecGaveUp = false; gRecRestartAt = 0; gRecRestarts = 0;
+    recSaveWant(false);
+    if (hlog::phase() != recctl::Phase::Recording) return;
+    settleImuGap(millis());
+    hlog::requestStop();
+    Serial.printf("[REC] 멈춤 요청 (%s) — 닫는 중\n", who);
+}
+
+static void recOnResult(const recctl::SessionResult& r, uint32_t now);   // 아래 recControlTick 옆
+
+static void requestPowerOff(bool force) {
+    { recctl::SessionResult r; if (hlog::poll(&r)) recOnResult(r, millis()); }
+    if (force) {
+        // 사람이 두 번째로 고른 길. 세션·사유·재개 취소를 NVS 에 남기고, 카드와 일꾼은 건드리지 않고 잔다.
+        hlog::Status st; hlog::getStatus(&st);
+        char line[160];
+        snprintf(line, sizeof(line), "세션 %u 닫기가 안 끝난 채 사람이 강제로 껐습니다 (미완료)", (unsigned)st.session);
+        prefs::writeWith(gPrefs, "sail", [&](Preferences& p) {
+            return prefs::wrote(p.putUChar("rec_want", 0), 1) &&
+                   prefs::wrote(p.putUInt("rec_forced", st.session), 4) &&
+                   p.putString("rec_fail", line) > 0;
+        });
+        Serial.printf("[SLEEP] ★ %s\n", line);
+        gWantRec = false;
+        gOffRequestedAt = 0; gOffForceArmed = false;
+        goToSleep(0, true);
+        return;
+    }
+    if (hlog::phase() == recctl::Phase::Recording) {
+        recWantOff("끄기");
+    } else if (gWantRec || gRecGaveUp) {
+        gWantRec = false; gRecGaveUp = false; gRecRestartAt = 0;
+        recSaveWant(false);
+    }
+    if (hlog::phase() == recctl::Phase::Idle) { gOffRequestedAt = 0; goToSleep(); return; }
+    if (!gOffRequestedAt) {
+        gOffRequestedAt = millis();
+        gOffForceArmed = false;
+        Serial.println("[SLEEP] 기록을 닫는 중 — 닫히면 끕니다");
+    }
 }
 
 // ── 한 바퀴에 얼마나 걸리나 (probe) ──────────────────────────────────────
@@ -3914,6 +3712,22 @@ static bool gWatchdogOn = false;
 static void feedWatchdog() {
     if (gWatchdogOn) esp_task_wdt_reset();
 }
+// diagnostics.cpp 가 부른다 — 배터리 재기와 잠자기 기록은 main 에 있다
+float sailReadBatteryVolts(uint32_t* mv) { return readBatteryVolts(mv); }
+float sailBatteryPercent(float volts) { return batteryPercent(volts); }
+static diag::SleepStats sleepStatsNow() {
+    diag::SleepStats st;
+    st.everSlept  = (gRtcMagic == kRtcMagic);
+    st.sleeps     = (uint32_t)gRtcSleeps;
+    st.falseWakes = (uint32_t)gRtcFalse;
+    st.fullWakes  = (uint32_t)gRtcFull;
+    st.sleptUs    = (uint64_t)gRtcSleptUs;
+    st.sleepMv    = (uint32_t)gRtcSleepMv;
+    st.gpsBytes   = (uint32_t)gRtcGpsBytes;
+    return st;
+}
+// diagnostics.cpp 가 부른다 (헤더를 서로 물지 않게 함수 하나로 준다)
+void sailFeedWatchdog() { feedWatchdog(); }
 
 // ── 지난번에 왜 다시 켜졌나 ──────────────────────────────────────────────
 //
@@ -3967,24 +3781,20 @@ static bool i2cPing(uint8_t addr) {
 
 // 1 Hz 로 부른다. 사라진 센서는 끄고, 돌아온 센서는 다시 붙인다.
 static void checkSensors() {
-    static uint32_t lostAt = 0, lastTry = 0;
-    const bool imuNow = i2cPing(rak::kAddrImu);
+    static uint32_t lastTry = 0;
+    // 시험(test imu <초>) 중에는 칩이 대답해도 없는 것으로 본다 — 체크리스트 12 "IMU 5초 끊긴 채 종료"
+    const bool imuNow = i2cPing(rak::kAddrImu) && (int32_t)(millis() - gImuPauseUntil) >= 0;
     if (gImuOk && !imuNow) {
         gImuOk = false;
         gMagOk = false;
         gFifoOn = false;                        // 칩이 사라졌다. FIFO 도 없다
-        lostAt = millis();
+        gImuLostAt = millis();
         Serial.println("[IMU] 응답이 끊겼습니다 — 힐·9축은 무효로 내보냅니다");
     } else if (!gImuOk && imuNow && millis() - lastTry >= 5000) {
         lastTry = millis();        // 붙이기가 0.3초 루프를 잡으니 5초에 한 번만
         if (imuAttach("다시 연결")) {
-            // 끊겨 있던 동안의 100 Hz 표본은 기록에 없다. 머리글 dropped 에 어림으로 더한다.
-            //   기록 시작 전에 끊긴 시간은 세지 않는다.
-            if (lostAt && hlog::recording()) {
-                const uint32_t from = (int32_t)(lostAt - hlog::recStartedMs()) > 0 ? lostAt : hlog::recStartedMs();
-                hlog::noteDropped((millis() - from) / 10);
-            }
-            lostAt = 0;
+            settleImuGap(millis());   // 끊겨 있던 동안을 dropped 에 더한다 (이미 정산한 구간은 빼고)
+            gImuLostAt = 0;
         }
     }
 
@@ -4015,7 +3825,7 @@ static sail::TelemetryExtra buildExtra() {
     e.imuOk        = gImuOk;
     e.magOk        = magFresh();   // 붙어 있고 새 표본이 온다
     e.recording    = hlog::recording();
-    e.recFailed    = gRecFailed;
+    e.recFailed    = recctl::showFailed(gWantRec, hlog::phase(), gRecGaveUp, gRecLastSaveBad);
     e.satellites   = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
 
     // HDOP — 작을수록 정확하다. 음수는 "모름" 이라는 뜻이다.
@@ -4028,7 +3838,7 @@ static sail::TelemetryExtra buildExtra() {
     if (!gGpsFix || hdop > 20.0f) hdop = -1.0f; // 20 넘는 HDOP 은 어차피 못 쓴다
     e.hdop = hdop;
 
-    e.headingDeg = headingDeg();
+    e.headingDeg = boatHeadingDeg();
     e.pitchDeg   = currentPitchDeg();
     e.accX = gAcc.x; e.accY = gAcc.y; e.accZ = gAcc.z;
     e.gyrX = gGyr.x; e.gyrY = gGyr.y; e.gyrZ = gGyr.z;
@@ -4486,15 +4296,13 @@ static void printHelp() {
 // SD 를 따로 붙이는 진단·목록 명령. 기록기나 파일 서버가 카드를 쥐고 있으면 안 된다.
 // 둘 다 같은 SD 객체를 쓰고, 누가 SD.end() 를 부르면 남의 파일이 끊긴다.
 static bool sdFreeFor(const char* what) {
-    if (hlog::busy()) {
-        Serial.printf("[SD] %s — 기록 중에는 못 합니다. rec off 먼저.\n", what);
-        return false;
-    }
-    if (netsrv::mode() != netsrv::Mode::Off) {
-        Serial.printf("[SD] %s — WiFi 가 켜져 있어 파일 서버가 카드를 씁니다. wifi off 먼저.\n", what);
-        return false;
-    }
-    return true;
+    // 카드 주인은 sdcard 사용권 한 곳에서 본다 (기록 · 파일 전송 · 진단).
+    const sdcard::Owner o = sdcard::owner();
+    if (o == sdcard::Owner::None) return true;
+    Serial.printf("[SD] %s — 카드를 지금 쓰는 곳: %s.%s\n", what, sdcard::ownerName(o),
+                  o == sdcard::Owner::Recorder ? " rec off 먼저." :
+                  o == sdcard::Owner::Download ? " wifi off 먼저." : "");
+    return false;
 }
 
 // 몇 초씩 루프를 붙잡는 진단. 기록 중에는 막는다 — 그동안 NAV·텍스트가 밀린다.
@@ -4511,10 +4319,10 @@ static void handleCommand(String line) {
     if (line == "help" || line == "?") { printHelp();  return; }
     if (line == "info")                { printIdentity(); return; }
     if (line == "scan")                { doScan();     return; }
-    if (line == "batt")                { printBattery(); return; }
-    if (line == "oledw")               { doOledWidth(); return; }
+    if (line == "batt")                { diag::batteryReport(); return; }
+    if (line == "oledw")               { diag::oledWidths(); return; }
     if (line == "hdgtilt")             { if (blockingDiagOk("hdgtilt")) doHeadingTilt(); return; }
-    if (line == "sleepstat")           { doSleepStat(); return; }
+    if (line == "sleepstat")           { diag::sleepReport(sleepStatsNow()); return; }
     if (line == "magcal" || line.startsWith("magcal ")) {
         char msg[200];
         magCalCmd(line.length() > 7 ? line.substring(7) : String(""), msg, sizeof(msg));
@@ -4535,8 +4343,32 @@ static void handleCommand(String line) {
         Serial.println("──────────────────────────────────────────");
         return;
     }
-    if (line == "off")                 { goToSleep();   return; }
+    if (line == "off")                 { requestPowerOff(false); return; }
+    // 닫기가 15초 넘게 안 끝났을 때 사람이 고르는 길. 끝이 잘린다 (단추로는 5초 한 번 더)
+    if (line == "off force")           { requestPowerOff(true);  return; }
+    // 시험: IMU 가 n 초 동안 없는 척한다 (체크리스트 12 "IMU 5초 끊긴 채 기록 종료")
+    if (line.startsWith("test imu ")) {
+        long sec = line.substring(9).toInt();
+        if (sec < 0) sec = 0;
+        if (sec > 120) sec = 120;
+        gImuPauseUntil = millis() + (uint32_t)sec * 1000;
+        Serial.printf("[TEST] IMU 가 %ld초 동안 없는 척합니다 (1초 안에 끊김으로 잡힙니다)\n", sec);
+        return;
+    }
+    // 시험: GPS 입력을 n 초 동안 버린다 (체크리스트 12 "GPS 입력 중단·복귀")
+    if (line.startsWith("test gps ")) {
+        long sec = line.substring(9).toInt();
+        if (sec < 0) sec = 0;
+        if (sec > 300) sec = 300;
+        gGpsPauseUntil = millis() + (uint32_t)sec * 1000;
+        Serial.printf("[TEST] GPS 입력을 %ld초 동안 버립니다\n", sec);
+        return;
+    }
     if (line.startsWith("off ")) {       // `off 120` — 120초 뒤 스스로 깬다 (시험용)
+        if (hlog::phase() != recctl::Phase::Idle) {
+            Serial.println("[SLEEP] 기록 중에는 시험 잠자기를 못 합니다. rec off 먼저.");
+            return;
+        }
         goToSleep((uint32_t)line.substring(4).toInt());
         return;
     }
@@ -4598,7 +4430,7 @@ static void handleCommand(String line) {
         return;
     }
     if (line == "imu")                 { if (blockingDiagOk("imu")) doImu(); return; }
-    if (line == "sd")                  { if (sdFreeFor("sd")) doSd(); return; }
+    if (line == "sd")                  { if (sdFreeFor("sd")) diag::sdCheck(); return; }
     // 어떤 핀에 버튼을 달 수 있나. 그 핀을 누가 이미 쓰고 있는지 재 본다.
     // 짐작하지 않는다 — GPS 가 슬롯 A 의 IO1 로 PPS 를 낼 수도 있다.
     if (line.startsWith("pin ")) {
@@ -4759,18 +4591,22 @@ static void handleCommand(String line) {
         arg.toLowerCase();
 
         if (arg == "on" || arg == "start") {
-            recStartFrom("rec on");
+            recWantOn("rec on");
             return;
         }
         if (arg == "off" || arg == "stop") {
-            gRecRestartAt = 0;       // 사람이 멈췄다. 예약된 다시 걸기를 버린다
-            if (!hlog::stop()) {
-                hlog::Status st; hlog::getStatus(&st);
-                Serial.printf("[REC] ★ 정상 종료 아님 — %s\n",
-                              st.lastError ? st.lastError : "알 수 없음");
-            }
-            // 사람이 멈췄다. 저절로 멈춘 표시(앱 빨간 배경)와 다시 걸기 계획을 내린다.
-            gRecFailed = false; gRecRestartAt = 0;
+            // 요청만 하고 돌아온다. 닫힌 결과는 루프가 받아서 "[REC] 세션 N 닫힘 — ..." 으로 찍는다.
+            if (hlog::phase() != recctl::Phase::Recording) Serial.println("[REC] 기록 중이 아닙니다");
+            recWantOff("rec off");
+            return;
+        }
+        // 시험용: 다음 닫기 직전에 일꾼이 ms 만큼 쉰다 (체크리스트 12 "닫기 20초 지연")
+        if (arg.startsWith("slow ")) {
+            long ms = arg.substring(5).toInt();
+            if (ms < 0) ms = 0;
+            if (ms > 60000) ms = 60000;
+            hlog::testSlowClose((uint32_t)ms);
+            Serial.printf("[REC] 시험 — 다음 닫기 직전에 %ld ms 쉽니다\n", ms);
             return;
         }
         if (arg == "mark")                 { hlog::mark(); return; }
@@ -4783,11 +4619,14 @@ static void handleCommand(String line) {
             p.begin("sail", false);
             p.remove("rec_fail");
             p.remove("rec_fail_n");
+            p.remove("rec_forced");
             p.end();
             gRecFailLine[0] = '\0';
             hlog::noteLastFail(nullptr);
-            gRecFailed = false; gRecRestartAt = 0; gRecRestarts = 0;
-            if (!hlog::busy()) hlog::clearCutFlag();
+            gRecGaveUp = false; gRecRestarts = 0; gRecLastSaveBad = false;
+            // ★ 남은 흉내 실패 횟수도 0 으로. 안 지우면 다음 시험의 첫 세션이 곧바로 "쓰기 실패(시험)" 로
+            //   끝났다 (2026-09-15 보드 시험 — rec fail 20 뒤 clear 했는데 세션 75·76 이 오염됨).
+            hlog::testFailWrites(0);
             Serial.println("[REC] 멈춤 기록을 지웠습니다");
             return;
         }
@@ -4833,6 +4672,18 @@ static void handleCommand(String line) {
             }
             if (sdFreeFor("rec dump"))
                 hlog::dump((uint32_t)sess, kind[0] == 'h', (uint32_t)off, (uint32_t)len);
+            return;
+        }
+        if (arg.startsWith("hash ")) {
+            // rec hash <번호> <hlg|txt> — 카드 원본의 SHA-256. 받은 파일의 `shasum -a 256` 과 맞춰 본다 (체크리스트 10)
+            char kind[8] = {0};
+            long sess = 0;
+            if (sscanf(arg.c_str() + 5, "%ld %7s", &sess, kind) != 2 || sess <= 0 ||
+                (strcmp(kind, "hlg") != 0 && strcmp(kind, "txt") != 0)) {
+                Serial.println("@HASH X 형식: rec hash <번호> <hlg|txt>");
+                return;
+            }
+            if (sdFreeFor("rec hash")) hlog::hashFile((uint32_t)sess, kind[0] == 'h');
             return;
         }
         if (arg == "check" || arg.startsWith("check ")) {
@@ -4898,12 +4749,12 @@ static void handleCommand(String line) {
         long n = (line.length() > 8) ? line.substring(8).toInt() : 3600;
         if (n < 100) n = 100;
         if (n > 2000000) n = 2000000;
-        if (sdFreeFor("sdbench")) doSdBench((uint32_t)n);
+        if (sdFreeFor("sdbench")) diag::sdBench((uint32_t)n);
         return;
     }
     if (line == "fix")                 { doFix();      return; }
     if (line == "calib")               { doCalib();    return; }
-    if (line == "level")               { doLevel();    return; }
+    if (line == "level")               { if (!settingsLockedWhileRecording("level")) doLevel(); return; }
 
     // 힐과 피치를 어느 가속도 축에서 볼지. 보드를 다는 방법이 바뀌면 여기만 고친다.
     //   heel  y   힐을 Y 축에서
@@ -4942,12 +4793,12 @@ static void handleCommand(String line) {
                 else        Serial.println("  hdg off <도>    장착 오프셋 (-360~360). 예) hdg off 12.5");
                 return;
             }
+            if (settingsLockedWhileRecording(isDecl ? "hdg decl" : "hdg off")) return;
             if (!isDecl) deg = hdg::wrap180(deg);
             (isDecl ? gHdgDeclDeg : gHdgOffsetDeg) = deg;
             const bool ok = prefs::writeWith(gPrefs, "sail", [&](Preferences& p) {
                 return prefs::wrote(p.putFloat(isDecl ? "hdg_decl" : "hdg_off", deg), sizeof(float));
             });
-            noteHeadingConfigChanged(isDecl ? "hdg decl" : "hdg off");
             Serial.printf("[IMU] %s %+.2f°%s\n", isDecl ? "자기 편각" : "장착 오프셋", deg,
                           ok ? "" : " — ★ 보드에 못 적었습니다");
         } else if (arg.startsWith("ref")) {
@@ -4960,11 +4811,11 @@ static void handleCommand(String line) {
             }
             imuDrainFifo();
             imuUpdate();
-            const float flat = headingDeg(), tilt = headingTiltDeg();
+            const float flat = flatHeadingDeg(), tilt = headingTiltDeg();
             Serial.println("──────────────────────────────────────────");
             if (flat >= 0.0f) Serial.printf("  기준 %.1f°   평평 %.1f° (오차 %+.1f°)\n", ref, flat, wrap180(flat - ref));
             else              Serial.printf("  기준 %.1f°   평평 --- (자력 새 표본 없음)\n", ref);
-            if (tilt >= 0.0f) Serial.printf("               보정 %.1f° (오차 %+.1f°)\n", tilt, wrap180(tilt - ref));
+            if (tilt >= 0.0f) Serial.printf("               보정 %.1f° (오차 %+.1f°)  ← 화면·BLE·기록에 쓰는 값\n", tilt, wrap180(tilt - ref));
             else              Serial.println("               보정 --- (자력 없음 또는 가속이 1 g 에서 벗어남)");
             Serial.println("  수평으로 두고 0°·90°·180°·270° 네 방향에서 해 보세요.");
             Serial.println("    오차가 네 방향 모두 비슷하다   → 상수다. hdg off / hdg decl 로 뺀다");
@@ -4989,6 +4840,7 @@ static void handleCommand(String line) {
                 Serial.println("  두 축이 같으면 방위가 안 나옵니다. 서로 다른 축이어야 합니다.");
                 return;
             }
+            if (settingsLockedWhileRecording("hdg 축")) return;
             gHdgAxisA = a; gHdgAxisB = b; gHdgSignA = sa; gHdgSignB = sb;
             const bool ok = prefs::writeWith(gPrefs, "sail", [&](Preferences& p) {
                 return prefs::wrote(p.putUChar("hdg_a", a), 1) && prefs::wrote(p.putUChar("hdg_b", b), 1) &&
@@ -4996,20 +4848,21 @@ static void handleCommand(String line) {
                        prefs::wrote(p.putChar("hdg_sb", sb < 0 ? -1 : 1), 1);
             });
             if (!ok) Serial.println("  ★ 보드에 못 적었습니다 — 껐다 켜면 옛 축");
-            noteHeadingConfigChanged("hdg 축");
         }
 
         imuUpdate();
         const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
         Serial.println("──────────────────────────────────────────");
         Serial.printf("  지금 자력  %+.1f %+.1f %+.1f µT\n", gMag.x, gMag.y, gMag.z);
-        const float hNow = headingDeg();
+        const float hNow = flatHeadingDeg(), hBoat = boatHeadingDeg();
         if (hNow >= 0.0f)
-            Serial.printf("  방위  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  %.1f°\n",
+            Serial.printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  %.1f°  (진단용)\n",
                           aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg, hNow);
         else
-            Serial.printf("  방위  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  --- (자력 새 표본 없음)\n",
+            Serial.printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  --- (자력 새 표본 없음)\n",
                           aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg);
+        if (hBoat >= 0.0f) Serial.printf("  방위  기울기 보정 (화면·BLE·기록)  →  %.1f°\n", hBoat);
+        else               Serial.println("  방위  기울기 보정 (화면·BLE·기록)  →  --- (자력 없음 또는 가속이 1 g 에서 벗어남)");
         Serial.printf("  자력 표본  새 %lu · 반복 %lu · 짧음 %lu · 넘침 %lu · 0벡터 %lu · 마지막 새 표본 %s\n",
                       (unsigned long)gMagCount[0], (unsigned long)gMagCount[1], (unsigned long)gMagCount[2],
                       (unsigned long)gMagCount[3], (unsigned long)gMagCount[4],
@@ -5024,6 +4877,9 @@ static void handleCommand(String line) {
 
     if (line == "heel" || line.startsWith("heel ") ||
         line == "pitch" || line.startsWith("pitch ")) {
+        // 값만 보는 `heel` · `pitch` 는 된다. 축·부호를 바꾸는 `heel -y` 같은 것만 막는다.
+        if ((line.startsWith("heel ") || line.startsWith("pitch ")) &&
+            settingsLockedWhileRecording(line.startsWith("heel") ? "heel 축" : "pitch 축")) return;
         const bool isHeel = line.startsWith("heel");
         const char* what  = isHeel ? "힐" : "피치";
         uint8_t& axisRef  = isHeel ? gHeelAxis : gPitchAxis;
@@ -5234,7 +5090,7 @@ static void handleCommand(String line) {
         printIdentity();
         doScan();
         doImu();
-        doSd();
+        diag::sdCheck();
         doFix();
         Serial.println("════ 점검 끝 ════");
         Serial.println("  안 잡힌 게 있으면 power 값을 바꿔 다시 check 하세요.");
@@ -5270,8 +5126,8 @@ static void handleCommand(String line) {
 
         gSensorPowerPin = pin;
         applySensorPower(pin, /*cycle=*/true);
-        // 전원을 껐다 켰으니 GPS 가 휴대(0)로 돌아갔다. 다시 건다.
-        if (pin) gpsApplyBoatMode();
+        // 전원을 껐다 켰으니 GPS 가 기본값으로 돌아갔다 — 휴대(0), NAV-PV 끔. 켤 때와 같은 절차로 다시 건다.
+        if (pin) { gpsApplyNavPv(); gpsApplyBoatMode(); }
         gPrefs.begin("sail", false);
         gPrefs.putInt("pwr_pin", pin);
         gPrefs.end();
@@ -5473,102 +5329,166 @@ static constexpr uint32_t kResumeOkMs  = 60000;
 
 static uint8_t gResumeTries = 0;   // 0 이면 이어 시작한 게 아니다
 
-static void resumeRecordingIfCut() {
-    if (!hlog::cutShort()) {
-        // 지난번에 제대로 닫혔다. 세던 것도 지운다.
-        gPrefs.begin("sail", false);
-        if (gPrefs.getUChar("rec_try", 0)) gPrefs.putUChar("rec_try", 0);
-        gPrefs.end();
-        return;
-    }
-
-    gPrefs.begin("sail", false);
-    const uint8_t tries = (uint8_t)(gPrefs.getUChar("rec_try", 0) + 1);
-    gPrefs.putUChar("rec_try", tries);
-    const uint32_t prev = gPrefs.getUInt("sess_n", 0);
-    gPrefs.end();
-
-    if (tries > kResumeMax) {
-        Serial.printf("[REC] ★ 이어 시작을 %u번 했는데 계속 끊깁니다 — 멈춥니다.\n", tries - 1);
-        Serial.println("      전원선·배터리 접점을 보세요. rec on 으로 직접 걸 수 있습니다.");
-        hlog::clearCutFlag();
-        gPrefs.begin("sail", false); gPrefs.putUChar("rec_try", 0); gPrefs.end();
-        return;
-    }
-
-    Serial.printf("[REC] 지난 세션 %u 가 못 닫히고 끊겼습니다 — 이어서 시작합니다 (%u번째)\n",
-                  (unsigned)prev, tries);
-    if (recStartFrom("켤 때 이어 시작", prev)) gResumeTries = tries;
-}
-
-// ── 기록이 저절로 멈췄을 때 (2026-09-13) ─────────────────────────────────
-//
-// 1) 이유를 NVS 에 남긴다. 재부팅해도, 시리얼을 열어도 안 지워진다.
-//    다음 세션 TXT 머리에도 적힌다 (hlog::noteLastFail).
-// 2) 3초 뒤 새 파일로 다시 건다. 앞 세션 번호를 머리글에 적어 이어 붙일 수 있게.
-//    이 부팅에서 3번까지. 10분 넘게 잘 돌면 센 것을 지운다.
-// 3) 멈춰 있는 동안 gRecFailed → BLE bit5 · 화면 REC FAIL.
 static constexpr uint8_t  kRecRestartMax   = 3;
 static constexpr uint32_t kRecRestartGapMs = 3000;
 static constexpr uint32_t kRecRestartOkMs  = 600000;
+static constexpr uint32_t kOffWaitMs       = 15000;   // 끄기: 이만큼 못 닫으면 사람에게 강제로 끌지 묻는다
 
-static void recFailTick(uint32_t now) {
-    hlog::FailInfo f;
-    if (hlog::takeFailure(&f)) {
-        static const char* kKind[] = {"?", "쓰기 실패", "카드 빠짐", "닫으면서 다 못 씀", "닫기 시간 초과", "머리글 못 고침"};
-        const char* kind = (f.kind >= 1 && f.kind <= 5) ? kKind[f.kind] : "?";
+static void resumeRecordingIfCut() {
+    gPrefs.begin("sail", false);
+    const bool haveNew = gPrefs.isKey("rec_want");
+    recctl::Persist cur;
+    cur.want = gPrefs.getUChar("rec_want", 0);
+    cur.open = gPrefs.getUInt("rec_open", 0);
+    const bool haveOld = gPrefs.isKey("rec_on");
+    const uint32_t lastSess = gPrefs.getUInt("sess_n", 0);
+    const recctl::Persist p = recctl::migrate(haveNew, cur, haveOld,
+                                              haveOld ? gPrefs.getUChar("rec_on", 0) : 0, lastSess);
+    if (!haveNew) { gPrefs.putUChar("rec_want", p.want); gPrefs.putUInt("rec_open", p.open); }
+    if (haveOld) gPrefs.remove("rec_on");
+    const uint8_t tries = gPrefs.getUChar("rec_try", 0);
+    const uint32_t forced = gPrefs.getUInt("rec_forced", 0);
+    if (forced) gPrefs.remove("rec_forced");
+    gPrefs.end();
+    if (haveOld) Serial.printf("[REC] 옛 표시 rec_on 을 rec_want=%u · rec_open=%u 로 옮겼습니다\n",
+                               p.want, (unsigned)p.open);
+    if (forced) Serial.printf("[REC] ★ 지난번 세션 %u 는 닫기 전에 사람이 강제로 껐습니다 — 끝이 잘렸을 수 있습니다\n",
+                              (unsigned)forced);
+
+    switch (recctl::atBoot(p, tries, kResumeMax)) {
+    case recctl::Boot::Nothing:
+        if (tries) { gPrefs.begin("sail", false); gPrefs.putUChar("rec_try", 0); gPrefs.end(); }
+        return;
+    case recctl::Boot::UnclosedOnly:
+        // 사람이 멈춘 뒤 닫기가 끝나기 전에 전원이 나갔다. 이어 시작 의도는 없다.
+        Serial.printf("[REC] 세션 %u 가 마감 안 된 채 남았습니다 — 사람이 멈춘 뒤라 이어 시작하지 않습니다\n",
+                      (unsigned)p.open);
+        recSaveOpen(0);
+        return;
+    case recctl::Boot::TooMany:
+        Serial.printf("[REC] ★ 이어 시작을 %u번 했는데 계속 끊깁니다 — 멈춥니다.\n", tries);
+        Serial.println("      전원선·배터리 접점을 보세요. rec on 으로 직접 걸 수 있습니다.");
+        recSaveWant(false);
+        gPrefs.begin("sail", false); gPrefs.putUChar("rec_try", 0); gPrefs.end();
+        gRecGaveUp = true;
+        return;
+    case recctl::Boot::Resume:
+        break;
+    }
+    const uint8_t n = (uint8_t)(tries + 1);
+    gPrefs.begin("sail", false); gPrefs.putUChar("rec_try", n); gPrefs.end();
+    const uint32_t prev = p.open ? p.open : lastSess;
+    Serial.printf("[REC] 지난 세션 %u 가 못 닫히고 끊겼습니다 — 이어서 시작합니다 (%u번째)\n",
+                  (unsigned)prev, n);
+    gWantRec = true;
+    gRecFailSession = prev;
+    if (recStartFrom("켤 때 이어 시작", prev)) gResumeTries = n;
+    else gRecRestartAt = millis() + kRecRestartGapMs;     // 원하는 상태는 기록이다 — 루프가 다시 건다
+}
+
+// ── 기록 결과 받기 · 다시 걸기 · 끄기 기다림 (매 바퀴) ─────────────────────
+//
+// 1) 끝난 세션 결과를 한 번 꺼낸다. 첫 오류가 있으면 NVS 와 다음 세션 TXT 에 남긴다.
+// 2) 사람이 원하는데(gWantRec) 쓰기 실패·카드 빠짐으로 끝났으면 3초 뒤 새 파일로 다시 건다.
+//    이 부팅에서 3번까지. 10분 넘게 잘 돌면 센 것을 지운다. 다 쓰면 포기 → REC FAIL.
+// 3) 끄기를 요청했으면 닫힐 때까지 기다리고, 15초 넘으면 사람에게 강제로 끌지 묻는다.
+static void recGiveUp(const char* why) {
+    gRecGaveUp = true;
+    gWantRec = false;
+    gRecRestartAt = 0;
+    recSaveWant(false);          // 켤 때 제멋대로 다시 걸리지 않게 (세션 58 교훈)
+    Serial.printf("[REC] ★ %s — 멈춘 채로 둡니다 (REC FAIL)\n", why);
+}
+
+static void recOnResult(const recctl::SessionResult& r, uint32_t now) {
+    gRecFailSession = r.session;
+    recSaveOpen(0);                                        // 파일은 닫혔다 (다 썼든 못 썼든)
+    const bool clean = r.drained && r.headerOk && r.firstKind == recctl::kErrNone;
+    // 사람이 멈춘 세션이라도 마지막 저장이 실패했으면 화면·BLE 에 보인다 (검토 3번). 다시 걸지는 않는다.
+    gRecLastSaveBad = !clean;
+    Serial.printf("[REC] 세션 %u 닫힘 — %s  %u분 %u초%s\n", (unsigned)r.session,
+                  clean ? "정상 종료" : "★ 정상 종료 아님",
+                  (unsigned)(r.durS / 60), (unsigned)(r.durS % 60),
+                  r.lostBytes ? "  · 못 쓴 바이트 있음" : "");
+    if (r.firstKind != recctl::kErrNone) {
+        static const char* kKind[] = {"?", "쓰기 실패", "카드 빠짐", "닫으면서 다 못 씀", "?", "머리글 못 고침"};
+        const char* kind = (r.firstKind <= 5) ? kKind[r.firstKind] : "?";
         snprintf(gRecFailLine, sizeof(gRecFailLine),
-                 "세션 %u %u분%u초째 %s%s | 쓸것 %u 쓴것 %u | errno %d %s | 다시쓰기 %u번 | 카드 %s | %.2fV | 누적 %.1fMB | 못 쓰고 버림 %lu바이트",
-                 (unsigned)f.session, (unsigned)(f.recSec / 60), (unsigned)(f.recSec % 60),
-                 kind, f.fake ? "(시험)" : "",
-                 (unsigned)f.want, (unsigned)f.wrote,
-                 f.err, f.err ? strerror(f.err) : "(이유 안 줌)",
-                 (unsigned)f.tries, f.card ? "있음" : "없음",
-                 gBattVolts, f.bytes / 1048576.0f, (unsigned long)f.lost);
-        Serial.printf("[REC] ★ 기록이 저절로 멈췄습니다 — %s\n", gRecFailLine);
-
+                 "세션 %u %u분%u초째 %s%s | 쓸것 %u 쓴것 %u | errno %d %s | 다시쓰기 %u번 | 카드 %s | %.2fV | 누적 %.1fMB | 못 쓰고 버림 %lu바이트 | 머리글 %s",
+                 (unsigned)r.session, (unsigned)(r.recSec / 60), (unsigned)(r.recSec % 60),
+                 kind, r.fake ? "(시험)" : "",
+                 (unsigned)r.want, (unsigned)r.wrote,
+                 r.err, r.err ? strerror(r.err) : "(이유 안 줌)",
+                 (unsigned)r.tries, r.card ? "있음" : "없음",
+                 gBattVolts, r.bytes / 1048576.0f, (unsigned long)r.lostBytes,
+                 r.headerOk ? "고침" : "못 고침");
+        Serial.printf("[REC] ★ 멈춘 이유 — %s\n", gRecFailLine);
         Preferences p;
         p.begin("sail", false);
         p.putString("rec_fail", gRecFailLine);
         p.putUInt("rec_fail_n", p.getUInt("rec_fail_n", 0) + 1);
         p.end();
         hlog::noteLastFail(gRecFailLine);
+    }
+    switch (recctl::afterSession(gWantRec, r.firstKind, gRecRestarts, kRecRestartMax)) {
+    case recctl::Next::Nothing:
+        break;
+    case recctl::Next::RestartSoon:
+        gRecRestartAt = now + kRecRestartGapMs;
+        Serial.printf("[REC] %u초 뒤 새 파일로 다시 겁니다\n", (unsigned)(kRecRestartGapMs / 1000));
+        break;
+    case recctl::Next::GiveUp:
+        recGiveUp("다시 걸기를 다 썼습니다");
+        break;
+    }
+}
 
-        // 다시 거는 건 기록 중에 저절로 끊긴 경우(쓰기 실패·카드 빠짐)뿐이다.
-        // 닫으면서 난 실패(3·4·5)와 사람이 이미 rec off 를 친 경우는 기록만 남긴다.
-        const bool autoStop = (f.kind == 1 || f.kind == 2) && !f.userStopped;
-        if (autoStop && !hlog::recording()) {
-            gRecFailed      = true;
-            gRecFailSession = f.session;
-            gRecRestartAt   = now + kRecRestartGapMs;
+static void recControlTick(uint32_t now) {
+    recctl::SessionResult r;
+    if (hlog::poll(&r)) recOnResult(r, now);
+    const recctl::Phase ph = hlog::phase();
+
+    if (gOffRequestedAt) {
+        switch (recctl::powerOff(ph, now - gOffRequestedAt, kOffWaitMs)) {
+        case recctl::Off::SleepNow:
+            gOffRequestedAt = 0;
+            gOffForceArmed = false;
+            goToSleep();                // 버튼이 안 떨어졌으면 돌아온다
+            return;
+        case recctl::Off::Wait:
+            return;
+        case recctl::Off::AskForce:
+            if (!gOffForceArmed) {
+                gOffForceArmed = true;
+                Serial.println("[SLEEP] ★ 15초 넘게 파일이 안 닫힙니다. 기다리면 닫힌 뒤 꺼집니다.");
+                Serial.println("        지금 끄려면 단추를 5초 더 누르세요 (시리얼: off force). 끝이 잘립니다.");
+                gBtnOwnsScreen = true;
+                gBtnScreenTill = now + 600000;
+                sail::displayNotice("저장 안 끝남", "5초 더 누르면 끔");
+            }
+            return;
         }
-        return;
     }
 
-    if (hlog::recording()) {
-        gRecFailed = false;                               // 무엇으로든 다시 돈다
+    if (ph == recctl::Phase::Recording) {
         if (gRecRestarts && now - hlog::recStartedMs() >= kRecRestartOkMs) gRecRestarts = 0;
         return;
     }
-
-    if (!gRecFailed || gRecRestartAt == 0 || now < gRecRestartAt) return;
-    if (gRecRestarts >= kRecRestartMax) {
-        gRecRestartAt = 0;
-        // ★ 켜면 이어 시작 표시도 지운다. 안 지우면 다음에 켜는 순간 느닷없이
-        //   REC 가 뜬다 (2026-09-14 세션 58 — 시험 세션 57 을 이어받았다).
-        //   멈춘 사실은 화면 REC FAIL · 앱 빨강 · NVS rec_fail 로 이미 알렸다.
-        hlog::clearCutFlag();
-        Serial.printf("[REC] ★ 다시 걸기를 %u번 했는데 안 됩니다 — 멈춘 채로 둡니다\n", gRecRestarts);
+    if (!gWantRec || ph != recctl::Phase::Idle) return;
+    if (gRecRestartAt == 0) {
+        // 사람이 닫는 중에 시작을 눌렀다 → 닫혔으니 이제 건다. 안 되면 사람이 건 시작이 실패한 것
+        if (!recStartFrom("닫힌 뒤 시작")) { gWantRec = false; recSaveWant(false); }
         return;
     }
+    if ((int32_t)(now - gRecRestartAt) < 0) return;
     ++gRecRestarts;
     Serial.printf("[REC] 새 파일로 다시 겁니다 (%u번째, 앞 세션 %u)\n",
                   gRecRestarts, (unsigned)gRecFailSession);
-    if (recStartFrom("쓰기 실패 뒤 다시 걸기", gRecFailSession)) {
-        gRecRestartAt = 0;
-    } else {
+    if (recStartFrom("쓰기 실패 뒤 다시 걸기", gRecFailSession)) { gRecRestartAt = 0; return; }
+    if (recctl::afterRestartFailed(gRecRestarts, kRecRestartMax) == recctl::Next::RestartSoon)
         gRecRestartAt = now + kRecRestartGapMs;
-    }
+    else
+        recGiveUp("다시 걸기를 다 썼습니다");
 }
 
 // ── setup / loop ─────────────────────────────────────────────────────────
@@ -5669,7 +5589,7 @@ void setup() {
 
     // 깊은잠에서 깼으면 그 기록부터 남긴다. 사람이 명령을 안 쳐도 남게.
     if (gRtcMagic == kRtcMagic && gRtcSleptUs != 0) {
-        doSleepStat();
+        diag::sleepReport(sleepStatsNow());
         sleepLogToCard();
     }
 
@@ -5781,8 +5701,8 @@ void loop() {
         // 사라졌으면 끄고 나머지로 계속 간다. 돌아오면 다시 붙는다.
         checkSensors();
         hlog::healthCheck();
-        recFailTick(now);
     }
+    recControlTick(now);   // 매 바퀴 — 결과 받기 · 다시 걸기 · 끄기 기다림
 
     // 1f) 켠 뒤 20초 동안 배터리 값을 1초마다 담아 둔다. `battboot` 가 꺼낸다.
     //     깬 직후에 값이 낮게 나오는 것이 언제 제자리로 오는지 보려는 것이다.
@@ -5905,7 +5825,9 @@ void loop() {
         ds.battVolts    = gBattVolts;
         ds.boatId       = gBoatId;
         ds.recording    = hlog::recording();
-        ds.recFailed    = gRecFailed;
+        ds.recFailed    = recctl::showFailed(gWantRec, hlog::phase(), gRecGaveUp, gRecLastSaveBad);
+        ds.recClosing   = hlog::phase() == recctl::Phase::Closing;
+        ds.battLow      = kBattWarnVolts > 0.0f && gBattVolts > 0.0f && gBattVolts < kBattWarnVolts;
         ds.recSeconds   = ds.recording ? (now - hlog::recStartedMs()) / 1000 : 0;
 
         ds.sogKn      = gLatest.sogKn; // 다듬고 잡음 바닥까지 적용된 값
@@ -5923,7 +5845,7 @@ void loop() {
             gGpsDyModel == 2 ? 'p' : gGpsDyModel == 3 ? 'c' :
             gGpsDyModel == 4 ? 'b' : '?';
         ds.cogDeg     = gLatest.cogDeg;
-        ds.headingDeg = headingDeg();
+        ds.headingDeg = boatHeadingDeg();
         ds.heelDeg    = gLatest.heelDeg;
         ds.pitchDeg   = currentPitchDeg();
 

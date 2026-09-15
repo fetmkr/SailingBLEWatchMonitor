@@ -133,6 +133,29 @@ constexpr size_t kOffPitchOff   = 73;
 //   0 이면 사람이 시작한 세션이다.
 constexpr size_t kOffPrevSession = 77;  // U4  이어받은 앞 세션 번호. 0 = 아님  // R4
 
+// ── 방위를 다시 구할 설정 (2026-09-15) ───────────────────────────────────
+//
+// ★ 이게 없으면 앱이 방위 식을 짐작한다. 실제로 앱이 보드와 다른 식을 써서 COG 대비
+//   흩어짐이 49.5° 로 나왔다 (세션 46). 보드가 화면·BLE·TXT 에 쓴 식과 그 입력을 적는다.
+//
+//   hdg_formula  0 = 안 적힘(옛 파일)  1 = 평평 atan2  2 = 기울기 보정(INSLIB ahrs_mag_detilt,
+//                중력은 그때 가속도에서, |a| 가 1 g ±0.15 를 벗어나면 방위 없음)
+//   축 A·B·부호  방위 = atan2(A·sA, B·sB) 의 두 축 (0=X 1=Y 2=Z, 부호 0=+ 1=-). 자력계 좌표
+//                앞 = B·sB, 오른쪽 = −A·sA, 아래 = 오른손 법칙
+//   가속→자력 축은 고정: 자력 X = 가속 Y, 자력 Y = 가속 X, 자력 Z = −가속 Z
+//   mag_hi       기록된 mag 에서 이미 뺀 하드아이언 오프셋 (µT). 원본 = 기록값 + 이 값
+//   세션 도중 설정이 바뀌면 TXT 에 사건 줄로 남는다 (머리글은 시작 때 값)
+constexpr size_t kOffHdgFormula = 81;  // U1
+constexpr size_t kOffHdgAxisA   = 82;  // U1
+constexpr size_t kOffHdgAxisB   = 83;  // U1
+constexpr size_t kOffHdgSignA   = 84;  // U1  0=+ 1=-
+constexpr size_t kOffHdgSignB   = 85;  // U1
+constexpr size_t kOffHdgOff     = 86;  // R4  장착 오프셋 (도)
+constexpr size_t kOffHdgDecl    = 90;  // R4  자기 편각 (도, 동편 +)
+constexpr size_t kOffMagHi      = 94;  // R4×3  뺀 하드아이언 (µT) 94·98·102
+constexpr uint8_t kHdgFormulaFlat = 1;
+constexpr uint8_t kHdgFormulaTilt = 2;
+
 constexpr uint8_t kImuBNO085  = 0;
 constexpr uint8_t kImuMPU9250 = 1;
 
@@ -188,6 +211,13 @@ struct Header {
     float    heelOff    = 0.0f;
     float    pitchOff   = 0.0f;
     uint32_t prevSession = 0;   // 끊긴 세션을 이어받은 경우 그 번호. 0 = 아님
+    // 방위 설정 (kOffHdgFormula 표)
+    uint8_t  hdgFormula = 0;
+    uint8_t  hdgAxisA   = 1, hdgAxisB = 0;
+    uint8_t  hdgSignA   = 0, hdgSignB = 0;
+    float    hdgOff     = 0.0f;
+    float    hdgDecl    = 0.0f;
+    float    magHi[3]   = {0.0f, 0.0f, 0.0f};
 };
 
 // 한 시점을 눈으로 볼 값 (10초에 한 줄 나가는 텍스트용).
@@ -247,24 +277,25 @@ struct Status {
     uint32_t lostBytes   = 0;     // 마지막으로 닫을 때 못 쓰고 버린 바이트
 };
 
-// ── 끊겼는지 표시 ────────────────────────────────────────────────────────
+// ── 이어 시작 표시 ───────────────────────────────────────────────────────
 //
-// start() 가 NVS 에 1 을 적고 stop() 이 0 으로 지운다. 전원이 갑자기 끊기면
-// 지울 틈이 없으므로 1 이 남는다. 다음에 켜질 때 이걸 보고 이어서 시작한다.
-//
-// 카드 쓰기가 실패해서 저절로 멈춘 경우도 stop() 을 안 거치므로, 그때는
-// healthCheck() 가 대신 지운다 (카드가 죽었는데 다시 걸어봐야 또 실패한다).
-bool cutShort();       // 지난번에 기록 중이었는데 못 닫고 끊겼나
-void clearCutFlag();   // 이어시작을 포기할 때 지운다
+// 기록기는 NVS 를 만지지 않는다. 켜면 다시 걸 의도(rec_want)와 마감 안 된 세션(rec_open)은
+// 루프가 적는다 (main.cpp, rec_control.h). 옛 rec_on 한 칸은 두 뜻이 섞여 있었다.
 
 void begin();                        // setup() 에서 한 번. 쓰기 작업을 띄운다
 // 지난번에 왜 꺼졌는지. 새 세션의 TXT 머리에 적는다. 세션이 끊기면 이유가
 // 램과 함께 날아가므로, **다음 세션 파일에 남겨서** 나중에 찾을 수 있게 한다.
 void noteBootReason(const char* why);
 bool start(const Header& h);
-// 멈추고 **다 쓰고 닫힌 것까지 확인**한다. 참이면 정상 종료가 확정된 것.
-// 거짓이면 이유가 Status.lastError 에 있다 (닫기 시간 초과·못 쓴 바이트·머리글 실패).
-bool stop();
+// 멈추라고 **요청만** 하고 바로 돌아온다. 기록 중이 아니면 false.
+// 일꾼이 남은 것을 쓰고 · 닫고 · 머리글과 이름을 고친 뒤 결과를 하나 남긴다 → poll().
+// ★ 옛 stop() 은 15초까지 루프를 붙잡았고, 늦게 닫히면 깃발 넷으로 뒷정리를 했다.
+bool requestStop();
+// 끝난 세션 결과를 한 번만 꺼낸다. 루프가 매 바퀴 부른다. 새 결과가 없으면 false.
+bool poll(recctl::SessionResult* out);
+recctl::Phase phase();
+// 시험용: 다음 닫기 직전에 일꾼이 ms 만큼 한 번 쉰다 (체크리스트 12 "닫기 20초 지연")
+void testSlowClose(uint32_t ms);
 void writeNav(const NavSample& s);   // 10 Hz
 void writeImu(const ImuSample& s);   // 100 Hz
 void writeText(const NavSample& s, const TextSample& t); // 10초에 한 번
@@ -281,29 +312,12 @@ void noteDropped(uint32_t rows);
 void getStatus(Status* out);
 void healthCheck();                  // 1 Hz. 카드가 빠졌는지 본다
 
-// ── 기록이 저절로 멈춘 이유 (2026-09-13) ─────────────────────────────────
+// ── 기록이 멈춘 이유 (2026-09-13) ────────────────────────────────────────
 //
 // 세션 27(8/30)과 46(9/13)이 "# 끝" 없이 끊겼다. 쓰기 한 번 실패에 그대로
 // 멈추는 길이었는데, 이유를 램에만 들고 있다가 재부팅에 날렸다.
-// 이제 일꾼이 여기에 담고, 루프가 꺼내서 NVS 와 다음 세션 TXT 에 남긴다.
-struct FailInfo {
-    // 1 쓰기 실패 · 2 기록 중 카드 빠짐            → 루프가 새 파일로 다시 건다
-    // 3 닫으면서 다 못 씀 · 4 닫기 시간 초과 · 5 머리글 못 고침 → 사람이 멈춘 것. 기록만 남긴다
-    uint8_t  kind    = 0;
-    uint32_t session = 0;
-    uint32_t recSec  = 0;   // 기록 시작부터 몇 초째
-    uint32_t want    = 0;   // 쓰려던 바이트
-    uint32_t wrote   = 0;   // 다시 쓰기까지 합쳐 실제로 들어간 바이트
-    int      err     = 0;   // errno. 0 이면 라이브러리가 이유를 안 줬다
-    uint8_t  tries   = 0;   // 다시 쓴 횟수
-    bool     card    = false; // 그 순간 카드 감지 핀
-    uint32_t bytes   = 0;   // 그때까지 쓴 양
-    bool     fake    = false; // rec fail 시험으로 흉내 낸 실패
-    uint32_t lost    = 0;     // 버퍼에 남아 있다가 못 쓰고 버린 바이트
-    bool     userStopped = false; // 루프가 꺼내기 전에 사람이 rec off 를 쳤다 → 다시 걸지 않는다
-};
-// 새로 멈춘 게 있고 파일 닫기가 끝났으면 true. 한 번 꺼내면 지워진다.
-bool takeFailure(FailInfo* out);
+// 이제 세션 결과(recctl::SessionResult)의 첫 오류 칸에 담기고, 루프가 poll() 로 꺼내
+// NVS 와 다음 세션 TXT 에 남긴다.
 // 다음 세션 TXT 머리에 "지난 기록 실패" 줄로 적는다. 부팅 때 NVS 에서 읽어 넘긴다.
 void noteLastFail(const char* line);
 // TXT 머리에 그대로 적을 여러 줄 (방위 알고리즘·축·오프셋·자력 보정값). 시작 전에 부른다.
@@ -327,6 +341,9 @@ void tail(uint32_t session, uint16_t lines = 20, bool head = false);
 //   @DUMP S <경로> <크기> · @DUMP B <base64> 여러 줄 · @DUMP E <시작> <바이트> <crc32>
 //   실패는 @DUMP X <이유>. 조각 하나는 256 KB 까지.
 void dump(uint32_t session, bool hlg, uint32_t offset, uint32_t len);
+// 세션 파일 하나의 SHA-256. 받은 파일이 카드 원본과 같은지 맞춰 본다 (체크리스트 10).
+//   @HASH <경로> <바이트> <sha256 16진수>  · 실패는 @HASH X <이유>
+void hashFile(uint32_t session, bool hlg);
 void listFiles();
 // 한 세션의 파일 두 벌(.HLG/.TXT)을 지운다. **되돌릴 수 없다.**
 // 번호를 하나만 받는다 — 한 번에 여러 개를 지우는 길은 일부러 안 만들었다.

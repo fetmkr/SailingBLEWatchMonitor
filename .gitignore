@@ -61,3 +61,4 @@ desktop/fixtures/
 desktop/public/sample.HLG
 desktop/public/sample.mp4
 desktop/public/sample8.HLG
+__pycache__/

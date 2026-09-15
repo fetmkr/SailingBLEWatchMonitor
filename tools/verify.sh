@@ -39,6 +39,15 @@ c++ -std=c++17 -Wall -Wextra -O2 -I"$ROOT/firmware-rak/include" \
 "$BUILD/fw_logic_test" > "$BUILD/fw_logic_test.log"
 ok "펌웨어 순수 로직 회귀 시험 통과 ($(grep -c '\[ OK \]' "$BUILD/fw_logic_test.log")개)"
 
+# 방위 식 — 보드(C++ heading_tilt.h)와 데스크탑·아이패드 앱(TS heading.ts)이 같은 값을 내나 (체크리스트 05, 2026-09-15)
+c++ -std=c++17 -Wall -Wextra -O2 -I"$ROOT/firmware-rak/include" \
+    -o "$BUILD/heading_vectors" "$ROOT/firmware-rak/tools/heading_vectors.cpp"
+"$BUILD/heading_vectors" "$BUILD/heading_vectors.tsv" > /dev/null
+"$ROOT/desktop/node_modules/.bin/esbuild" "$ROOT/desktop/tools/heading_check.ts" \
+    --bundle --platform=node --log-level=warning --outfile="$BUILD/heading_check.cjs"
+node "$BUILD/heading_check.cjs" "$BUILD/heading_vectors.tsv"
+ok "방위 식 보드 ↔ 앱 일치"
+
 # ── 2. C++ ↔ Swift 교차 검증 ─────────────────────────────────────────────
 bar "2/4  펌웨어 인코더 ↔ 앱 디코더 교차 검증"
 swiftc -O -o "$BUILD/decode_check" \

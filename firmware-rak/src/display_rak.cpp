@@ -271,6 +271,13 @@ void displayUpdate(const DisplayState& s) {
         gOled.setDrawColor(0);
         gOled.drawStr(2, kRow1, rec);
         gOled.setDrawColor(1); // 안 되돌리면 다음 그리기가 다 뒤집힌다
+    } else if (s.recClosing) {
+        // 멈추라고 했고 일꾼이 닫는 중이다. 이때 끄면 끝이 잘린다.
+        const char* sv = "SAVING";
+        gOled.drawBox(0, kRow1 - 8, gOled.getStrWidth(sv) + 4, 11);
+        gOled.setDrawColor(0);
+        gOled.drawStr(2, kRow1, sv);
+        gOled.setDrawColor(1);
     } else if (s.recFailed) {
         // 기록이 저절로 멈췄다. 이름 자리를 뒤집어 칠해 눈에 띄게 한다.
         const char* rf = "REC FAIL";
@@ -344,6 +351,8 @@ void displayUpdate(const DisplayState& s) {
     if (s.battVolts > 0.0f) {
         snprintf(buf, sizeof(buf), "%.2fV", s.battVolts);
         drawChecked(kColL, kRow5, buf, "전압");
+        // 모드 글자(x 38~61) 뒤 x 64~82. 오른쪽 SAT/HDOP(x 92~) 와 안 겹친다
+        if (s.battLow) gOled.drawStr(kColL + 62, kRow5, "LOW");
     }
 
     // GPS 움직임 종류 — **늘** 그린다. 전압 바로 옆.

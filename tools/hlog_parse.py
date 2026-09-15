@@ -78,6 +78,13 @@ def parse_header(buf: bytes) -> dict:
         "gnss_hz": buf[45],
         "sog_src": buf[46],
         "quat_src": buf[47],
+        # 방위를 다시 구할 설정 (hlog.h kOffHdgFormula). 0 이면 옛 파일이라 안 적힘
+        "hdg_formula": buf[81],
+        "hdg_axis_a": buf[82], "hdg_axis_b": buf[83],
+        "hdg_sign_a": -1 if buf[84] else 1, "hdg_sign_b": -1 if buf[85] else 1,
+        "hdg_off_deg": struct.unpack_from("<f", buf, 86)[0],
+        "hdg_decl_deg": struct.unpack_from("<f", buf, 90)[0],
+        "mag_hard_iron_ut": struct.unpack_from("<3f", buf, 94),
         "crc_ok": want == got,
         "crc_want": want,
         "crc_got": got,

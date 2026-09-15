@@ -24,11 +24,13 @@ struct DisplayState {
     /// 보면 배터리가 갑자기 닳는 것처럼 보인다. 전압은 그런 거짓말을 안 한다.
     /// 퍼센트는 BLE 로는 그대로 나간다 (PROTOCOL.md §3).
     float battVolts      = 0.0f;
+    bool  battLow        = false;   // 저전압 경고 기준 아래 → 전압 옆에 LOW (기준 0 이면 늘 거짓)
     /// 로라 배 번호 (PROTOCOL.md §10.11). 0 이면 번호 없음 — `B--` 로 그린다.
     uint8_t boatId       = 0;
     /// 기록 중인가. 참이면 이름 자리에 REC 와 지난 시간을 보여준다.
     bool  recording      = false;
     bool  recFailed      = false;   // 기록이 저절로 멈췄다 → 1줄에 REC FAIL
+    bool  recClosing     = false;   // 닫는 중 → 1줄에 SAVING
     uint32_t recSeconds  = 0;
 
     // ── 항해 값 ──────────────────────────────────────────────────────────

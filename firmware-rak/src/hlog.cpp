@@ -10,8 +10,10 @@
 
 #include <esp_task_wdt.h>
 #include <mbedtls/base64.h>
+#include <mbedtls/sha256.h>
 
 #include "board_rak.h"
+#include "sdcard.h"
 
 namespace hlog {
 namespace {
@@ -29,6 +31,7 @@ namespace {
 constexpr size_t kBufSize  = 65536;
 constexpr size_t kChunk    = 4096;  // 카드에 한 번에 내보내는 단위 (4KB 정렬)
 constexpr uint32_t kFlushMs = 5000; // 못 박는 주기. 전원이 끊기면 이 뒤가 날아간다
+constexpr uint64_t kMinFreeBytes = 90ULL * 1024 * 1024;  // 기록 시작에 필요한 남은 자리 — 8시간 분량 (TRANSFER.md §1)
 
 char*  gBuf = nullptr;
 volatile size_t gHead = 0;
@@ -61,10 +64,9 @@ uint32_t gTextLastRow   = 0;
 
 // ── 상태 ─────────────────────────────────────────────────────────────────
 
-// ★ 상태 하나로 모았다 (hlog_write.h RecState). 옛 코드는 gRecording / gStopWanted
-//   두 깃발이라 "닫는 중" 과 "닫혔다" 를 가를 수 없었다. 그래서 stop() 이 15초를
-//   기다린 뒤 **닫혔는지 확인도 안 하고** 카드를 다시 붙이고 머리글을 고쳤다.
-//   지금은 일꾼이 Draining → Closed / Failed 로 끝을 알린다.
+// ★ 상태 하나 (hlog_write.h RecState — Closed / Recording / Draining).
+//   루프는 requestStop() 으로 Recording → Draining 만 한다. 일꾼은 쓰기를 포기할 때도 같은 전이를 쓰고,
+//   마무리를 다 한 뒤 Draining → Closed 로 끝을 알린다. 전이는 gStateMux 안에서만 (아래).
 volatile RecState gState = RecState::Closed;
 bool isRec() { return gState == RecState::Recording; }
 
@@ -73,10 +75,15 @@ portMUX_TYPE gTextMux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool gTextFlushWanted = false;
 char gTxtOut[kTextBufSize];                 // 일꾼이 잠금 밖에서 쓰는 사본
 uint32_t gLostBytes = 0;            // 마지막으로 닫을 때 못 쓴 바이트
-// stop() 이 15초 안에 답을 못 받고 돌아온 뒤 일꾼이 혼자 닫으면, 머리글 고치기와 표시 지우기가
-// 아직 안 된 채다. 이 표식을 세워 두고 healthCheck 나 다음 stop() 이 마무리한다.
-volatile bool gNeedFinalize = false;
-uint32_t gDurS = 0;                 // 닫기 시작 때 잰 세션 길이 (마무리가 늦어져도 그때 값)
+// 끝난 세션 하나의 결과 (rec_control.h). 일꾼만 채우고, 루프는 poll() 의 임계 구역 안에서 복사만 한다.
+// 상태 전이 잠금. gState 를 바꾸는 곳은 이 잠금 안에서 toDraining / toClosed 로만 (hlog_write.h)
+portMUX_TYPE gStateMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE gResMux = portMUX_INITIALIZER_UNLOCKED;
+recctl::SessionResult gRes;
+volatile uint32_t gSlowCloseMs = 0;  // 시험용: 닫기 직전에 한 번 쉰다 (rec slow)
+int32_t  gTzMin = 540;              // 이름 지을 시간대. start() 가 NVS 에서 읽어 둔다 — 일꾼은 NVS 를 안 만진다
+uint32_t gDurS = 0;                 // 닫기 시작 때 잰 세션 길이
+void finishSession(bool complete);  // 아래. 일꾼이 닫고 머리글·이름까지 고친 뒤 결과를 남긴다
 const char* gLastErrorShort = nullptr;
 
 File     gBin, gTxt;
@@ -98,10 +105,6 @@ uint16_t gUtcStartMs = 0;
 
 TaskHandle_t gWriter = nullptr;
 const char* gBootWhy = "?";
-// 쓰기 실패로 저절로 멈췄다. 메인 루프(healthCheck)가 보고 NVS 표시를 지운다.
-// 코어 0 에서 NVS 를 만지지 않으려고 표식만 세운다.
-volatile bool gFailedStop = false;
-FailInfo gFail;                       // 일꾼이 채우고 gFailedStop 을 세운다
 const char* gLastFailLine = nullptr;  // 다음 세션 TXT 머리에 적는다
 const char* gSessionNote  = nullptr;  // 방위 설정 등 (main.cpp buildHeadingNote)
 volatile uint8_t gTestFailN = 0;      // 시험용 가짜 실패 남은 횟수
@@ -156,8 +159,8 @@ inline void put32(uint8_t* p, size_t& o, uint32_t v) {
 //
 // 하는 일이 셋이다.
 //
-//   1) 기록 중이 아닐 때
-//      멈춰 달라는 표(gStopWanted)가 서 있으면 남은 것을 다 쏟고 파일을 닫는다.
+//   1) 닫는 중(Draining)일 때
+//      남은 것을 다 쏟고 파일을 닫고 머리글·이름을 고친다 (finishSession).
 //      **여기서만 닫는다.** 메인 루프가 닫으면 쓰는 도중에 파일이 사라진다.
 //
 //   2) 기록 중일 때 — 모아서 쓴다
@@ -172,15 +175,7 @@ inline void put32(uint8_t* p, size_t& o, uint32_t v) {
 //      하면 카드가 자주 멈춰서 오히려 손해다.
 //
 // 쓰기가 모자라게 들어가면(w != n) 카드가 죽은 것으로 보고 스스로 멈춘다.
-// 코어 0 에서는 NVS 를 안 만지기로 했으므로 표식(gFailedStop)만 세우고,
-// 메인 루프의 healthCheck 가 그걸 보고 뒷정리를 한다.
-// 파일을 닫고 카드를 놓는다. 일꾼만 부른다.
-void closeFiles() {
-    if (gBin) { gBin.flush(); gBin.close(); }
-    if (gTxt) { gTxt.flush(); gTxt.close(); }
-    gFreeBytes = SD.totalBytes() - SD.usedBytes();
-    SD.end();
-}
+// 일꾼이 닫고 · 머리글과 이름을 고치고 · 결과를 남긴다 (finishSession). 루프는 poll() 로 받는다.
 
 // 메인 루프가 모은 텍스트를 옮겨 쓴다. 잠금 안에서는 복사만 한다.
 void writerFlushText(bool force) {
@@ -232,29 +227,32 @@ bool writeFromRing(size_t maxBytes, WriteReport* r) {
     return true;
 }
 
-void fillFail(uint8_t kind, const WriteReport& r) {
-    gFail = FailInfo();       // ★ 지난 실패의 userStopped 가 남아 다음 실패까지 "사람이 멈춤" 이 됐다
-    gFail.kind    = kind;
-    gFail.session = gSession;
-    gFail.recSec  = (millis() - gStartedMs) / 1000;
-    gFail.want    = (uint32_t)r.asked;
-    gFail.wrote   = (uint32_t)r.wrote;
-    gFail.err     = r.err;
-    gFail.tries   = r.tries;
-    gFail.card    = cardPresent();
-    gFail.bytes   = (uint32_t)gBytes;
-    gFail.fake    = r.faked;
-    gFail.lost    = (uint32_t)bufUsed();
+// 이 세션의 첫 오류를 적는다. 이미 있으면 안 바꾼다 (recctl::setFirst).
+void noteFirst(uint8_t kind, const WriteReport& r) {
+    const bool card = cardPresent();              // 핀 읽기는 임계 구역 밖에서
+    const uint32_t recSec = (millis() - gStartedMs) / 1000;
+    portENTER_CRITICAL(&gResMux);
+    if (recctl::setFirst(gRes, kind)) {
+        gRes.recSec = recSec;
+        gRes.want   = (uint32_t)r.asked;
+        gRes.wrote  = (uint32_t)r.wrote;
+        gRes.err    = r.err;
+        gRes.tries  = r.tries;
+        gRes.card   = card;
+        gRes.bytes  = (uint32_t)gBytes;
+        gRes.fake   = r.faked;
+    }
+    portEXIT_CRITICAL(&gResMux);
 }
 
 // 카드에 실제로 쓰는 일꾼. **코어 0 에서 혼자 돈다.**
 //
-//   Recording  4 KB 가 차거나 0.5초가 지나면 쓴다. 못 쓰면 닫고 Failed.
+//   Recording  4 KB 가 차거나 0.5초가 지나면 쓴다. 못 쓰면 닫는 중(Draining)으로 넘기고 마무리한다.
 //              남은 버퍼는 **다시 안 쓴다** — 이미 쓴 앞부분이 겹치기 때문이다.
-//   Draining   남은 것을 다 쓰고 텍스트도 쏟고 닫는다. 다 썼으면 Closed, 아니면 Failed.
+//   Draining   남은 것을 다 쓰고 텍스트도 쏟고 닫고 마무리한다. 다 썼든 못 썼든 Closed (못 쓴 것은 결과에).
 //   그 밖      쉰다.
 //
-// 상태를 Closed/Failed 로 바꾸는 것이 곧 "끝났다" 는 답이다. stop() 은 그걸 기다린다.
+// 상태를 Closed 로 바꾸는 것이 곧 "끝났다" 는 답이다. 루프는 기다리지 않고 poll() 로 결과를 받는다.
 void writerTask(void*) {
     uint32_t lastWrite = millis(), lastFlush = millis();
     for (;;) {
@@ -271,13 +269,16 @@ void writerTask(void*) {
                 if (dt > gMaxStall) gMaxStall = dt;
                 lastWrite = millis();
                 if (!ok) {
-                    fillFail(1, r);
-                    gLostBytes = gFail.lost;
+                    noteFirst(recctl::kErrWrite, r);
+                    // ★ 포기한 순간 닫는 중으로 넘긴다 — 생산자가 더 넣지 않는다 (검토 2번).
+                    //   사람이 먼저 멈춰 이미 닫는 중이면 그대로 둔다.
+                    portENTER_CRITICAL(&gStateMux);
+                    toDraining(gState);
+                    portEXIT_CRITICAL(&gStateMux);
                     gLastError = "카드 쓰기 실패";
                     gLastErrorShort = "쓰기 실패";
-                    closeFiles();
-                    gFailedStop = true;
-                    gState = RecState::Failed;
+                    gDurS = (millis() - gStartedMs) / 1000;
+                    finishSession(false);       // 닫고 머리글(closed=0)·이름까지 고쳐 본다
                     continue;
                 }
                 if (r.tries) ++gWriteRetries;
@@ -300,16 +301,19 @@ void writerTask(void*) {
             gLostBytes = (uint32_t)bufUsed();
             const bool complete = ok && gLostBytes == 0;
             if (!complete) {
-                // 닫으면서 못 쓴 것도 NVS 에 남긴다 (CLAUDE.md: 이유는 램에 두지 않는다).
-                fillFail(3, r);
+                // 닫으면서 못 쓴 것도 결과에 남긴다 → 루프가 NVS 에 적는다 (이유는 램에 두지 않는다).
+                noteFirst(recctl::kErrDrainShort, r);
                 gLastError = "닫으면서 다 못 썼습니다";
                 gLastErrorShort = "저장 실패";
-                gFailedStop = true;
             }
             writerFlushText(true);
-            closeFiles();
+            if (gSlowCloseMs) {                       // 시험: 닫기 직전 한 번 쉰다
+                const uint32_t ms = gSlowCloseMs;
+                gSlowCloseMs = 0;
+                vTaskDelay(pdMS_TO_TICKS(ms));
+            }
+            finishSession(complete);
             lastWrite = lastFlush = millis();
-            gState = afterWrite(RecState::Draining, complete);
             continue;
         }
 
@@ -333,35 +337,7 @@ uint16_t crc16(const uint8_t* p, size_t n) {
 
 // ── 바깥에서 부르는 것들 ─────────────────────────────────────────────────
 
-namespace {
-// "지금 기록 중" 이라는 표를 NVS 에 세우고 지운다.
-//
-// 왜 필요한가. 전원이 갑자기 끊기면 stop() 을 못 거친다. 그러면 이 표가 1 로
-// 남는다. 다음에 켤 때 그걸 보고 "지난번에 끊겼구나" 를 안다.
-// 사람이 끝낸 경우에는 stop() 이 0 으로 지우므로 표가 안 남는다.
-void setCutFlag(uint8_t v) {
-    Preferences p;
-    p.begin("sail", false);
-    p.putUChar("rec_on", v);
-    p.end();
-}
-} // namespace
-
-// 지난번이 그냥 끊겼나. 위 표를 읽는다. main.cpp 가 켤 때 물어보고
-// 이어서 기록을 시작할지 정한다.
-bool cutShort() {
-    Preferences p;
-    p.begin("sail", true);
-    const uint8_t v = p.getUChar("rec_on", 0);
-    p.end();
-    return v == 1;
-}
-
-void clearCutFlag() { setCutFlag(0); }
-
 void noteBootReason(const char* why) { if (why) gBootWhy = why; }
-
-bool finalizeClosed();   // 아래 stop() 옆에 정의
 
 // 링버퍼를 잡고 코어 0 에 일꾼을 띄운다. setup() 에서 한 번만 부른다.
 //
@@ -423,10 +399,9 @@ static void nameFor(char* out, size_t cap, uint32_t session,
     const bool sure = utc != 0;
     if (!utc) utc = (uint32_t)time(nullptr);      // 보드 시계
 
-    Preferences prefs;
-    prefs.begin("sail", true);
-    const int32_t tzMin = (int32_t)prefs.getInt("tz_min", 540);   // 기본 한국
-    prefs.end();
+    // 시간대는 start() 가 NVS 에서 읽어 둔 값을 쓴다. 이름 고치기는 일꾼(코어 0)이 하는데
+    // 코어 0 에서는 NVS 를 안 만지기로 했다. 기본 한국(+540분).
+    const int32_t tzMin = gTzMin;
 
     const time_t local = (time_t)((int64_t)utc + (int64_t)tzMin * 60);
     struct tm tmv;
@@ -438,18 +413,41 @@ static void nameFor(char* out, size_t cap, uint32_t session,
 
 bool start(const Header& h) {
     if (!gBuf || !gWriter) { gLastError = "버퍼 없음"; gLastErrorShort = "기록기 없음"; return false; }
-    if (!canStart(gState)) { gLastError = "이미 기록 중"; gLastErrorShort = "이미 기록 중"; return false; }
-    if (gNeedFinalize) finalizeClosed();     // 시간 초과로 미뤄 둔 앞 세션 마무리
+    if (!canStart(gState)) {
+        gLastError = (gState == RecState::Draining) ? "앞 기록을 닫는 중" : "이미 기록 중";
+        gLastErrorShort = (gState == RecState::Draining) ? "닫는 중" : "이미 기록 중";
+        return false;
+    }
+    {
+        // 앞 세션 결과를 루프가 아직 안 꺼내 갔으면 덮어쓰지 않는다. 다음 바퀴에 다시 걸린다.
+        portENTER_CRITICAL(&gResMux);
+        const bool pending = !gRes.consumed;
+        portEXIT_CRITICAL(&gResMux);
+        if (pending) { gLastError = "앞 기록 결과 정리 중"; gLastErrorShort = "정리 중"; return false; }
+    }
     if (!cardPresent()) { gLastError = "카드가 안 꽂혀 있습니다"; gLastErrorShort = "카드 없음"; return false; }
 
     const uint32_t tA = millis();   // 시작 단계마다 몇 ms 걸리나 (화면이 멈춰 보였다 9/13)
-    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
-        gLastError = "마운트 실패 — sd 명령으로 이유를 보세요";
-        gLastErrorShort = "마운트 실패";
+    if (!sdcard::acquire(sdcard::Owner::Recorder)) {
+        const bool used = sdcard::lastRefusal() == sdcard::Refusal::Busy;
+        gLastError = used ? "카드를 다른 곳(파일 전송·진단)이 쓰는 중입니다" : "마운트 실패 — sd 명령으로 이유를 보세요";
+        gLastErrorShort = used ? "카드 사용 중" : "마운트 실패";
         return false;
     }
     SD.mkdir("/LOGS");
+    // ★ 남은 자리를 시작 전에 본다 (체크리스트 12). 옛 코드는 값만 읽고 안 썼다 — 가득 찬 카드는
+    //   기록 도중 쓰기 실패 → 새 파일로 다시 걸기 → 또 실패를 되풀이했다.
+    //   기준은 8시간 분량. 한 세션 8시간이 90 MB 다 (TRANSFER.md §1).
+    {
+        const uint64_t freeB = SD.totalBytes() - SD.usedBytes();
+        gFreeBytes = freeB;
+        if (freeB < kMinFreeBytes) {
+            sdcard::release(sdcard::Owner::Recorder);
+            gLastError = "카드 남은 자리가 8시간 분량(90 MB)보다 적습니다";
+            gLastErrorShort = "카드 자리 부족";
+            return false;
+        }
+    }
     const uint32_t tB = millis();
 
     // ── 파일 이름 ───────────────────────────────────────────────────────
@@ -470,6 +468,7 @@ bool start(const Header& h) {
     Preferences prefs;
     prefs.begin("sail", false);
     uint32_t next = prefs.getUInt("sess_n", 0) + 1;
+    gTzMin = (int32_t)prefs.getInt("tz_min", 540);   // 이름 고치기용 (일꾼이 NVS 를 안 만지게)
 
     // ★ 카드에 있는 제일 큰 번호보다도 커야 한다.
     //
@@ -502,7 +501,7 @@ bool start(const Header& h) {
     prefs.end();
 
     gBin = SD.open(gPath, FILE_WRITE);
-    if (!gBin) { gLastError = "파일을 못 열었습니다"; gLastErrorShort = "파일 못 엶"; SD.end(); return false; }
+    if (!gBin) { gLastError = "파일을 못 열었습니다"; gLastErrorShort = "파일 못 엶"; sdcard::release(sdcard::Owner::Recorder); return false; }
     gTxt = SD.open(gTxtPath, FILE_WRITE);
 
     // ── 128바이트 머리글 ────────────────────────────────────────────────
@@ -542,13 +541,21 @@ bool start(const Header& h) {
     memcpy(hdr + kOffHeelOff,  &h.heelOff,  4);
     memcpy(hdr + kOffPitchOff, &h.pitchOff, 4);
     memcpy(hdr + kOffPrevSession, &h.prevSession, 4);
+    hdr[kOffHdgFormula] = h.hdgFormula;
+    hdr[kOffHdgAxisA]   = h.hdgAxisA;
+    hdr[kOffHdgAxisB]   = h.hdgAxisB;
+    hdr[kOffHdgSignA]   = h.hdgSignA;
+    hdr[kOffHdgSignB]   = h.hdgSignB;
+    memcpy(hdr + kOffHdgOff,  &h.hdgOff,  4);
+    memcpy(hdr + kOffHdgDecl, &h.hdgDecl, 4);
+    memcpy(hdr + kOffMagHi,   h.magHi,   12);
     const uint16_t hcrc = crc16(hdr, 126);
     hdr[126] = (uint8_t)hcrc; hdr[127] = (uint8_t)(hcrc >> 8);
     // ★ 머리글이 다 들어갔는지 본다. 안 들어간 파일은 나중에 못 읽는다.
     if (gBin.write(hdr, sizeof(hdr)) != sizeof(hdr)) {
         gBin.close();
         if (gTxt) gTxt.close();
-        SD.end();
+        sdcard::release(sdcard::Owner::Recorder);
         gLastError = "머리글을 못 썼습니다";
         gLastErrorShort = "머리글 실패";
         return false;
@@ -589,11 +596,14 @@ bool start(const Header& h) {
     gUtcStart = 0; gUtcStartMs = 0;
     gHead = gTail = 0;
     gStartedMs = millis();
-    gFailedStop = false;
-    gState = RecState::Recording;
-
-    // ★ 여기서 표시를 세운다. 전원이 끊기면 이게 남아서 다음에 이어 시작한다.
-    setCutFlag(1);
+    portENTER_CRITICAL(&gResMux);
+    gRes = recctl::SessionResult();         // consumed=true — 아직 끝난 결과 없음
+    gRes.session = gSession;
+    portEXIT_CRITICAL(&gResMux);
+    portENTER_CRITICAL(&gStateMux);
+    gState = RecState::Recording;       // canStart 로 Closed 를 확인한 뒤다
+    portEXIT_CRITICAL(&gStateMux);
+    // 이어 시작 표시(rec_want · rec_open)는 루프가 NVS 에 적는다 (main.cpp). 기록기는 NVS 를 안 만진다.
 
     Serial.printf("[LOG] 기록 시작 — %s  (+ %s)\n", gPath, gTxtPath);
     if (h.prevSession) {
@@ -602,149 +612,126 @@ bool start(const Header& h) {
     return true;
 }
 
-// 닫힌 뒤의 마무리 — 머리글 고치기·이름 바꾸기·표시 지우기.
-// stop() 이 제때 끝났으면 거기서, 시간 초과 뒤 일꾼이 혼자 닫았으면 healthCheck 가 부른다.
-// 일꾼이 카드를 놓은 뒤(Closed/Failed)에만 부른다.
-bool finalizeClosed() {
-    gNeedFinalize = false;
-    const bool drained = (gState == RecState::Closed);
-    bool hdrOk = false;
-    // ── 머리글을 다시 쓴다 ──────────────────────────────────────────────
-    //
-    // 기록을 시작할 때는 첫 fix 의 UTC 도, 세션 길이도 모른다. 세션을 닫으면서 파일 맨 앞
-    // 128바이트를 새로 쓴다. 전원이 그냥 끊겨서 여기까지 못 오면 closed 가 0 으로 남는다.
-    // ★ 다 쓰고 닫혔을 때만 고친다. 못 쓴 바이트가 있는 파일에 closed=1 을 적으면 구멍 난
-    //   파일이 "제대로 닫힌 파일" 로 보인다.
-    if (drained && SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
-        File h = SD.open(gPath, "r+");
-        if (h) {
-            uint8_t hdr[kHeaderSize];
-            if (h.read(hdr, kHeaderSize) == (int)kHeaderSize &&
-                memcmp(hdr, "HHLG", 4) == 0) {
-                memcpy(hdr + 24, &gUtcStart, 4);
-                memcpy(hdr + 28, &gUtcStartMs, 2);
-                memcpy(hdr + kOffDurationS, &gDurS, 4);
-                memcpy(hdr + kOffNavRows, (const void*)&gNavRows, 4);
-                memcpy(hdr + kOffImuRows, (const void*)&gImuRows, 4);
-                memcpy(hdr + kOffDropped, (const void*)&gDropped, 4);
-                hdr[kOffClosed] = 1;
-                const uint16_t c = crc16(hdr, 126);
-                hdr[126] = (uint8_t)c; hdr[127] = (uint8_t)(c >> 8);
-                h.seek(0);
-                hdrOk = (h.write(hdr, kHeaderSize) == kHeaderSize);
-                h.flush();
-            }
-            h.close();
-        }
-        SD.end();
+namespace {
+// 일꾼이 부른다. 파일을 닫고 · 머리글과 이름을 고치고 · 카드를 놓고 · 결과를 하나 남긴다.
+//
+// ★ 마무리를 일꾼이 닫을 때 같이 한다. 옛 코드는 루프의 stop() 이 15초를 기다린 뒤 따로 했고,
+//   시간이 넘으면 gNeedFinalize 로 미뤘다가 healthCheck · 다음 stop() · start() 가 나눠 맡았다.
+// ★ 쓰기 실패로 끝난 세션도 머리글(첫 fix·길이·줄 수)과 이름을 고쳐 본다. closed 는 0 으로 둔다.
+//   옛 코드는 정상 종료 때만 고쳐서 세션 46 이 위성을 잡고도 `_nosat` · "첫 fix 없음" 으로 남았다.
+bool rewriteHeader(bool closed) {
+    File h = SD.open(gPath, "r+");
+    if (!h) return false;
+    bool ok = false;
+    uint8_t hdr[kHeaderSize];
+    if (h.read(hdr, kHeaderSize) == (int)kHeaderSize && memcmp(hdr, "HHLG", 4) == 0) {
+        memcpy(hdr + 24, &gUtcStart, 4);
+        memcpy(hdr + 28, &gUtcStartMs, 2);
+        memcpy(hdr + kOffDurationS, &gDurS, 4);
+        memcpy(hdr + kOffNavRows, (const void*)&gNavRows, 4);
+        memcpy(hdr + kOffImuRows, (const void*)&gImuRows, 4);
+        memcpy(hdr + kOffDropped, (const void*)&gDropped, 4);
+        // ★ 다 쓰고 닫혔을 때만 1. 못 쓴 바이트가 있는 파일에 1 을 적으면 구멍 난 파일이
+        //   "제대로 닫힌 파일" 로 보인다.
+        hdr[kOffClosed] = closed ? 1 : 0;
+        const uint16_t c = crc16(hdr, 126);
+        hdr[126] = (uint8_t)c; hdr[127] = (uint8_t)(c >> 8);
+        h.seek(0);
+        ok = (h.write(hdr, kHeaderSize) == kHeaderSize);
+        h.flush();
     }
+    h.close();
+    return ok;
+}
 
-    // ── 이름을 시각으로 바꾼다 ── 이 세션에서 위성을 잡았으면 그 시각으로.
+void finishSession(bool complete) {
+    if (gBin) { gBin.flush(); gBin.close(); }
+    if (gTxt) { gTxt.flush(); gTxt.close(); }
+    const bool hdrOk = rewriteHeader(complete);
+    // 이름을 시각으로 바꾼다 — 이 세션에서 위성을 잡았으면 그 시각으로.
     if (gUtcStart) {
         char binNew[48], txtNew[48];
         nameFor(binNew, sizeof(binNew), gSession, gUtcStart, "HLG");
         nameFor(txtNew, sizeof(txtNew), gSession, gUtcStart, "TXT");
-        if (SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
-            if (strcmp(gPath, binNew) != 0 && SD.rename(gPath, binNew)) {
-                snprintf(gPath, sizeof(gPath), "%s", binNew);
-            }
-            if (strcmp(gTxtPath, txtNew) != 0) SD.rename(gTxtPath, txtNew);
-            SD.end();
-        }
+        if (strcmp(gPath, binNew) != 0 && SD.rename(gPath, binNew)) snprintf(gPath, sizeof(gPath), "%s", binNew);
+        if (strcmp(gTxtPath, txtNew) != 0 && SD.rename(gTxtPath, txtNew)) snprintf(gTxtPath, sizeof(gTxtPath), "%s", txtNew);
     }
-
-    gState = RecState::Closed;
-    // ★ 파일이 닫힌 **뒤에** 표시를 지운다. 닫기 전에 지우면 닫다가 전원이 끊긴 세션이
-    //   이어 시작이 안 된다.
-    setCutFlag(0);
-
-    if (drained && !hdrOk) {
+    gFreeBytes = SD.totalBytes() - SD.usedBytes();
+    sdcard::release(sdcard::Owner::Recorder);   // 마무리까지 끝났다. 이제 누구든 쥘 수 있다
+    if (complete && !hdrOk) {
         gLastError = "머리글을 못 고쳤습니다 (내용은 들어 있음)";
         gLastErrorShort = "머리글 실패";
-        gFail = FailInfo();
-        gFail.kind = 5; gFail.session = gSession; gFail.recSec = gDurS; gFail.bytes = (uint32_t)gBytes;
-        gFail.card = cardPresent();
-        gFailedStop = true;
     }
-    Serial.printf("[LOG] 기록 끝 — %s  NAV %u줄 / IMU %u줄  %s\n",
-                  gPath, (unsigned)gNavRows, (unsigned)gImuRows,
-                  (drained && hdrOk) ? "정상 종료" : "★ 정상 종료 아님");
-    if (gDropped) {
-        Serial.printf("[LOG] ★ 버린 줄 %u개 — 카드가 못 따라왔거나 IMU 가 끊겼던 시간입니다\n",
-                      (unsigned)gDropped);
-    }
-    return drained && hdrOk;
+    portENTER_CRITICAL(&gResMux);
+    gRes.session   = gSession;
+    gRes.drained   = complete;
+    gRes.headerOk  = hdrOk;
+    // 못 쓴 바이트는 닫은 **뒤에** 센다. 포기한 뒤에도 생산자가 막 넣던 것까지 들어간다 (검토 2번).
+    gLostBytes = complete ? 0 : (uint32_t)bufUsed();
+    gRes.lostBytes = gLostBytes;
+    gRes.durS      = gDurS;
+    if (complete && !hdrOk) recctl::setFirst(gRes, recctl::kErrHeader);
+    gRes.consumed  = false;
+    portEXIT_CRITICAL(&gResMux);
+    portENTER_CRITICAL(&gStateMux);
+    toClosed(gState);                   // 이게 "끝났다" 는 답이다. 이 뒤로 카드를 누가 써도 된다
+    portEXIT_CRITICAL(&gStateMux);
 }
+} // namespace
 
-bool stop() {
-    RecState st = gState;
-    if (st == RecState::Closed) {
-        // 시간 초과 뒤 일꾼이 혼자 닫아 둔 경우 — 여기서 마무리한다.
-        if (gNeedFinalize) return finalizeClosed();
-        return true;
-    }
-
-    // 일꾼이 쓰기 실패로 이미 닫았다. 실패 기록은 루프가 꺼내 NVS 에 적되, 사람이 멈춘 것이니
-    // 다시 걸지는 않게 표시한다.
-    if (st == RecState::Failed) {
-        if (gNeedFinalize) { finalizeClosed(); }
-        gState = RecState::Closed;
-        gFail.userStopped = true;
-        setCutFlag(0);          // 사람이 멈췄다. 다음에 켤 때 이어 시작하지 않는다
-        Serial.printf("[LOG] 이미 쓰기 실패로 닫혀 있었습니다 — %s\n",
-                      gLastError ? gLastError : "이유 모름");
-        return false;
-    }
-
-    if (st == RecState::Recording) {
-        gDurS = (millis() - gStartedMs) / 1000;
-        // 끝 요약을 텍스트 버퍼에 넣는다. 일꾼이 닫기 전에 쏟는다.
-        char foot[256];
-        int n = snprintf(foot, sizeof(foot),
-                         "#\n# 끝 — %u분 %u초,  NAV %u줄  IMU %u줄\n"
-                         "# 버린 줄 %u  기다린 횟수 %u  최대 멈춤 %ums  버퍼 최고 %u%%\n%s",
-                         (unsigned)(gDurS / 60), (unsigned)(gDurS % 60),
-                         (unsigned)gNavRows, (unsigned)gImuRows,
-                         (unsigned)gDropped, (unsigned)gWaited,
-                         (unsigned)gMaxStall, (unsigned)gMaxFill,
-                         gDropped ? "# ★ 버린 줄이 있습니다. 이 세션은 구멍이 있습니다.\n" : "");
-        if (n < 0) n = 0;
-        if ((size_t)n >= sizeof(foot)) n = sizeof(foot) - 1;
+bool requestStop() {
+    if (gState != RecState::Recording) return false;       // 빠른 거절. 확정은 아래 잠금 안에서
+    const uint32_t durS = (millis() - gStartedMs) / 1000;
+    // 끝 요약을 텍스트 버퍼에 넣는다. 일꾼이 닫기 전에 쏟는다.
+    char foot[256];
+    int n = snprintf(foot, sizeof(foot),
+                     "#\n# 끝 — %u분 %u초,  NAV %u줄  IMU %u줄\n"
+                     "# 버린 줄 %u  기다린 횟수 %u  최대 멈춤 %ums  버퍼 최고 %u%%\n%s",
+                     (unsigned)(durS / 60), (unsigned)(durS % 60),
+                     (unsigned)gNavRows, (unsigned)gImuRows,
+                     (unsigned)gDropped, (unsigned)gWaited,
+                     (unsigned)gMaxStall, (unsigned)gMaxFill,
+                     gDropped ? "# ★ 버린 줄이 있습니다. 이 세션은 구멍이 있습니다.\n" : "");
+    if (n < 0) n = 0;
+    if ((size_t)n >= sizeof(foot)) n = sizeof(foot) - 1;
+    // ★ "기록 중인가" 확인과 닫는 중 쓰기를 한 잠금 안에서 (검토 2번). 그 사이 일꾼이 쓰기를 포기해
+    //   닫는 중·닫힘으로 갔으면 아무것도 안 바꾼다 — 닫힌 세션을 닫는 중으로 되돌리지 않는다.
+    bool mine = false;
+    portENTER_CRITICAL(&gStateMux);
+    if (gState == RecState::Recording) {
         portENTER_CRITICAL(&gTextMux);
         if (gTextUsed + (size_t)n < kTextBufSize) {
             memcpy(gTextBuf + gTextUsed, foot, (size_t)n);
             gTextUsed += (size_t)n;
         }
         portEXIT_CRITICAL(&gTextMux);
-        gNeedFinalize = true;
-        gState = RecState::Draining;
+        gDurS = durS;
+        mine = toDraining(gState);
     }
-
-    // 일꾼이 끝을 알릴 때까지 기다린다.
-    const uint32_t t0 = millis();
-    while (gState == RecState::Draining && millis() - t0 < 15000) {
-        delay(10);
-        esp_task_wdt_reset();
-    }
-    if (gState == RecState::Draining) {
-        // ★ 닫혔는지 모르는 채로 카드를 다시 붙이거나 표시를 지우면 안 된다.
-        //   표시(rec_on)는 남긴다. gNeedFinalize 가 남아 있어 일꾼이 닫으면 healthCheck 가 마무리한다.
-        gLastError = "닫기 시간 초과 — 카드가 대답이 없습니다";
-        gLastErrorShort = "닫기 초과";
-        gFail = FailInfo();
-        gFail.kind = 4; gFail.session = gSession; gFail.recSec = gDurS;
-        gFail.bytes = (uint32_t)gBytes; gFail.lost = (uint32_t)bufUsed(); gFail.card = cardPresent();
-        gFailedStop = true;     // 일꾼이 놓아준 뒤에 루프가 꺼내 NVS 에 적는다
-        Serial.println("[LOG] ★ 15초 안에 파일이 안 닫혔습니다. 닫히면 그때 머리글을 고칩니다.");
-        return false;
-    }
-
-    if (gState == RecState::Failed) {
-        Serial.printf("[LOG] ★ 닫으면서 %lu 바이트를 못 썼습니다 (errno %d)\n",
-                      (unsigned long)gLostBytes, gFail.err);
-    }
-    return finalizeClosed();
+    portEXIT_CRITICAL(&gStateMux);
+    return mine;
 }
+
+bool poll(recctl::SessionResult* out) {
+    bool got = false;
+    portENTER_CRITICAL(&gResMux);
+    if (!gRes.consumed && gState == RecState::Closed) {
+        if (out) *out = gRes;
+        gRes.consumed = true;
+        got = true;
+    }
+    portEXIT_CRITICAL(&gResMux);
+    return got;
+}
+
+recctl::Phase phase() {
+    const RecState s = gState;
+    if (s == RecState::Recording) return recctl::Phase::Recording;
+    if (s == RecState::Draining)  return recctl::Phase::Closing;
+    return recctl::Phase::Idle;
+}
+
+void testSlowClose(uint32_t ms) { gSlowCloseMs = ms; }
 
 // 항법 한 줄(38바이트)을 링버퍼에 넣는다. 1 Hz 로 부른다.
 //
@@ -886,8 +873,8 @@ void writeText(const NavSample& s, const TextSample& t) {
 // 이 세션에서 위성을 **처음** 잡은 시각을 적어 둔다. 두 번째부터는 무시한다.
 //
 // 시작할 때는 이 값을 모른다. 해변에서 버튼을 누르면 보통 1~2분 뒤에 잡힌다.
-// 그래서 stop() 이 파일을 닫으면서 머리글에 이 값을 다시 써 넣고 파일 이름도
-// 고친다.
+// 그래서 일꾼이 파일을 닫으면서(finishSession) 머리글에 이 값을 다시 써 넣고 파일 이름도
+// 고친다. 쓰기 실패로 끝난 세션도 고친다.
 void noteUtcStart(uint32_t epochSec, uint16_t ms) {
     if (!isRec() || gUtcStart || !epochSec) return;
     gUtcStart = epochSec;
@@ -950,11 +937,9 @@ void getStatus(Status* out) {
 //
 // 제일 중요한 건 마지막 것이다. IMU 가 정말 10 ms 등간격인지.
 void verify(uint32_t session) {
-    if (busy()) { Serial.println("[검사] 기록 중에는 못 합니다. rec off 먼저."); return; }
     if (!cardPresent()) { Serial.println("[검사] 카드가 없습니다."); return; }
 
-    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+    if (!sdcard::acquire(sdcard::Owner::Diagnostic)) {
         Serial.println("[검사] 마운트 실패 — sd 명령으로 이유를 보세요.");
         return;
     }
@@ -984,12 +969,12 @@ void verify(uint32_t session) {
     }
     if (!path[0]) {
         Serial.printf("[검사] 세션 %u 파일을 못 찾았습니다.\n", (unsigned)session);
-        SD.end();
+        sdcard::release(sdcard::Owner::Diagnostic);
         return;
     }
 
     File f = SD.open(path, FILE_READ);
-    if (!f) { Serial.printf("[검사] %s 를 못 열었습니다.\n", path); SD.end(); return; }
+    if (!f) { Serial.printf("[검사] %s 를 못 열었습니다.\n", path); sdcard::release(sdcard::Owner::Diagnostic); return; }
 
     const uint32_t total = f.size();
     Serial.println("──────────────────────────────────────────");
@@ -997,7 +982,7 @@ void verify(uint32_t session) {
 
     uint8_t hdr[kHeaderSize];
     if (f.read(hdr, kHeaderSize) != (int)kHeaderSize) {
-        Serial.println("  헤더를 다 못 읽었습니다."); f.close(); SD.end(); return;
+        Serial.println("  헤더를 다 못 읽었습니다."); f.close(); sdcard::release(sdcard::Owner::Diagnostic); return;
     }
     const uint16_t hwant = (uint16_t)hdr[126] | ((uint16_t)hdr[127] << 8);
     const bool hok = (memcmp(hdr, "HHLG", 4) == 0) && (hwant == crc16(hdr, 126));
@@ -1094,7 +1079,7 @@ void verify(uint32_t session) {
     }
     f.close();
     const uint64_t freeB = SD.totalBytes() - SD.usedBytes();
-    SD.end();
+    sdcard::release(sdcard::Owner::Diagnostic);
 
     const uint32_t used = kHeaderSize + nav * kNavSize + imu * imuSize;
     Serial.println("  ─────────────────────────────────────");
@@ -1155,10 +1140,8 @@ void verify(uint32_t session) {
 // 카드를 뽑지 않고 배 위에서 "지금 것이 제대로 찍혔나" 를 보는 용이다.
 // head=true 면 앞에서, false 면 뒤에서 읽는다.
 void tail(uint32_t session, uint16_t lines, bool head) {
-    if (busy()) { Serial.println("[꼬리] 기록 중에는 못 합니다. rec off 먼저."); return; }
     if (!cardPresent()) { Serial.println("[꼬리] 카드가 없습니다."); return; }
-    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+    if (!sdcard::acquire(sdcard::Owner::Diagnostic)) {
         Serial.println("[꼬리] 마운트 실패."); return;
     }
 
@@ -1188,11 +1171,11 @@ void tail(uint32_t session, uint16_t lines, bool head) {
     }
     if (!path[0]) {
         Serial.printf("[꼬리] 세션 %u 의 TXT 를 못 찾았습니다.\n", (unsigned)session);
-        SD.end(); return;
+        sdcard::release(sdcard::Owner::Diagnostic); return;
     }
 
     File f = SD.open(path, FILE_READ);
-    if (!f) { Serial.printf("[꼬리] %s 를 못 열었습니다.\n", path); SD.end(); return; }
+    if (!f) { Serial.printf("[꼬리] %s 를 못 열었습니다.\n", path); sdcard::release(sdcard::Owner::Diagnostic); return; }
 
     const uint32_t total = f.size();
     Serial.println("──────────────────────────────────────────");
@@ -1219,7 +1202,7 @@ void tail(uint32_t session, uint16_t lines, bool head) {
         if ((shown & 0x0F) == 0) esp_task_wdt_reset();
     }
     f.close();
-    SD.end();
+    sdcard::release(sdcard::Owner::Diagnostic);
     Serial.println("──────────────────────────────────────────");
 }
 
@@ -1228,10 +1211,8 @@ void tail(uint32_t session, uint16_t lines, bool head) {
 // 맥 WiFi 를 갈아타지 않고 USB 로만 회수하는 길이다. 다른 작업의 로그가 줄 사이에
 // 끼어들 수 있어서 조각마다 CRC32(zlib 와 같은 식)를 붙인다. 틀리면 받는 쪽이 그 조각만 다시 청한다.
 void dump(uint32_t session, bool hlg, uint32_t offset, uint32_t len) {
-    if (busy()) { Serial.println("@DUMP X 기록 중"); return; }
     if (!cardPresent()) { Serial.println("@DUMP X 카드 없음"); return; }
-    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+    if (!sdcard::acquire(sdcard::Owner::Diagnostic)) {
         Serial.println("@DUMP X 마운트 실패"); return;
     }
     char want[16];
@@ -1251,9 +1232,9 @@ void dump(uint32_t session, bool hlg, uint32_t offset, uint32_t len) {
         }
         dir.close();
     }
-    if (!path[0]) { Serial.println("@DUMP X 파일 없음"); SD.end(); return; }
+    if (!path[0]) { Serial.println("@DUMP X 파일 없음"); sdcard::release(sdcard::Owner::Diagnostic); return; }
     File f = SD.open(path, FILE_READ);
-    if (!f) { Serial.println("@DUMP X 열기 실패"); SD.end(); return; }
+    if (!f) { Serial.println("@DUMP X 열기 실패"); sdcard::release(sdcard::Owner::Diagnostic); return; }
 
     const uint32_t total = f.size();
     Serial.printf("@DUMP S %s %u\n", path, (unsigned)total);
@@ -1282,8 +1263,58 @@ void dump(uint32_t session, bool hlg, uint32_t offset, uint32_t len) {
         esp_task_wdt_reset();
     }
     f.close();
-    SD.end();
+    sdcard::release(sdcard::Owner::Diagnostic);
     Serial.printf("@DUMP E %u %u %08x\n", (unsigned)offset, (unsigned)sent, (unsigned)(crc ^ 0xFFFFFFFFu));
+}
+
+// 파일 하나를 끝까지 읽어 SHA-256 을 낸다. `rec hash` 가 부른다.
+// "받았다" 는 받은 파일과 카드 원본의 해시가 같을 때만 쓴다 (체크리스트 10). 그래프가 보인다고 치지 않는다.
+void hashFile(uint32_t session, bool hlg) {
+    if (!cardPresent()) { Serial.println("@HASH X 카드 없음"); return; }
+    if (!sdcard::acquire(sdcard::Owner::Diagnostic)) { Serial.println("@HASH X 마운트 실패"); return; }
+    char want[16];
+    snprintf(want, sizeof(want), "S%05u", (unsigned)session);
+    const char* ext = hlg ? ".HLG" : ".TXT";
+    char path[80];
+    path[0] = '\0';
+    {
+        File dir = SD.open("/LOGS");
+        while (File e = dir.openNextFile()) {
+            const String nm = e.name();
+            e.close();
+            if (nm.startsWith(want) && nm.endsWith(ext)) {
+                snprintf(path, sizeof(path), "/LOGS/%s", nm.c_str());
+                break;
+            }
+        }
+        dir.close();
+    }
+    if (!path[0]) { Serial.println("@HASH X 파일 없음"); sdcard::release(sdcard::Owner::Diagnostic); return; }
+    File f = SD.open(path, FILE_READ);
+    if (!f) { Serial.println("@HASH X 열기 실패"); sdcard::release(sdcard::Owner::Diagnostic); return; }
+
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts_ret(&ctx, 0);
+    static uint8_t buf[4096];
+    uint32_t total = 0, lastKick = millis();
+    for (;;) {
+        const size_t got = f.read(buf, sizeof(buf));
+        if (got == 0) break;
+        mbedtls_sha256_update_ret(&ctx, buf, got);
+        total += (uint32_t)got;
+        if (millis() - lastKick > 500) { esp_task_wdt_reset(); lastKick = millis(); }
+    }
+    uint8_t out[32];
+    mbedtls_sha256_finish_ret(&ctx, out);
+    mbedtls_sha256_free(&ctx);
+    const uint32_t size = f.size();
+    f.close();
+    sdcard::release(sdcard::Owner::Diagnostic);
+    if (total != size) { Serial.printf("@HASH X 읽은 %u 바이트가 크기 %u 와 다름\n", (unsigned)total, (unsigned)size); return; }
+    char hex[65];
+    for (int i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", out[i]);
+    Serial.printf("@HASH %s %u %s\n", path, (unsigned)total, hex);
 }
 
 // 세션 하나를 지운다. HLG 와 TXT 둘 다. `rec rm <번호>` 가 부른다.
@@ -1291,11 +1322,9 @@ void dump(uint32_t session, bool hlg, uint32_t offset, uint32_t len) {
 // 못 되돌린다. 그래서 기록 중에는 막고, 번호로만 받는다 —
 // 파일 이름을 직접 받으면 오타 하나로 남의 세션을 지운다.
 bool removeSession(uint32_t session) {
-    if (busy()) { Serial.println("[지움] 기록 중에는 못 합니다. rec off 먼저."); return false; }
     if (!session)   { Serial.println("[지움] 번호를 적으세요."); return false; }
     if (!cardPresent()) { Serial.println("[지움] 카드가 없습니다."); return false; }
-    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+    if (!sdcard::acquire(sdcard::Owner::Diagnostic)) {
         Serial.println("[지움] 마운트 실패."); return false;
     }
     char want[16];
@@ -1319,14 +1348,14 @@ bool removeSession(uint32_t session) {
     }
     if (!n) {
         Serial.printf("[지움] 세션 %u 파일이 없습니다.\n", (unsigned)session);
-        SD.end(); return false;
+        sdcard::release(sdcard::Owner::Diagnostic); return false;
     }
     int ok = 0;
     for (int i = 0; i < n; ++i) {
         if (SD.remove(hit[i])) { Serial.printf("  지웠습니다  %s\n", hit[i]); ++ok; }
         else                   { Serial.printf("  못 지웠습니다 %s\n", hit[i]); }
     }
-    SD.end();
+    sdcard::release(sdcard::Owner::Diagnostic);
     return ok == n;
 }
 
@@ -1335,10 +1364,8 @@ bool removeSession(uint32_t session) {
 // 이름의 앞 번호가 정렬을 맡으므로 이름순이 곧 만든 순서다. 시각이 틀렸거나
 // `_nosat` 이 붙어 있어도 순서는 안 뒤집힌다 (nameFor 참조).
 void listFiles() {
-    if (busy()) { Serial.println("[목록] 기록 중에는 못 합니다."); return; }
     if (!cardPresent()) { Serial.println("[목록] 카드가 없습니다."); return; }
-    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    if (!SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5)) {
+    if (!sdcard::acquire(sdcard::Owner::Diagnostic)) {
         Serial.println("[목록] 마운트 실패."); return;
     }
     File dir = SD.open("/LOGS");
@@ -1356,48 +1383,29 @@ void listFiles() {
     Serial.printf("  파일 %u개, 합쳐서 %.2f MB\n", (unsigned)n, sum / 1048576.0);
     Serial.printf("  카드 남은 자리 %llu MB\n",
                   (unsigned long long)((SD.totalBytes() - SD.usedBytes()) / 1048576ULL));
-    SD.end();
+    sdcard::release(sdcard::Owner::Diagnostic);
     Serial.println("──────────────────────────────────────────");
 }
 
-// 1 Hz 로 메인 루프가 부른다. 기록이 조용히 죽어 있는 것을 잡는다.
+// 1 Hz 로 메인 루프가 부른다. 기록 중에 카드가 빠졌나 본다.
 //
-// 두 가지를 본다.
-//
-//   1) 코어 0 이 쓰기 실패로 저절로 멈췄나
-//      일꾼은 NVS 를 못 만지므로 표식만 세워 둔다. 여기서 받아 이어시작
-//      표시를 지운다. 카드가 죽은 것이라 다시 켜서 또 걸어봐야 똑같이 실패한다.
-//
-//   2) 기록 중에 카드가 빠졌나
-//      배 위에서 진동으로 빠질 수 있다. 그대로 두면 쓰기가 계속 실패하면서
-//      링버퍼가 차고, 결국 메인 루프가 push 에서 5초씩 기다리게 된다.
+// 배 위에서 진동으로 빠질 수 있다. 그대로 두면 쓰기가 계속 실패하면서 링버퍼가 차고,
+// 결국 메인 루프가 push 에서 5초씩 기다리게 된다. 첫 오류를 "카드 빠짐" 으로 적고 닫기를 요청한다.
+// (쓰기 실패는 일꾼이 직접 결과에 남긴다 — 루프는 poll() 로 받는다)
 void healthCheck() {
-    // 쓰기가 실패해서 코어 0 이 저절로 멈춘 경우. 카드가 죽은 것이니
-    // 다시 켜서 또 걸어봐야 똑같이 실패한다. 이어시작 표시를 지운다.
-    // 쓰기 실패는 takeFailure() 로 루프가 꺼내 간다. 여기서 표시를 안 지운다 —
-    // 루프가 곧 새 파일로 다시 걸고, 그것도 안 되고 전원이 오르내리면
-    // 켤 때 이어 시작이 한 번 더 해 본다 (rec_try 5번 한도).
-    // 닫기 시간 초과 뒤 일꾼이 혼자 닫았다 → 머리글·표시 마무리
-    if (gNeedFinalize && !busy()) finalizeClosed();
     if (!isRec()) return;
     if (!cardPresent()) {
-        Serial.println("[LOG] ★ 기록 중에 카드가 빠졌습니다 — 멈춥니다");
-        FailInfo f;
-        f.kind = 2; f.session = gSession; f.recSec = (millis() - gStartedMs) / 1000;
-        f.card = false; f.bytes = (uint32_t)gBytes;
-        stop();
+        const uint32_t recSec = (millis() - gStartedMs) / 1000;
+        portENTER_CRITICAL(&gResMux);
+        if (recctl::setFirst(gRes, recctl::kErrCardGone)) {
+            gRes.recSec = recSec; gRes.card = false; gRes.bytes = (uint32_t)gBytes;
+        }
+        portEXIT_CRITICAL(&gResMux);
         gLastError = "기록 중 카드가 빠졌습니다";
         gLastErrorShort = "카드 빠짐";
-        gFail = f;            // stop() 이 남긴 닫기 결과보다 "카드 빠짐" 이 원인이다
-        gFailedStop = true;
+        Serial.println("[LOG] ★ 기록 중에 카드가 빠졌습니다 — 닫습니다");
+        requestStop();                  // 첫 오류는 "카드 빠짐" 으로 남는다. 닫다 못 쓴 것은 덮어쓰지 않는다
     }
-}
-
-bool takeFailure(FailInfo* out) {
-    if (!gFailedStop || busy()) return false;   // 아직 닫는 중
-    if (out) *out = gFail;
-    gFailedStop = false;
-    return true;
 }
 
 void noteLastFail(const char* line) { gLastFailLine = line; }

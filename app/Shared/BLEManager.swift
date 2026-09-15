@@ -76,7 +76,8 @@ enum TelemetrySource: String {
     var stallTimeout: TimeInterval {
         switch self {
         case .connection:  return 2.0  // 4 Hz 기대 → 8배 여유
-        case .advertising: return 4.0  // 1 Hz 기대 + 유실 감안
+        // 1 Hz 기대. 체크리스트 11 "오래된 값 표시 3초 이내" 에 맞춘다 (옛 4.0 은 목표를 넘었다, 2026-09-15)
+        case .advertising: return 3.0
         case .none:        return 2.0
         }
     }

@@ -69,6 +69,15 @@ export interface Header {
   pitchSign: number;
   heelOff: number;     // 기준각 (도)
   pitchOff: number;
+  // 방위를 보드와 같은 식으로 다시 구할 설정 (hlog.h kOffHdgFormula, 81~105). 0 이면 옛 파일 — 안 적힘
+  hdgFormula: number;  // 0 없음 · 1 평평 · 2 기울기 보정
+  hdgAxisA: number;    // 0=X 1=Y 2=Z (자력계 좌표)
+  hdgAxisB: number;
+  hdgSignA: number;    // +1 / -1
+  hdgSignB: number;
+  hdgOffDeg: number;
+  hdgDeclDeg: number;
+  magHardIron: [number, number, number];   // 기록된 mag 에서 이미 뺀 값 (µT). 원본 = 기록값 + 이 값
   crcOk: boolean;
 }
 
@@ -192,6 +201,14 @@ export function parseHeader(buf: Uint8Array): Header {
     pitchSign: buf[68],
     heelOff: d.getFloat32(69, true),
     pitchOff: d.getFloat32(73, true),
+    hdgFormula: buf[81],
+    hdgAxisA: buf[82],
+    hdgAxisB: buf[83],
+    hdgSignA: buf[84] ? -1 : 1,
+    hdgSignB: buf[85] ? -1 : 1,
+    hdgOffDeg: d.getFloat32(86, true),
+    hdgDeclDeg: d.getFloat32(90, true),
+    magHardIron: [d.getFloat32(94, true), d.getFloat32(98, true), d.getFloat32(102, true)],
     crcOk: d.getUint16(126, true) === crc16(buf, 0, 126),
   };
 }

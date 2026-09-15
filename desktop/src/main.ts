@@ -8,6 +8,7 @@
 
 import { fetch as tfetch } from "@tauri-apps/plugin-http";
 import * as hlog from "./hlog";
+import * as heading from "./heading";
 import * as lib from "./library";
 import * as vid from "./video";
 import * as ble from "./ble";
@@ -30,7 +31,7 @@ let fileMarks: number[] = [];
 /** 지도에 그릴 항적. 위성을 잡은 줄만 들어 있다 */
 let track: TrackPoint[] = [];
 /** 파일 요약(줄 수, Hz, IMU 종류…). 정보를 그릴 때마다 다시 넣는다 */
-let lastMagFix: MagFix | null = null;
+let lastHdgNote = "";   // 방위를 무슨 식·설정으로 그렸나 (heading.describe) — 화면에 그대로
 let metaHtml = "";
 /**
  * 디버그 값을 보여줄지.
@@ -244,76 +245,7 @@ function sc(name: string, fallback: string): string {
   return v || fallback;
 }
 
-/** 자력계 치우침 재기 결과. 화면에 그대로 보여준다. */
-interface MagFix {
-  off: [number, number, number];
-  before: number;   // 빼기 전 세기 흔들림 (µT)
-  after: number;    // 빼고 나서
-  field: number;    // 빼고 나서 세기 평균 (µT). 한국은 약 50
-  use: boolean;     // 좋아졌을 때만 쓴다
-}
-
-/**
- * 자력계 값들에 **구를 맞춰** 치우침을 구한다.
- *
- * 자세도 COG 도 안 쓴다. 자력계 값만 쓴다. 배가 이리저리 흔들릴수록 잘
- * 구해진다 — 한 자세로만 있으면 못 구한다.
- */
-function fitHardIron(nav: hlog.NavRecord[]): MagFix {
-  // 자력계 축을 가속도 축에 맞춘 값으로 본다 (MPU-9250 은 둘이 다르다)
-  const m: [number, number, number][] = [];
-  for (const r of nav) {
-    if (r.mag[0] === 0 && r.mag[1] === 0 && r.mag[2] === 0) continue;
-    m.push([r.mag[1], r.mag[0], -r.mag[2]]);
-  }
-  const none: MagFix = { off: [0, 0, 0], before: 0, after: 0, field: 0, use: false };
-  if (m.length < 200) return none;
-
-  const spread = (c: [number, number, number]) => {
-    let s1 = 0, s2 = 0;
-    for (const v of m) {
-      const d = Math.hypot(v[0] - c[0], v[1] - c[1], v[2] - c[2]);
-      s1 += d; s2 += d * d;
-    }
-    const mean = s1 / m.length;
-    return { mean, sd: Math.sqrt(Math.max(0, s2 / m.length - mean * mean)) };
-  };
-
-  // 가운데를 옮겨 가며 |m - c| 가 제일 고르게 되는 자리를 찾는다 (최소제곱 구)
-  const n = m.length;
-  const mx = m.reduce((a, v) => a + v[0], 0) / n;
-  const my = m.reduce((a, v) => a + v[1], 0) / n;
-  const mz = m.reduce((a, v) => a + v[2], 0) / n;
-  const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-  const b = [0, 0, 0];
-  for (const v of m) {
-    const x = v[0] - mx, y = v[1] - my, z = v[2] - mz;
-    const q = x * x + y * y + z * z;
-    A[0][0] += x * x; A[0][1] += x * y; A[0][2] += x * z;
-    A[1][1] += y * y; A[1][2] += y * z; A[2][2] += z * z;
-    b[0] += q * x; b[1] += q * y; b[2] += q * z;
-  }
-  A[1][0] = A[0][1]; A[2][0] = A[0][2]; A[2][1] = A[1][2];
-  const M = A.map((row, k) => [...row, b[k]]);
-  for (let col = 0; col < 3; col++) {
-    let piv = col;
-    for (let r = col; r < 3; r++) if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
-    [M[col], M[piv]] = [M[piv], M[col]];
-    if (Math.abs(M[col][col]) < 1e-9) return none;   // 못 푼다 (한 자세로만 있었다)
-    for (let r = 0; r < 3; r++) {
-      if (r === col) continue;
-      const f = M[r][col] / M[col][col];
-      for (let c2 = col; c2 < 4; c2++) M[r][c2] -= f * M[col][c2];
-    }
-  }
-  const off: [number, number, number] = [
-    M[0][3] / M[0][0] / 2 + mx, M[1][3] / M[1][1] / 2 + my, M[2][3] / M[2][2] / 2 + mz,
-  ];
-  const b0 = spread([0, 0, 0]), b1 = spread(off);
-  // 좋아졌고, 세기가 지구 자기장 근처(25~75 µT)일 때만 쓴다
-  const use = b1.sd < b0.sd * 0.7 && b1.mean > 25 && b1.mean < 75;
-  return { off, before: b0.sd, after: b1.sd, field: b1.mean, use };
-}
+// 자력계 치우침을 앱이 스스로 구해 빼던 fitHardIron 은 지웠다 (2026-09-15). 보드가 뺀 값은 머리글 mag_hi 에 있다.
 
 function buildSeries(s: hlog.Session) {
   const t0 = s.imu.length ? s.imu[0].ms : s.nav.length ? s.nav[0].ms : 0;
@@ -323,7 +255,6 @@ function buildSeries(s: hlog.Session) {
   const cog = new Float32Array(s.nav.length);
   const sv = new Float32Array(s.nav.length);
   const hdg = new Float32Array(s.nav.length);
-  const hdgCal = new Float32Array(s.nav.length);   // 축·기울기를 보정한 방위
   const hacc = new Float32Array(s.nav.length);
   const magX = new Float32Array(s.nav.length);
   const magY = new Float32Array(s.nav.length);
@@ -333,24 +264,18 @@ function buildSeries(s: hlog.Session) {
   track = [];
   let imuAt = 0;   // 방위 계산이 쓰는 가속도 줄 짚개
 
-  // ── 자력계 치우침(하드아이언)을 구한다 ─────────────────────────────
+  // ── 방위(HDG) — 보드가 화면·BLE·TXT 에 쓴 식 그대로 ────────────────────
   //
-  // 자력계 옆에 쇠붙이나 전류가 있으면 **늘 같은 크기의 자기장이 얹힌다.**
-  // 지구 자기장 위에 상수가 더해진 것이다. 자세와는 아무 상관 없다.
-  //
-  // 짐작으로 빼면 안 되지만, **검사할 수 있다.** 지구 자기장 세기는 자세와
-  // 무관하게 일정하다 (한국 약 50 µT). 그러니 어떻게 돌리든 자력계가 재는
-  // 크기가 일정해야 한다. 안 일정하면 상수가 얹혀 있다는 뜻이고, 어떤 상수를
-  // 빼서 일정해지면 그게 그 상수다.
-  //
-  // 세션 27 실측:
-  //   빼기 전   세기 평균 58.2 µT · 흔들림 5.5 µT   ← 너무 크고 들쭉날쭉
-  //   빼고 나서 세기 평균 46.0 µT · 흔들림 1.0 µT   ← 50 에 가깝고 일정해졌다
-  //
-  // ★ 좋아졌을 때만 쓴다. 나빠지면 안 뺀다. 그리고 그 숫자를 화면에 남겨서
-  //   사람이 믿을지 말지 볼 수 있게 한다.
-  const magFix = fitHardIron(s.nav);
-  lastMagFix = magFix;
+  // 식과 입력(축·부호·오프셋·편각)은 HLG 머리글에 있다 (heading.ts ↔ heading_tilt.h, verify.sh 가 맞춰 봄).
+  // ★ 앱이 식을 고르거나 치우침을 스스로 빼지 않는다. 옛 앱은 atan2(magY, magX) 에 자체 치우침 빼기를
+  //   얹어서 세션 46 에서 COG 대비 흩어짐이 49.5° 였다. 머리글에 설정이 없는 옛 파일은 HDG 를 안 그린다.
+  const hdrH = s.header;
+  const hdgCfg: heading.HeadingCfg | null = hdrH.hdgFormula === heading.FORMULA_NONE ? null : {
+    axisA: hdrH.hdgAxisA, axisB: hdrH.hdgAxisB, signA: hdrH.hdgSignA, signB: hdrH.hdgSignB,
+    offDeg: hdrH.hdgOffDeg, declDeg: hdrH.hdgDeclDeg,
+  };
+  lastHdgNote = heading.describe(hdrH);
+  const imuMaxAgeMs = 2000 / (hdrH.imuHz || 100);   // IMU 두 주기 (100 Hz 면 20 ms)
 
   
   for (let i = 0; i < s.nav.length; i++) {
@@ -374,77 +299,23 @@ function buildSeries(s: hlog.Session) {
     magX[i] = r.mag[1]; magY[i] = r.mag[0]; magZ[i] = -r.mag[2];
     batt[i] = r.battMv ? r.battMv / 1000 : NaN;
 
-    // ── 방위(HDG) ─────────────────────────────────────────────────────
-    //
-    // 전에는 보드와 같이 `atan2(자력Y, 자력X)` 를 썼다. **그게 틀렸다.**
-    //
-    // MPU-9250 안의 자력계는 따로 든 칩(AK8963)이고, 라이브러리는 그 값을
-    // 축 정렬 없이 그대로 준다 (`MPU9250_WE.cpp:106`). 그래서 자력계 축이
-    // 가속도계 축과 다르다. 2026-08-30 세션 27 로 실측한 것:
-    //
-    //   가속도계   Y 에 중력이 걸려 있었다 (박스가 모로 누움)
-    //   자력계     X 가 안 돌았다 (폭 ±11)  ← 이게 세로축이라는 뜻
-    //              Y·Z 가 제대로 돌았다 (±34, ±31)
-    //
-    // 즉 자력계 X 가 가속도계 Y 자리다. 옛 식은 **세로축을 수평인 양** 썼다.
-    // 보드를 평평히 놓으면 우연히 맞는 짝이 되는데, 박스가 누우면 깨진다.
-    //
-    // 고침은 두 가지다. **둘 다 기하학이라 값을 더하거나 빼지 않는다.**
-    //   1) 축 맞추기      (자력Y, 자력X, -자력Z) 를 가속도 축에 대응
-    //   2) 기울기 보정    가속도로 그때그때 수평면을 구한다.
-    //                    박스가 어느 쪽으로 누워 있든 상관없어진다
-    //
-    // ★ COG 에 맞춰 보정하지 않는다. 요트는 leeway 때문에 뱃머리와 실제
-    //   가는 방향이 **원래 다르다.** COG 로 맞추면 그 차이를 지워버린다.
-    //   우리가 보려는 게 바로 그 차이다.
-    //
-    // 아직 안 넣은 것 둘. 둘 다 재야 나오는 값이라 COG 로 짐작하지 않는다.
-    //   - 치우침(하드아이언). 세션 27 에서 수평 자기장(32 µT)만 한 크기였다.
-    //     박스를 손에 들고 돌려서 따로 재야 한다
-    //   - 보드가 뱃머리에서 몇 도 돌아 앉았나, 그리고 자기 편각(한국 약 8도 서편)
-    //   그래서 **지금 값은 「어느 쪽을 보는가」가 아니라 「얼마나 돌았는가」다.**
-    //   돌아가는 모양은 맞고, 0 이 어디인지는 아직 모른다.
-    if (r.mag[0] === 0 && r.mag[1] === 0 && r.mag[2] === 0) {
+    // ── 방위(HDG) — 보드와 같은 식 ──
+    //   가속은 이 줄 시각 직전의 IMU 표본을 쓴다 (보드는 그 순간 들고 있던 가속). 자력이 0 이면 보드가
+    //   새 표본이 없어 비워 둔 줄이다 → 없음.
+    if (!hdgCfg || (r.mag[0] === 0 && r.mag[1] === 0 && r.mag[2] === 0)) {
       hdg[i] = NaN;
-      hdgCal[i] = NaN;
-    } else {
-      // ── 옛 값 (HDG). 보드가 지금 쓰는 식 그대로 둔다 ──
-      //   틀린 값이지만 **지운 게 아니라 나란히 둔다.** 보드가 화면과 BLE 로
-      //   내보내는 것이 이 값이라, 앱에서만 고치면 둘이 달라진다.
-      //   두 줄을 겹쳐 보면 얼마나 달라졌는지가 한눈에 보인다.
-      let h0 = Math.atan2(r.mag[1], r.mag[0]) * 180 / Math.PI;
-      if (h0 < 0) h0 += 360;
-      hdg[i] = h0;
-
-      // 이 줄의 시각에 제일 가까운 가속도 값을 찾는다 (IMU 는 100 Hz)
+    } else if (hdrH.hdgFormula === heading.FORMULA_FLAT) {
+      hdg[i] = heading.flatHeadingDeg(r.mag, hdgCfg);
+    } else if (hdrH.hdgFormula === heading.FORMULA_TILT) {
       while (imuAt + 1 < s.imu.length && s.imu[imuAt + 1].ms <= r.ms) imuAt++;
       const a = s.imu[imuAt];
-      const g = a ? Math.hypot(a.acc[0], a.acc[1], a.acc[2]) : 0;
-      if (!a || g < 0.5) {
-        hdgCal[i] = NaN;                    // 자세를 모르면 보정도 못 한다
-      } else {
-        const gx = a.acc[0] / g, gy = a.acc[1] / g, gz = a.acc[2] / g;
-        // 자력계 축을 가속도계 축에 맞춘다
-        const mx = r.mag[1] - (magFix.use ? magFix.off[0] : 0);
-        const my = r.mag[0] - (magFix.use ? magFix.off[1] : 0);
-        const mz = -r.mag[2] - (magFix.use ? magFix.off[2] : 0);
-        // 중력 방향 성분을 빼서 수평면에 눕힌다
-        const dot = mx * gx + my * gy + mz * gz;
-        const hx = mx - dot * gx, hy = my - dot * gy, hz = mz - dot * gz;
-        // 보드 X 축도 같은 평면에 눕혀 기준으로 삼는다
-        let fx = 1 - gx * gx, fy = -gx * gy, fz = -gx * gz;
-        const fn = Math.hypot(fx, fy, fz);
-        if (fn < 1e-3) {
-          hdgCal[i] = NaN;                  // 보드 X 가 똑바로 서 있으면 기준이 없다
-        } else {
-          fx /= fn; fy /= fn; fz /= fn;
-          const rx = gy * fz - gz * fy, ry = gz * fx - gx * fz, rz = gx * fy - gy * fx;
-          let h = Math.atan2(hx * rx + hy * ry + hz * rz,
-                             hx * fx + hy * fy + hz * fz) * 180 / Math.PI;
-          if (h < 0) h += 360;
-          hdgCal[i] = h;
-        }
-      }
+      // ★ 이 줄 시각 **이전**이고 IMU 두 주기 안이어야 그 순간의 자세다 (검토 5번).
+      //   옛 코드는 5초 전 표본이나, 첫 IMU 가 늦으면 미래 표본까지 썼다.
+      //   세션 46: NAV 99.92% 가 10 ms 안, 가장 늦은 것 203 ms (IMU 공백) → 그 줄은 방위 없음.
+      const fresh = a !== undefined && a.ms <= r.ms && r.ms - a.ms <= imuMaxAgeMs;
+      hdg[i] = fresh ? heading.tiltHeadingDeg(a.acc, r.mag, hdgCfg) : NaN;
+    } else {
+      hdg[i] = NaN;                       // 모르는 식 번호 — 짐작하지 않는다
     }
 
     if (r.event & 0x01) fileMarks.push(r.ms - t0);
@@ -607,8 +478,7 @@ function buildSeries(s: hlog.Session) {
       color: sc("sog", "#4ea1ff"), xs: navX, ys: sog, limit: [0],
       alt: { ys: sogCal, name: n("SOG cal", "SOG from position (5s)"), tag: "cal" } },
     { code: "HDG",   name: n("HDG", "Heading"), unit: "deg",
-      color: sc("hdg", "#ffd166"), xs: navX, ys: hdg, limit: [0, 360],
-      alt: { ys: hdgCal, name: n("HDG comp", "Heading (axis + tilt)"), tag: "comp" } },
+      color: sc("hdg", "#ffd166"), xs: navX, ys: hdg, limit: [0, 360] },
     { code: "COG",   name: n("COG", "Course Over Ground"), unit: "deg",
       color: sc("cog", "#77d4e8"), xs: navX, ys: cog, limit: [0, 360],
       alt: { ys: cogCal, name: n("COG cal", "COG from position (5s)"), tag: "cal" } },
@@ -812,11 +682,7 @@ function renderHeader(s: hlog.Session, name: string, parseMs: number, bytes: num
   metaHtml = `
     <div class="row"><b>${name}</b> <span class="dim">${(bytes / 1048576).toFixed(2)} MB · ${parseMs.toFixed(0)} ms 만에 읽음</span></div>
     <div class="row">세션 ${h.session} · 모듈 ${h.module} · ${when}</div>
-    ${lastMagFix ? `<div class="row dim">
-      자력계 치우침 ${lastMagFix.use ? "뺐음" : "안 뺌"} ·
-      세기 흔들림 ${lastMagFix.before.toFixed(1)} → ${lastMagFix.after.toFixed(1)} µT ·
-      세기 ${lastMagFix.field.toFixed(0)} µT (한국 약 50)
-    </div>` : ""}
+    <div class="row dim">${lastHdgNote}</div>
     <div class="row dim">
       NAV ${s.nav.length.toLocaleString()}줄 (${c.navHz?.toFixed(2) ?? "?"} Hz) ·
       IMU ${s.imu.length.toLocaleString()}줄 (${c.imuHz?.toFixed(2) ?? "?"} Hz) ·

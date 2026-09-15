@@ -31,6 +31,8 @@
 #include "heading_math.h"
 #include "mag_sample.h"
 #include "magcal.h"
+#include "sog_policy.h"
+#include "heading_tilt.h"
 
 static int g_fail = 0;
 static void check(bool ok, const char* what) {
@@ -86,8 +88,7 @@ static void testSdWrites() {
         check(got == 5, "writeAll 은 실제로 쓴 5바이트를 돌려준다");
         check(tail == 5, "꼬리는 쓴 5바이트만큼만 넘어간다");
         check(tries == 3 && waits == 3, "한 바이트도 못 쓴 시도를 3번까지 다시 한다");
-        check(hlog::afterWrite(hlog::RecState::Recording, got == buf.size()) ==
-                  hlog::RecState::Failed, "기록 중 쓰기 실패 → Failed");
+        check(got != buf.size(), "기록 중 쓰기 실패 — 덜 들어갔음을 안다 (일꾼은 닫는 중으로 넘긴다)");
 
         // 그 뒤 닫기(남은 범위만) 가 성공하면 파일은 겹침 없이 한 벌이다
         card.script.clear();
@@ -117,23 +118,209 @@ static void testSdWrites() {
             [&](const uint8_t* p, size_t n) { return card.write(p, n); },
             [&](size_t k) { tail += k; }, [&](uint8_t) {}, 3);
         const size_t lost = buf.size() - tail;
-        const auto st = hlog::afterWrite(hlog::RecState::Draining, got == buf.size() && lost == 0);
         check(lost == 11, "못 쓴 11바이트가 남는다 (보고할 수 있다)");
-        check(st == hlog::RecState::Failed, "덜 들어간 종료 → Failed");
-        check(!hlog::stopMayFinalize(st), "Failed 면 정상 종료 확정(머리글·표시 지우기) 금지");
+        check(!(got == buf.size() && lost == 0), "덜 들어간 종료는 complete=false — 머리글 closed=0");
     }
-    check(hlog::afterWrite(hlog::RecState::Draining, true) == hlog::RecState::Closed,
-          "다 들어간 종료 → Closed");
-    check(hlog::stopMayFinalize(hlog::RecState::Closed), "Closed 에서만 정상 종료를 확정한다");
-    check(!hlog::stopMayFinalize(hlog::RecState::Draining),
-          "Draining (시간 초과) 에서는 확정하지 않는다");
-    check(hlog::canStart(hlog::RecState::Closed) && hlog::canStart(hlog::RecState::Failed),
-          "Closed·Failed 에서만 시작한다");
-    check(!hlog::canStart(hlog::RecState::Recording) && !hlog::canStart(hlog::RecState::Draining),
-          "Recording·Draining 에서는 시작하지 않는다");
+    {   // 상태 전이 — 멈춤 요청과 쓰기 포기가 같은 전이, 완료는 일꾼만 (검토 2번의 겹침 순서)
+        hlog::RecState st = hlog::RecState::Recording;
+        check(hlog::toDraining(st) && st == hlog::RecState::Draining, "기록 중 → 닫는 중 (요청이든 쓰기 포기든)");
+        check(!hlog::toDraining(st), "이미 닫는 중이면 두 번째 요청은 아무것도 안 바꾼다");
+        check(hlog::toClosed(st) && st == hlog::RecState::Closed, "일꾼 완료 → 닫힘");
+        check(!hlog::toDraining(st) && st == hlog::RecState::Closed,
+              "완료 뒤 늦게 온 종료 요청이 닫힌 세션을 닫는 중으로 되돌리지 않는다");
+        hlog::RecState r2 = hlog::RecState::Recording;
+        check(!hlog::toClosed(r2) && r2 == hlog::RecState::Recording, "닫는 중을 거치지 않고 닫힘으로 가지 않는다");
+    }
+    check(hlog::canStart(hlog::RecState::Closed) && !hlog::canStart(hlog::RecState::Recording) &&
+          !hlog::canStart(hlog::RecState::Draining), "닫혀 있을 때만 시작한다");
     check(hlog::sdBusy(hlog::RecState::Recording) && hlog::sdBusy(hlog::RecState::Draining) &&
-          !hlog::sdBusy(hlog::RecState::Closed) && !hlog::sdBusy(hlog::RecState::Failed),
-          "SD 를 쥐고 있는 상태는 Recording·Draining 뿐");
+          !hlog::sdBusy(hlog::RecState::Closed), "SD 를 쥐고 있는 상태는 Recording·Draining 뿐");
+}
+
+// ── 2b 기록 제어 — 원하는 상태와 실제 상태 (rec_control.h) ────────────────
+//
+// NEXT.md 1번의 여섯 시나리오 + 옛 버그 재현 (세션 58 이어받기, rec off 뒤 저절로 재시작, userStopped 옮겨붙음)
+static void testRecControl() {
+    using namespace recctl;
+    std::printf("\n[2b] 기록 제어 — 원하는 상태와 실제 상태\n");
+
+    {   // 첫 오류는 한 번 채우면 안 바뀐다
+        SessionResult r;
+        check(setFirst(r, kErrCardGone) && r.firstKind == kErrCardGone, "첫 오류 채움 — 카드 빠짐");
+        check(!setFirst(r, kErrDrainShort) && r.firstKind == kErrCardGone,
+              "닫다가 못 쓴 것이 뒤따라와도 첫 오류(카드 빠짐)는 그대로");
+        check(r.consumed, "새 결과는 일꾼이 consumed=false 로 내놓기 전까지 꺼낼 게 없다");
+    }
+
+    // ① 실패 도중 종료 — 쓰기 실패 결과가 오기 전에 사람이 멈췄다 → 다시 걸지 않는다
+    check(afterSession(false, kErrWrite, 0, 3) == Next::Nothing,
+          "① 쓰기 실패가 늦게 와도 사람이 멈췄으면(want=0) 다시 안 건다 (옛 userStopped 버그)");
+    check(afterSession(true, kErrWrite, 0, 3) == Next::RestartSoon, "사람이 원하면 쓰기 실패 뒤 다시 건다");
+    check(afterSession(true, kErrCardGone, 2, 3) == Next::RestartSoon, "카드 빠짐도 다시 건다 (3번째)");
+    check(afterSession(true, kErrWrite, 3, 3) == Next::GiveUp, "3번 다 쓰면 포기");
+    check(afterRestartFailed(1, 3) == Next::RestartSoon && afterRestartFailed(3, 3) == Next::GiveUp,
+          "다시 걸기 시작 실패도 같은 한도");
+
+    // ② 15초 넘은 뒤 늦은 완료 — 끄기는 기다리고, 넘으면 사람에게 묻고, 닫히면 잔다
+    check(powerOff(Phase::Closing, 3000, 15000) == Off::Wait, "② 닫는 중 3초 — 기다린다");
+    check(powerOff(Phase::Closing, 16000, 15000) == Off::AskForce, "② 16초 — 강제로 끌지 묻는다 (저절로 안 끈다)");
+    check(powerOff(Phase::Idle, 40000, 15000) == Off::SleepNow, "② 늦게라도 닫히면 그때 잔다");
+
+    // ③ 그 사이 WiFi·진단·끄기 — 닫는 중에는 카드를 쥐고 있다
+    check(hlog::sdBusy(hlog::RecState::Draining) && !hlog::canStart(hlog::RecState::Draining),
+          "③ 닫는 중에는 SD 를 쥐고 있고 새 시작도 안 된다");
+
+    // ④ 종료 반복 · 닫는 중 다시 시작
+    check(!showFailed(false, Phase::Closing, false, false) && !showFailed(true, Phase::Closing, false, false),
+          "④ 닫는 중에는 REC FAIL 을 안 띄운다 (사람이 다시 시작을 눌렀어도)");
+    check(afterSession(true, kErrNone, 0, 3) == Next::Nothing &&
+          afterSession(true, kErrDrainShort, 0, 3) == Next::Nothing,
+          "④ 닫는 중 다시 시작(want=1) — 앞 세션 결과로 포기하지 않는다. 루프가 '닫힌 뒤 시작' 으로 건다");
+
+    // ⑤ IMU 끊긴 채 종료 — 중복 없이 정산
+    {
+        const uint32_t recStart = 10000, lost = 20000;
+        const uint32_t atStop = imuGapRows(lost, recStart, 25000);
+        check(atStop == 500, "⑤ 끊긴 5초 → 500줄");
+        check(imuGapRows(25000, recStart, 25000) == 0, "⑤ 정산한 뒤 같은 시각으로 다시 불러도 0 (두 번 안 센다)");
+        check(imuGapRows(5000, recStart, 12000) == 200, "기록 시작 전 끊긴 시간은 뺀다 (시작부터 2초)");
+        check(imuGapRows(0xFFFFF000u, 0xFFFFE000u, 0x00000800u) == (0x1800u / 10), "millis 한 바퀴 넘어도 맞다");
+    }
+
+    // ⑥ 닫기 실패 뒤 끄기 — 기록만 남기고 잔다
+    check(afterSession(false, kErrHeader, 0, 3) == Next::Nothing && powerOff(Phase::Idle, 0, 15000) == Off::SleepNow,
+          "⑥ 머리글 실패로 닫힌 뒤 끄기 — 다시 걸지 않고 잔다");
+
+    // REC FAIL 표시
+    check(showFailed(true, Phase::Idle, false, false), "원하는데 멈춰 있다 → REC FAIL");
+    check(!showFailed(false, Phase::Idle, false, false), "사람이 멈췄다 → REC FAIL 아님");
+    check(showFailed(false, Phase::Idle, true, false), "포기했으면 사람이 볼 때까지 REC FAIL");
+    check(!showFailed(true, Phase::Recording, false, false), "돌고 있으면 REC FAIL 아님");
+    check(showFailed(false, Phase::Idle, false, true),
+          "사람이 멈춘 세션이라도 마지막 저장이 실패했으면 REC FAIL (검토 3번)");
+
+    // NVS 옮기기 · 켤 때
+    {
+        Persist none;
+        Persist m = migrate(false, none, true, 1, 57);
+        check(m.want == 1 && m.open == 57, "옛 rec_on=1 → want=1, open=마지막 세션");
+        m = migrate(false, none, true, 0, 57);
+        check(m.want == 0 && m.open == 0, "옛 rec_on=0 → 둘 다 0");
+        Persist cur; cur.want = 0; cur.open = 12;
+        m = migrate(true, cur, true, 1, 57);
+        check(m.want == 0 && m.open == 12, "새 키가 있으면 옛 키를 무시한다");
+    }
+    {
+        Persist p; p.want = 0; p.open = 57;
+        check(atBoot(p, 0, 5) == Boot::UnclosedOnly,
+              "사람이 멈춘 뒤 닫히기 전에 꺼졌다 → 켤 때 이어받지 않는다 (세션 58 버그)");
+        p.want = 1;
+        check(atBoot(p, 0, 5) == Boot::Resume, "기록 중 전원 끊김 → 이어 시작");
+        check(atBoot(p, 5, 5) == Boot::TooMany, "5번 연달아 끊기면 멈춘다");
+        Persist z;
+        check(atBoot(z, 0, 5) == Boot::Nothing, "아무 표시 없으면 아무것도 안 한다");
+    }
+}
+
+// ── 2c 화면 속도 규칙 (sog_policy.h) — 2026-09-14 동작을 그대로 옮겼나 ─────
+static void testSogPolicy() {
+    std::printf("\n[2c] 화면 속도 규칙 — 동작 유지\n");
+    const sog::Policy p;
+    check(!sog::sampleOk(true, 1.2f, p) && sog::sampleOk(true, 0.35f, p) && !sog::sampleOk(false, 0.1f, p) &&
+          !sog::sampleOk(true, -1.0f, p), "표식이 방금 잰 값이고 오차 1 kn 이하일 때만 쓴다 (오차 모름도 버림)");
+    check(sog::pvStale(0, 5000, p) && sog::pvStale(1000, 3100, p) && !sog::pvStale(1000, 3000, p),
+          "NAV-PV 가 2초 넘게 안 오면 RMC 길로 물러선다");
+    check(sog::nextSlowMode(false, 0.49f, p) && !sog::nextSlowMode(false, 0.5f, p),
+          "3초 평균 0.5 kn 밑이면 느린 모드로 들어간다");
+    check(sog::nextSlowMode(true, 0.8f, p) && !sog::nextSlowMode(true, 0.81f, p),
+          "0.8 kn 넘어야 나온다 (0.5~0.8 은 그대로)");
+    check(!sog::nextSlowMode(false, -1.0f, p), "표본이 없으면 모드를 안 바꾼다");
+    check(sog::slowShownKn(0.19f, p) == 0.0f && std::fabs(sog::slowShownKn(0.25f, p) - 0.25f) < 1e-6f,
+          "느린 모드에서 0.2 kn 밑은 0");
+    {   // 성분 평균: 동·서로 번갈아 0.3 m/s 흔들림 → 크기 평균은 0.58 kn, 성분 평균은 0
+        sog::Sample ring[8];
+        for (int i = 0; i < 8; ++i) ring[i] = sog::Sample{(uint32_t)(1000 + i * 100), 0.0f, (i % 2) ? 0.3f : -0.3f};
+        const float kn = sog::vectorMeanKn(ring, 8, 8, 8, 1800, 3000, 0);
+        check(kn >= 0.0f && kn < 1e-4f, "멈춰서 흔들리는 속도는 성분 평균으로 0 이 된다 (크기 평균이면 0.58)");
+        const float none = sog::vectorMeanKn(ring, 8, 8, 8, 1800, 3000, 5000);
+        check(none < 0.0f, "notBefore 이후 표본이 없으면 -1");
+    }
+}
+
+// ── 2d 배의 방위 식 — 답을 아는 자세로 (heading_tilt.h) ─────────────────
+//
+// 앞·오른쪽·아래(FRD) 몸체 좌표에서 자세를 만들고, 설정의 역변환으로 센서 좌표로 옮겨 넣는다.
+//   롤 φ   세계→몸체  g=(0, sφ, cφ)            자기장=(H, V·sφ, V·cφ)
+//   피치 θ 세계→몸체  g=(−sθ, 0, cθ)           자기장=(H·cθ − V·sθ, 0, H·sθ + V·cθ)
+static void frdToSensors(const hdg::HeadingCfg& c, const float gFrd[3], const float mFrd[3],
+                         float acc[3], float mag[3]) {
+    const float ds = hdg::downSign(c);
+    const uint8_t dAx = (uint8_t)(3 - c.axisA - c.axisB);
+    float am[3], mm[3];
+    // f = v[B]·sB, r = −v[A]·sA, d = v[D]·ds 의 역
+    am[c.axisB] = -gFrd[0] / c.signB; am[c.axisA] = gFrd[1] / c.signA; am[dAx] = -gFrd[2] / ds;   // 가속은 −g
+    mm[c.axisB] =  mFrd[0] / c.signB; mm[c.axisA] = -mFrd[1] / c.signA; mm[dAx] = mFrd[2] / ds;
+    // 자력 좌표 → 가속도계 좌표 (자력 X=가속 Y, Y=가속 X, Z=−가속 Z)
+    acc[0] = am[1]; acc[1] = am[0]; acc[2] = -am[2];
+    for (int i = 0; i < 3; ++i) mag[i] = mm[i];
+}
+
+static void testHeadingTilt() {
+    std::printf("\n[2d] 배의 방위 식 — 답을 아는 자세\n");
+    const float H = 30.0f, V = 40.0f;            // 한국 비슷한 복각
+    const float deg = (float)M_PI / 180.0f;
+    auto near = [](float a, float b, float tol) { float d = std::fabs(a - b); d = std::fmod(d, 360.0f); return std::min(d, 360.0f - d) <= tol; };
+    const hdg::HeadingCfg cfgs[] = {
+        {1, 0, 1.0f, 1.0f, 0.0f, 0.0f},          // 기본 atan2(+Y, +X)
+        {1, 2, 1.0f, 1.0f, 0.0f, 0.0f},          // 세워 단 배 atan2(+Y, +Z)
+        {2, 0, -1.0f, 1.0f, 0.0f, 0.0f},         // 부호 뒤집힌 설정
+    };
+    int okLevel = 0, okRoll = 0, okPitch = 0, bigFlatErr = 0;
+    for (const auto& c : cfgs) {
+        for (int k = 0; k < 8; ++k) {
+            const float psi = k * 45.0f * deg;
+            // 수평, 방위 ψ: 몸체에서 자기장 = (H cosψ, −H sinψ, V)
+            const float g0[3] = {0, 0, 1}, m0[3] = {H * std::cos(psi), -H * std::sin(psi), V};
+            float acc[3], mag[3];
+            frdToSensors(c, g0, m0, acc, mag);
+            if (near(hdg::tiltHeadingDeg(acc, mag, c), k * 45.0f, 0.01f) &&
+                near(hdg::flatHeadingDeg(mag, c), k * 45.0f, 0.01f)) ++okLevel;
+        }
+        // 롤 20° (북쪽 보고)
+        {
+            const float ph = 20.0f * deg;
+            const float g[3] = {0, std::sin(ph), std::cos(ph)}, m[3] = {H, V * std::sin(ph), V * std::cos(ph)};
+            float acc[3], mag[3];
+            frdToSensors(c, g, m, acc, mag);
+            if (near(hdg::tiltHeadingDeg(acc, mag, c), 0.0f, 0.01f)) ++okRoll;
+            if (!near(hdg::flatHeadingDeg(mag, c), 0.0f, 20.0f)) ++bigFlatErr;
+        }
+        // 피치 15°
+        {
+            const float th = 15.0f * deg;
+            const float g[3] = {-std::sin(th), 0, std::cos(th)};
+            const float m[3] = {H * std::cos(th) - V * std::sin(th), 0, H * std::sin(th) + V * std::cos(th)};
+            float acc[3], mag[3];
+            frdToSensors(c, g, m, acc, mag);
+            if (near(hdg::tiltHeadingDeg(acc, mag, c), 0.0f, 0.01f)) ++okPitch;
+        }
+    }
+    check(okLevel == 24, "수평 8방위 × 설정 3 — 보정·평평 둘 다 정답 (0.01° 안)");
+    check(okRoll == 3, "힐 20° — 기울기 보정은 북쪽 그대로 (0.01° 안)");
+    check(bigFlatErr == 3, "힐 20° — 평평 식은 20° 넘게 틀린다 (그래서 화면 식을 바꿨다)");
+    check(okPitch == 3, "피치 15° — 기울기 보정은 북쪽 그대로");
+    {
+        hdg::HeadingCfg c{1, 0, 1.0f, 1.0f, 350.0f, 20.0f};
+        const float g0[3] = {0, 0, 1}, m0[3] = {H, 0, V};
+        float acc[3], mag[3];
+        frdToSensors(c, g0, m0, acc, mag);
+        check(near(hdg::tiltHeadingDeg(acc, mag, c), 10.0f, 0.01f), "오프셋 350 + 편각 20 → 10° 로 접는다");
+        for (int i = 0; i < 3; ++i) acc[i] *= 1.2f;
+        check(hdg::tiltHeadingDeg(acc, mag, c) < 0.0f, "가속 크기 1.2 g — 기울기를 못 믿어 방위 없음(-1)");
+        hdg::HeadingCfg bad{1, 1, 1.0f, 1.0f, 0.0f, 0.0f};
+        check(hdg::tiltHeadingDeg(acc, mag, bad) < 0.0f && hdg::flatHeadingDeg(mag, bad) < 0.0f,
+              "두 축이 같은 잘못된 설정 → 방위 없음");
+    }
 }
 
 // ── 3 CASIC ──────────────────────────────────────────────────────────────
@@ -582,6 +769,9 @@ static void testMagcal() {
 
 int main() {
     testSdWrites();
+    testRecControl();
+    testSogPolicy();
+    testHeadingTilt();
     testCasic();
     testGyro();
     testPrefs();

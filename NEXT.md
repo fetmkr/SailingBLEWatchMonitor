@@ -1,92 +1,85 @@
 # 다음에 할 일
 
----
-
-## ★★ 2026-09-15 새로 드러난 것 — 아직 사용자가 방향을 안 정했다. 코드 손대기 전에 묻는다
-
-아래 합의 목록(1~6) 과 별개다. 세션 46 을 받아 보다가 나왔다.
-
-### 세션 46 파일
-- `~/Desktop/sail-logs/S00046_20260913-1333_nosat.HLG` (23,868,416 B, 데스크탑 앱이 받은 것 복사) · `.TXT` (193,531 B, USB 로 받음)
-- 앱 보관: `~/Library/Application Support/kr.fetm.sailanalyzer/logs/3CDC75702FB4_00046.HLG`
-- `hlog_parse.py`: 머리글 CRC 맞음 · 재동기 0 · NAV 104,757 · IMU 1,046,711 · 못 읽은 바이트 13 · 자력값 NAV 전 줄에 있음
-
-### 헤딩 — 식이 셋으로 갈라져 있다 (사용자: "과학적인 데이터 분석용 앱인데 맘대로 공식을 적용해?")
-2.5 kn 넘는 47,866 줄로 방위−COG 를 쟀다.
-
-| 식 | 평균차 | 평균 뺀 흩어짐 중간값 |
-|---|---|---|
-| 앱 HDG `atan2(magY, magX)` (`desktop/src/main.ts:415`) | −175° | **49.5°** — 박스가 모로 누워 mag X 가 위아래 축 |
-| 보드 OLED/BLE/TXT `atan2(+Y,+Z)+155.7` | −23.8° | 6.8° |
-| 앱 HDG comp (축맞춤·기울기, 앞=보드 X 가정, `main.ts:435`) | +95.3° | 4.7° |
-
-- 보드 식으로 HLG 자력값을 다시 계산하면 TXT 방위와 중간 1.4° 차 → 세션 46 당시 설정도 지금과 같았다 [확인]
-- 앱이 **말없이** 하는 것: 자력 치우침 자체 추정 후 "좋아지면" 뺌(`main.ts:314,428`, 보드가 이미 뺀 값에서 또 뺌) · 뱃머리=보드 X 가정
-- 보드 HLG 자력은 **원본이 아니다** — 하드아이언 뺀 값(`main.cpp:3742`). 뺀 값·축·오프셋·편각이 HLG 에 없다
-- 기울기 보정 + 수평 기준에서 90° 돌린 축을 앞으로 두면 방위−COG +5°, 힐 한쪽 +9.4 / 반대쪽 +1.9 로 갈림 (leeway 모양) [확인 계산, 해석은 추측]
-- 앞뒤 축 자동 찾기는 실패: 자이로 주축 비 1.5 배, GPS 가속 상관 −0.014
-- ★ 내가 "세션 중력 평균을 수평으로" 를 또 제안했다 — `main.ts` 575줄 근처에 이미 틀렸다고 적힌 방법(한쪽 태킹이 길면 치우침)
-
-제안한 방향 (승인 안 됨): 원본 저장 · 계산값엔 식과 보정값을 같이 표시 · 보정은 사람이 정한 절차로만 · 식은 한 곳 정의(보드·앱 같은 식, 같은 입력 시험) · 식 선택은 사용자가 정한다.
-
-### 끊긴 세션 이름이 `_nosat` 으로 남는다
-이름·머리글 utc_start 는 `finalizeClosed()` 에서만 고친다(`hlog.cpp:642`). 쓰기 실패로 끊기면 못 온다.
-세션 46 은 NAV 전 줄이 fix 인데 이름 `_nosat`, 머리글 "첫 fix 없음". 세션 27 도 같았다(`hlog.cpp:1035` 주석). 고침 후보: 첫 fix 때 고친다.
-
-### 앱 쪽 — 아이폰 · 워치 · 데스크탑 · 아이패드 (2026-09-15 기준, 확인 안 된 것 위주)
-
-| 무엇 | 코드 | 실기기 확인 |
-|---|---|---|
-| C9 기록 멈춤 배경 빨강 (flags bit5) — 아이폰 `LiveView.swift` 0.45 · 워치 `.containerBackground(…, for: .tabView)` | 커밋 `703e2ce` | **화면으로 못 봄.** 기기에 설치했는지도 기록 없음 → `rec fail` 로 흉내 내고 두 기기에서 본다 |
-| C9 데스크탑·아이패드 | ❌ 39바이트 확장 패킷을 안 푼다 (A2) | — |
-| 데스크탑 깨우기: BLE 로 `wifi ap <앱id>` 보내고 192.168.4.1 을 90초 기다림 · USB 깨우기는 HOSTS_KEY 저장 · 연결 끊김 문구에 "기록이 시작됐을 수 있음" | 커밋 `d2a8696` | 맥: 사용자가 세션 46 을 앱으로 받았다 (09-14 20:29) → 받기는 됐다. 어느 경로(BLE/USB)로 깨웠는지는 모름 |
-| 아이패드 | 데스크탑과 한 벌 | **09-14 변경을 아이패드에 안 올렸다** ([[ipad-app-deploy-and-file-speed]]) |
-| 데스크탑 HDG 식 | 위 "헤딩" 항목 | 사용자 결정 대기. 고치면 아이패드도 같이 |
-
-### `rec dump` — 커밋 `92ebd9a`, HLG 받기 실패 원인 모름
-`rec dump <번호> <hlg|txt> <시작> <바이트>` (base64 + 조각 CRC32) + `firmware-rak/tools/serial_dump.py`. 보드에 올라가 있다.
-TXT 는 97 KB/s 로 받음. HLG 는 첫 크기 요청에서 "크기를 못 받음" — **원인 모름**. 사용자 요청으로 커밋했다.
+> **새 세션은 여기부터 읽는다.** 맨 위 "지금 상태" → "다음 할 일" → "사용자 결정 대기" 순서.
+> 합격 기준은 `docs/testing/boat-device-checklist.md`, 항목별 막는 것은 `docs/testing/checklist-gaps.md`.
 
 ---
 
-## ★ 지금 바로 할 것 (2026-09-14 저녁 기준) — 설계 검토 둘을 반영하는 정리
+## 지금 상태 (2026-09-15 11:20 기준)
 
-커밋 `d2a8696` 까지가 오늘 고친 것이다. 다음은 **동작을 유지하는 구조 정리**다.
-근거는 사용자가 준 구조 검토·수정 제안 두 건과 그에 대한 내 답(대화 기록). 순서대로 한다.
+### 코드 — 전부 커밋됨
+| 무엇 | 어디 | 호스트 | 보드 |
+|---|---|---|---|
+| **기록 제어 — 원하는 상태와 실제 상태 분리.** `recWantOn/recWantOff`(단추·`rec on/off`·앱·끄기 모두) · `recControlTick` · NVS `rec_want`+`rec_open` (옛 `rec_on` 켤 때 옮김) · 쓰기 실패 뒤 3초 뒤 새 파일 3번 · 켤 때 이어 시작 5번 한도 | rec_control.h · main.cpp | ✅ | ✅ |
+| **기록기 — 요청만 하고 일꾼이 마무리.** `requestStop/poll/phase` · 상태 전이는 `gStateMux` 안 `toDraining/toClosed` 만 · 쓰기 포기도 Draining · 실패 세션도 머리글·이름 고침 · 결과 하나(`SessionResult`, 첫 오류 한 번만) | hlog.h/.cpp · hlog_write.h | ✅ | ✅ |
+| **끄기** — 닫힐 때까지 루프에서 기다림 → 15초 넘으면 "5초 더 누르면 끔" → 두 번째가 강제(NVS `rec_forced`) · 닫는 동안 화면 SAVING | main · display | ✅ | ❌ (보드가 잠들어 못 봄) |
+| **REC FAIL** = 원하는데 멈춤 · 다시 걸기 포기 · **마지막 저장 실패(사람이 멈춘 세션도)** | rec_control.h showFailed | ✅ | 일부 |
+| **기록 중 설정 잠금** — `hdg off/decl/축` · `magcal stop/clear` · `level` · `heel/pitch 축` 거절 (머리글과 어긋나서) | main.cpp | — | ✅ |
+| **SD 사용권** `sdcard::acquire/release/owner` — 기록·파일 전송·진단 모두 여기로 | sdcard.h/.cpp | — | ✅ (기록 중 `sd` 거절) |
+| **방위 식 하나** — 보드 `heading_tilt.h` ↔ 앱 `desktop/src/heading.ts`. OLED·BLE·TXT·앱 모두 기울기 보정. 못 구하면 `---` | heading_tilt.h · main · heading.ts | ✅ 960벡터 어긋남 0 · 답 아는 자세 | ✅ `hdg` |
+| **HLG 머리글 81~105** — 방위 식·축·부호·오프셋·편각·뺀 하드아이언 | hlog · hlog_parse.py · desktop hlog.ts · SDLOG.md | — | ✅ |
+| **데스크탑·아이패드 HDG** — 머리글 설정으로 보드와 같은 식. 옛 `atan2(magY,magX)`·자체 치우침 빼기·comp 줄 지움. IMU 는 NAV 이전·20 ms 안만. 설정 없는 옛 파일은 HDG 안 그림 + 이유 표시 | desktop main.ts | tsc·vite ✅ | 화면 ❌ · 아이패드 올리기 ❌ |
+| NAV-PV 켤 때·`power` 뒤 같은 절차 + 프레임 오는지 로그 | main.cpp `gpsApplyNavPv` | — | ✅ 켤 때 ACK·44 ms |
+| 속도 규칙 `sog_policy.h` (동작 그대로) | sog_policy.h | ✅ | — |
+| 진단 정리 — 운영 상태 쓰기를 함수로(`busSawAddr`·`noteImuTemp`·`setLevelFromNow`), `sd`·`sdbench`·`batt`·`oledw`·`sleepstat` → diagnostics.cpp | diagnostics.* | — | — |
+| 기록 시작 시 남은 자리 90 MB(8시간) 검사 · `rec hash` SHA-256 · `rec dump`(TXT 됨, HLG 원인 모르게 실패) | hlog · main | — | hash ✅ |
+| 시험 명령 `rec slow <ms>` · `rec fail <n>` / `clear`(흉내 횟수까지 지움) · `test imu <초>` · `test gps <초>` · `off force` | main · hlog | — | slow·fail·imu ✅ |
+| 저전압 경고 **3.0 V**(사용자 결정) — 전압 옆 LOW | main · display | — | ❌ |
+| 워치·아이폰 광고 경로 끊김 판정 4.0 → 3.0초 | app BLEManager.swift | 빌드 ✅ | 기기 ❌ |
 
-1. **기록 종료 절차 단일화** — hlog 가 요청부터 마무리·실패 저장·SD 반환까지 책임
-   - 외부 단계 Idle / Recording / Closing. `Closed + gNeedFinalize` 조합 없앰
-   - `requestStop(reason)` 은 바로 돌아오고 `poll()` 이 매 루프 완료를 받는다. 15초 대기 루프 없앰
-   - 세션 결과 기록 하나: 일꾼만 채움, 루프는 portMUX 임계 구역 안에서 복사만. `consumed` 표식, 세션 번호 확인
-   - 상태 쓰기 책임: 요청(→Closing)은 루프만, 완료(→Idle)는 일꾼만. 마무리(머리글·이름)는 일꾼이 닫을 때 같이
-   - `firstError` 는 한 번 채우면 안 바꿈. 닫힘 여부·손실량은 별도 칸
-   - `wantRecording` 을 제어부가 소유. 수동 종료·끄기 요청 순간 false. 늦은 쓰기 실패가 못 바꿈
-   - NVS: `rec_on` → `rec_want`(재개 의도) + `rec_open`(마감 안 된 세션 번호). 첫 부팅에 옛 키 이전
-   - 단추·`rec off`·끄기가 같은 API 와 결과를 씀. `gRecFailed`·`gRecRestartAt`·`userStopped` 없앰
-   - 끄기: 종료 요청 → Idle 대기 → 15초 넘으면 "5초 더 누르면 미완료로 끔" 안내 → 사람이 다시 눌러야 강제
-     강제 경로는 NVS 에 {세션, 사유, 재개 취소} 저장 후 일꾼을 지우지 않고 SD 핀도 안 건드리고 잠듦
-   - IMU 공백은 재연결뿐 아니라 종료 때도 정산. 마지막 정산 시각 기준으로 중복 없이
-2. **SD 사용권 모듈** `sdcard.cpp/.h` — `acquire/release/owner`, 주인은 Recorder/Download/Diagnostic
-   - `SD.begin/end` 와 SPI 준비는 이 모듈만. 37곳(hlog 22 · netsrv 3 · main 12)을 여기로
-   - hlog 는 세션 시작부터 마무리까지 Recorder 를 쥔다. netsrv `gSdUp` 은 이 모듈 상태로 대체
-   - hlog 안 목록·검사·삭제·tail 은 Diagnostic. 각 함수 첫 줄의 `busy()` 검사는 지움
-3. **NAV-PV 전원 복귀 설정** — NAV-PV 켜기를 `gpsApplyBoatMode` 와 같은 절차로. 켠 뒤 프레임 수신 확인 로그
-4. **헤딩 진입점 하나** — `headingDeg` → `flatHeadingDeg`, `heading::latest()` 를 화면·BLE·TXT 가 읽음.
-   보정 헤딩은 진단 역할. 보정이 무효면 평면으로 몰래 안 바꿈 (`--`)
-5. **속도 경계 분리 (동작 유지)** — 입력 → 품질 → 추정 → 표시. 표시 동작은 지금 그대로.
-   창 길이·판정 규칙은 시각 있는 자료 받은 뒤 별도 변경. `smooth` 는 COG 에 쓰이니 남김
-6. **진단 분리·잔재** — `diagnostics.cpp`, 명령 처리기는 인자 해석만. 진단이 운영 전역에 쓰는 곳은 먼저 함수로 감쌈.
-   `stopMayFinalize` 제거, `handleFile` 의 `gBusyIp` 중복 검사 제거, `setRecControl` 주석·`healthCheck` 옛 주석 정리
+### 보드 시험 결과 (11:00~11:13, `python3 firmware-rak/tools/board_rec_test.py all` / `clean`)
+✅ 옛 NVS 옮김 · `hdg` 두 방위 · 기록 중 설정·`sd` 거절 · 정상 종료·머리글·해시 · 쓰기 실패 → 3번 다시 걸기(71→74) ·
+닫기 20초 지연 동안 루프 응답 + 닫는 중 `rec on` → 닫힌 뒤 시작(80→81) · IMU 6.8초 끊긴 채 종료 → IMU 651 + dropped 681 = 1,332 (13 s × 100 Hz) ·
+기록 중 리셋 → 이어 시작(78→79) · 사람이 멈춘 뒤 리셋 → 안 함 · **단추로 시작 → 리셋 → 이어 시작(82→83)** (외부 검토 1번 확인).
+**시험 중 찾아 고친 것:** `rec fail clear` 가 흉내 횟수를 안 지움 · SD 거절 문구 조사.
+**카드 잔재:** 시험 세션 47~83 (몇 초짜리). 지워도 된다 — 지우기 전에 사용자에게 묻는다.
 
-시험: `rec slow <ms>`(일꾼 닫기 직전 잠금 밖 한 번 쉼, 자동 해제), 마무리 단계별 실패 주입(남은 쓰기·머리글·이름 바꾸기),
-제어부 순수 함수를 호스트에서 여섯 시나리오로. 보드: 실패 도중 종료 · 15초 초과 뒤 늦은 완료 · 그 사이 WiFi/진단/끄기 ·
-종료 반복 · IMU 끊긴 채 종료 · 닫기 실패 후 끄기.
+---
 
-**속도 정책은 따로.** "멈추면 0" 은 목표, 30초 창은 방법. "속도<오차면 무효" 는 정지 자료에서 1.74/±0.86 같은 반례가 있어
-확정 규칙 아님. 결정에 필요한 자료: 표본마다 보드 ms·iTOW·북동 속도·오차·표식이 있는 정지 5분 + 걷기 0.3~1 kn.
-지금 `navpv l` 은 1초 간격·소수 둘째 자리라 부족하다. 자료 형식부터 만들 것.
+## 다음 할 일 (순서대로)
 
-**보드에 남은 시험 잔재:** 카드에 세션 47~69 (전부 몇 초짜리 시험). 실패 기록은 `rec fail clear` 로 지움.
+1. **보드에서 남은 확인** — `off` / `off force` (단추 5초로 다시 켜야 함) · 기록 중 카드 빼기 · 단추 시작 세션의 쓰기 실패 뒤 다시 걸기 ·
+   GPS 끊기(`test gps`, 하늘 필요) · 저전압 LOW(3.0 V 밑) · 가득 찬 카드(90 MB 미만)
+2. **앱 화면 확인** — 아이폰·워치 REC FAIL 빨강(bit5), 데스크탑 HDG 식 표시 칸, **아이패드에 올리기** ([[ipad-app-deploy-and-file-speed]])
+3. **체크리스트 먼저 할 다섯** — 02 나침반 8방위 · 03 기울기 · 05 OLED·워치·앱 대조 · 06 정지·저속 · 07 기록 30회
+4. **기록 시작 때 폴더 훑기 1.7→2.6초 루프 멈춤** (파일 수에 따라 늘어남, 원래 동작) — 고칠 방법 정하기
+5. **저속 정책** — 30초 창이라 0.3 kn 이동이 20초 뒤에야 뜬다 (외부 검토가 재현). 시각 찍힌 정지 5분·걷기 0.3~1 kn 자료 형식부터
+6. `rec dump` HLG 받기 실패 원인 (TXT 는 됨)
+
+## 사용자 결정 대기
+- 끊긴 뒤 워치 표시: 지금 45% 흐림 → `--` 로 바꿀지 (체크리스트 11 "정상값처럼")
+- 옛 세션(46 등) HDG: 머리글에 설정이 없어 앱이 안 그린다. 사람이 설정을 넣는 길을 만들지 (넣으면 "사람이 넣은 설정" 표시)
+- 데스크탑·아이패드 **오프라인 지도** (C10) — "지도 담에 고민" (아래 조사 메모)
+- IMU·GPS 진단(`imu`·`calib`·`gpscfg`·`navpv`·`hdgtilt`·`fix`·`scan`)을 diagnostics.cpp 로 옮길지 — 전역 창구 20개 넘게 열어야 해서 내 판단은 "안 옮김"
+
+---
+
+## 참고 — 체크리스트 · 지도 조사 · 세션 46
+
+### 체크리스트 (`docs/testing/boat-device-checklist.md`)
+판정은 `통과 / 실패 / 미측정`. 기준 장비·로그가 모자라면 통과로 쓰지 않는다.
+코드를 고치면 체크리스트 끝 "반복과 수정 후 확인" 표대로 다시 할 항목을 적는다 (헤딩·속도 변경 → 02~06, 기록·통신 변경 → 05·07·10·11·12).
+`checklist-gaps.md` 는 09-15 오전 코드 기준이다 — 05 식 불일치·10 해시·12 시험 명령은 그 뒤 고쳤다.
+
+### 오프라인 지도 조사 (09-15)
+- 지금 `desktop/src/map.ts` 는 OSM · OpenTopoMap · Esri 위성 · OpenSeaMap 타일을 실시간으로 받는다. OSM 타일 서버는 미리 받기 금지 (`map.ts:19`)
+- OSM 정책 원문: 대안으로 자체 타일·벡터 타일 포장을 권함
+- Protomaps PMTiles (ODbL) — `pmtiles extract --bbox --maxzoom [--dry-run]`. 최신 빌드 `https://build.protomaps.com/20260914.pmtiles`. 한국 구역 용량은 아직 못 잼
+- pmtiles JS `FileSource` 있음 · Tauri 예 github inro-digital/tauri-offline-maps (보관됨)
+- 위성: Esri World Imagery(for Export) 는 ArcGIS 앱 안에서만 [검색 요약] · EOxCloudless 비상업 CC BY-NC-SA 4.0
+- 해도: 국립해양조사원 2레벨 전자해도 SHP (data.go.kr 15129973, 이용허락범위 제한 없음)
+- OSM 항로표지 한강·아라뱃길 67개 · Geofabrik 한국 273 MB · 브이월드 약관 원문 미확인
+
+### 세션 46 (09-13, 2:53)
+- 파일 `~/Desktop/sail-logs/S00046_20260913-1333_nosat.HLG` · `.TXT` / 앱 보관 `~/Library/Application Support/kr.fetm.sailanalyzer/logs/3CDC75702FB4_00046.HLG`
+- CRC 맞음 · NAV 104,757 · IMU 1,046,711 · 못 읽은 바이트 13 · 쓰기 실패로 끊겨 이름 `_nosat`(지금 코드는 실패 세션도 이름을 고친다)
+- 방위−COG (2.5 kn 넘는 47,866줄): 옛 앱 atan2(magY,magX) 흩어짐 49.5° · 보드 평평 식 6.8°(평균 −23.8°) · 기울기 보정 4.7°
+- 기울기 보정 + 앞 축을 90° 돌리면 방위−COG +5°, 힐 한쪽 +9.4 / 반대 +1.9 (leeway 모양, 해석은 추측). 앞뒤 축 자동 찾기는 실패
+- 오프셋 +155.7° 로 −24° 치우침 → 체크리스트 02 나침반 절차로 다시 잡을 것 (COG 로 맞추지 않는다)
+
+### 앱 쪽 옛 메모
+- C9 데스크탑·아이패드는 39바이트 확장 패킷을 안 푼다 (A2) — REC FAIL 빨강 없음
+- 데스크탑 깨우기 `wifi ap <앱id>` — 맥에서 세션 46 받기 됨 (09-14)
 
 ---
 

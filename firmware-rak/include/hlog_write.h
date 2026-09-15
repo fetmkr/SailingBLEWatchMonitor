@@ -6,15 +6,38 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "rec_control.h"
+
 namespace hlog {
 
 // 기록기 상태. 쓰는 쪽(코어 0 일꾼)이 끝을 알린다 — 부르는 쪽은 상태만 본다.
 //
 //   Closed     파일 없음. 시작할 수 있다
-//   Recording  파일이 열려 있고 쓰는 중
-//   Draining   stop() 이 멈추라고 했다. 일꾼이 남은 것을 다 쓰고 닫는 중
-//   Failed     쓰기가 실패해서 일꾼이 파일을 닫았다. 남은 것은 못 썼다
-enum class RecState : uint8_t { Closed = 0, Recording = 1, Draining = 2, Failed = 3 };
+//   Recording  파일이 열려 있고 쓰는 중. 생산자(writeNav/Imu/Text)는 이때만 넣는다
+//   Draining   닫는 중 — 사람이 멈추라고 했거나(requestStop) 일꾼이 쓰기를 포기했다.
+//              일꾼이 남은 것을 쓰고 · 닫고 · 머리글·이름을 고친 뒤 Closed
+//
+// ★ 전이는 아래 두 함수로만, hlog.cpp 의 상태 잠금 안에서 한다 (2026-09-15 검토 2번).
+//   옛 코드는 쓰기 실패 뒤 마무리하는 동안 Recording 에 머물러 생산자가 계속 넣었고,
+//   requestStop 의 "Recording 인가" 확인과 Draining 쓰기 사이에 일꾼이 Closed 를 쓰면
+//   닫힌 세션이 닫는 중으로 되돌아갔다. 따로 두던 Failed 는 실제로 머물지 않아서 지웠다.
+enum class RecState : uint8_t { Closed = 0, Recording = 1, Draining = 2 };
+
+// 기록 중 → 닫는 중. 멈춤 요청과 쓰기 포기가 같은 전이를 쓴다. 이미 닫는 중·닫힘이면 아무것도 안 바꾼다.
+// (템플릿인 까닭: hlog.cpp 의 gState 는 두 코어가 보는 volatile 이라 RecState& 로 못 받는다)
+template <class S>
+inline bool toDraining(S& s) {
+    if (s != RecState::Recording) return false;
+    s = RecState::Draining;
+    return true;
+}
+// 닫는 중 → 닫힘. 일꾼만 부른다 (마무리를 다 한 뒤).
+template <class S>
+inline bool toClosed(S& s) {
+    if (s != RecState::Draining) return false;
+    s = RecState::Closed;
+    return true;
+}
 
 // 한 범위를 끝까지 쓰려고 한다.
 //
@@ -50,19 +73,9 @@ size_t writeAll(const uint8_t* p, size_t n, WriteFn&& write, ConsumeFn&& consume
     return done;
 }
 
-// 쓰기 결과로 다음 상태를 정한다.
-inline RecState afterWrite(RecState s, bool complete) {
-    if (s == RecState::Recording) return complete ? RecState::Recording : RecState::Failed;
-    if (s == RecState::Draining)  return complete ? RecState::Closed    : RecState::Failed;
-    return s;
-}
 
 // 시작은 파일이 닫혀 있을 때만.
-inline bool canStart(RecState s) { return s == RecState::Closed || s == RecState::Failed; }
-
-// 정상 종료를 확정해도 되나 — 일꾼이 남은 것을 **다 쓰고** 닫았을 때만.
-// Draining 에 머물러 있으면(시간 초과) 머리글을 고치거나 표시를 지우면 안 된다.
-inline bool stopMayFinalize(RecState s) { return s == RecState::Closed; }
+inline bool canStart(RecState s) { return s == RecState::Closed; }
 
 // SD 를 만져도 되나 (진단·파일 목록·WiFi). 기록기가 파일을 쥐고 있으면 안 된다.
 inline bool sdBusy(RecState s) { return s == RecState::Recording || s == RecState::Draining; }

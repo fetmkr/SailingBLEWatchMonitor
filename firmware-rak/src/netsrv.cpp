@@ -1,4 +1,5 @@
 #include "netsrv.h"
+#include "sdcard.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -30,7 +31,6 @@ char      gIp[20]   = {0};
 char      gSsid[40] = {0};
 uint32_t  gServedFiles = 0;
 uint64_t  gServedBytes = 0;
-bool      gSdUp = false;
 
 // ── 언제 WiFi 를 끄나 ────────────────────────────────────────────────────
 //
@@ -337,17 +337,13 @@ void loadCreds() {
 // 기록기(hlog)와 이 서버가 같은 카드를 쓴다. 둘 다 필요할 때 올리고 안 쓰면
 // 내린다. 서로 붙잡고 있으면 안 되니 짧게 쓰고 놓는다.
 bool sdUp() {
-    // 기록기가 카드를 쥐고 있으면 안 붙인다. 둘이 같은 SD 객체를 쓴다.
-    if (hlog::busy()) return false;
-    if (gSdUp) return true;
-    SPI.begin(rak::kSPI_CLK, rak::kSPI_MISO, rak::kSPI_MOSI, rak::kSPI_CS);
-    gSdUp = SD.begin(rak::kSPI_CS, SPI, rak::kSdHz, "/sd", 5);
-    return gSdUp;
+    // 사용권이 판단한다 — 기록기나 진단이 쥐고 있으면 못 쥔다. 이미 우리가 쥐었으면 true.
+    return sdcard::acquire(sdcard::Owner::Download);
 }
 
 // 카드를 놓는다. 파일을 다 보낸 뒤에 부른다.
 void sdDown() {
-    if (gSdUp) { SD.end(); gSdUp = false; }
+    sdcard::release(sdcard::Owner::Download);
 }
 
 // 브라우저나 데스크탑 앱이 다른 출처에서 부를 수 있게 열어 둔다.
@@ -395,7 +391,7 @@ void handleStatus() {
         (unsigned long)st.dropped,
         (unsigned long)st.maxStallMs,
         st.cardPresent ? "true" : "false",
-        (unsigned long long)(gSdUp ? (SD.totalBytes() - SD.usedBytes()) / 1048576ULL : 0),
+        (unsigned long long)(sdcard::owner() == sdcard::Owner::Download ? (SD.totalBytes() - SD.usedBytes()) / 1048576ULL : 0),
         who);
     gServer.send(200, "application/json", body);
     (void)n;
@@ -611,14 +607,14 @@ void handleFile() {
                      "{\"ok\":false,\"error\":\"이미 보내는 중입니다\"}");
         return;
     }
-    if (hlog::busy()) {
-        gServer.send(409, "application/json",
-                     "{\"ok\":false,\"error\":\"기록 중에는 못 보냅니다\"}");
-        return;
-    }
     if (!sdUp()) {
-        gServer.send(503, "application/json",
-                     "{\"ok\":false,\"error\":\"카드를 못 읽습니다\"}");
+        // 기록 중이면 기록기가 카드를 쥐고 있다 (sdcard 사용권). 따로 hlog::busy() 를 묻지 않는다.
+        if (sdcard::owner() == sdcard::Owner::Recorder)
+            gServer.send(409, "application/json",
+                         "{\"ok\":false,\"error\":\"기록 중에는 못 보냅니다\"}");
+        else
+            gServer.send(503, "application/json",
+                         "{\"ok\":false,\"error\":\"카드를 못 읽습니다\"}");
         return;
     }
 
@@ -632,16 +628,10 @@ void handleFile() {
     // 앱을 켜 놓고 노는 사람이 배를 잠가 버리면 안 된다. 그래서 잠기는
     // 최대 시간은 파일 하나 보내는 시간이다. 받아 가던 기기가 사라지면
     // 아래 connected() 검사가 바로 푼다.
+    // ★ 옛 코드는 여기서 gBusyIp 로 한 번 더 막았다. gBusyIp 는 보내는 동안(gX.active)에만 서므로
+    //   맨 위 gX.active 검사가 이미 409 로 돌려보낸 뒤라 닿지 않는 갈래였다. 지웠다 (NEXT 6).
+    //   gBusyIp 는 상태 표시("누가 받는 중")에만 쓴다.
     const uint32_t meIp = (uint32_t)gServer.client().remoteIP();
-    if (gBusyIp && gBusyIp != meIp) {
-        char owner[20]; ipText4(gBusyIp, owner, sizeof(owner));
-        char body[192];
-        snprintf(body, sizeof(body),
-                 "{\"ok\":false,\"error\":\"다른 기기가 받는 중입니다\","
-                 "\"owner\":\"%s\",\"owner_file\":\"%s\"}", owner, gBusyFile);
-        gServer.send(409, "application/json", body);
-        return;
-    }
 
     String uri = gServer.uri();          // "/file/S00008.HLG"
     String name = uri.substring(6);
@@ -790,8 +780,8 @@ void handleRec() {
         gServer.send(200, "application/json", "{\"ok\":true}");
         return;
     }
-    // 시작·종료는 시리얼·버튼과 같은 길을 타야 해서 여기서 직접 하지 않는다.
-    // main.cpp 가 넘겨준 함수를 부른다 (아래 setRecControl).
+    // 시작·종료는 시리얼·버튼과 같은 길(main.cpp recWantOn / recWantOff)을 타야 해서
+    // 여기서 직접 하지 않는다. 그 길을 넘겨받는 연결은 아직 없다 — 그래서 501.
     gServer.send(501, "application/json",
                  "{\"ok\":false,\"error\":\"아직 안 만들었습니다\"}");
 }
