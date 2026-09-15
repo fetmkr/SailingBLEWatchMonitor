@@ -5,6 +5,6 @@ idf_component_register(
     SRC_DIRS "."
     INCLUDE_DIRS "." "../../firmware-rak/include"
     REQUIRES nvs_flash esp_driver_gpio esp_driver_uart esp_driver_i2c esp_adc esp_psram spi_flash esp_timer
-             fatfs esp_driver_spi esp_driver_sdspi sdmmc mbedtls esp_driver_usb_serial_jtag tinygpsplus u8g2
+             fatfs esp_driver_spi esp_driver_sdspi esp_driver_sdmmc sdmmc mbedtls esp_driver_usb_serial_jtag tinygpsplus u8g2
              esp_wifi esp_netif esp_event esp_http_server lwip
 )

@@ -214,6 +214,18 @@
   · ★★ **보드 리셋(포트 열기) 뒤에도 카드가 안 붙는다** (20:5x): `sd` · `rec hash 41` · `sdread` · `rec ls` 모두 `sdmmc_card_init failed (0x103)` — 카드 감지 GPIO39 는 LOW(있음)
     USB 리셋은 칩만 다시 켜고 SD 카드 전원은 안 끊는다 (배터리도 붙어 있음) → 40 MHz 때 이상해진 카드 상태가 남은 것 [추측]. 마운트 단계 실패라 카드에 쓴 것은 없다
     ⬜ 카드 전원 끊었다 켜기로 풀리는지 · 기록 파일 멀쩡한지 (rec hash 41 = dfe410f3…) 확인해야 한다 · 그다음 파일 보내는 동안 화면 그리기 쉬기 또는 xferPump 예산 20→50 ms ⬜ · firmware-rak 같은 자리 기준값 ⬜
+- **SDMMC 1비트 가능성 조사 (09-15 21:xx, 회로도 원본 확인)**
+  · 핀: CLK 13 · CMD 11 · DAT0 10 · DAT3 12 · DAT1·DAT2 는 모듈에서 X (연결 안 됨) · 직렬 저항·레벨 변환 없음 [확인: rak15002 module-schematic · rak19007 slots-schematic · rak3312 핀 표 · board_rak.h]
+  · 풀업: CMD·DAT0·CLK 는 "100K/NC" (자리만일 가능성) · DAT3 만 R1 100K 달림. IDF 요구는 10 kΩ [확인: sd_pullup_requirements.rst]
+    내부 풀업 옵션은 헤더가 "부족하다, 디버그·예제용" 이라 적음 [확인: sdmmc_host.h:48-52] → **되면 쓰고, 안 되면 하드웨어(10k) 문제**
+  · 카드가 한 번 SPI 로 붙으면 **전원을 끊어야** SD 모드로 돌아간다 [확인: SD 규격 v3.01 원문] → 시험 전 카드 전원 끊기 필수, 시험 순서는 SDMMC 먼저 · SPI 나중
+  · 시험 코드: `sdmode sdmmc|spi` (램에만, 켤 때 spi) · SDMMC 모드에서만 `sdhz` 40000 까지 · 마운트 전 GPIO12(DAT3) 출력 HIGH · 포맷 안 함
+- ❌ **보드가 부팅 중 멈춤 (09-15 21:3x, SDMMC 시험 판 올린 직후)** — 시험은 한 줄도 못 돌렸다
+  · 순서: 사용자 카드 다시 꽂음 → 새 판 굽기 (끝에 앱이 돌며 출력 나옴) → 포트 열기(리셋) → ROM·부트로더 끝 `Disabling RNG early entropy source` 다음 **출력 끊김** (원래는 바로 `octal_psram` 줄이 나온다)
+  · 리셋 직전 PC `0x40384872` = `esp_cpu_wait_for_intr` (앱은 쉬는 중이었다) [확인: addr2line]
+  · 그 뒤 포트 열기 2번 **0바이트** · `esptool read-flash` "No serial data received" · OpenOCD `libusb_get_string_descriptor_ascii() failed` → USB 부분까지 응답 없음
+  · 새로 넣은 SDMMC 코드는 명령으로만 돈다. 부팅 길에는 없다 [확인: 코드]. 원인은 **모름**. 카드를 켠 채 꽂은 것과 관계있는지도 모름 [모름]
+  · 코어덤프는 칩이 응답 안 해 못 읽음 → 전원 끊고 켠 뒤 먼저 읽는다 ⬜
 
 ## 6. boat-device-checklist 다시 돌리기 (기록·통신이 바뀌었으므로)
 

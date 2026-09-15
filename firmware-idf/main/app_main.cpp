@@ -1989,6 +1989,18 @@ static void handleLine(char* line) {
     }
     if (!strcmp(line, "sd"))        { if (sdFreeFor("sd")) diag::sdCheck(); return; }
     if (!strncmp(line, "sdread ", 7)) { if (sdFreeFor("sdread") && blockingDiagOk("sdread")) cmdSdRead(line); return; }
+    // sdmode [spi|sdmmc] — 시험: 다음 마운트부터 SD 연결 방식 (전원 끄면 spi 로 돌아간다, NVS 에 안 적는다)
+    if (!strcmp(line, "sdmode") || !strncmp(line, "sdmode ", 7)) {
+        if (strlen(line) > 7) {
+            if (!sdFreeFor("sdmode")) return;
+            if (!strcmp(line + 7, "sdmmc")) sdcard::setTestSdmmc(true);
+            else if (!strcmp(line + 7, "spi")) { sdcard::setTestSdmmc(false); sdcard::setTestFreqKhz(0); }
+            else { printf("[SDMODE] spi 또는 sdmmc\n"); return; }
+        }
+        printf("[SDMODE] 다음 마운트부터 %s (주파수 %s)\n", sdcard::testSdmmc() ? "SDMMC 1비트" : "SPI",
+               sdcard::testSdmmc() ? "sdhz 로 정함, 기본 20000 kHz" : "sdhz 로 정함, 상한 20000 kHz");
+        return;
+    }
     // sdhz <kHz> — 시험: 다음 마운트부터 SD SPI 주파수 (0 = 기본 20000). 전원을 끄면 기본으로 돌아간다 (NVS 에 안 적는다)
     if (!strcmp(line, "sdhz") || !strncmp(line, "sdhz ", 5)) {
         if (strlen(line) > 5) {
@@ -1996,7 +2008,12 @@ static void handleLine(char* line) {
             const long k = strtol(line + 5, nullptr, 10);
             // ★ 20000 kHz 가 상한. 09-15 에 40000 을 걸자 카드 초기화가 실패하고(send_csd 0x108), 보드 리셋으로도 안 풀렸다
             //   (카드는 VDD 라 전원을 못 끊는다 — POWER.md). 카드를 뽑았다 꽂아야 했다. 다시는 못 걸게 막는다.
-            if (k > 20000) { printf("[SDHZ] 20000 kHz 넘게는 못 겁니다 — 40 MHz 에서 카드가 멈췄습니다 (CHECKLIST 5장)\n"); return; }
+            // SPI 모드 40 MHz 는 카드가 멈췄다. SDMMC 1비트 시험 모드에서만 40000 까지 허용한다 (문서: High Speed 카드 40 MHz)
+            if (k > (sdcard::testSdmmc() ? 40000 : 20000)) {
+                printf("[SDHZ] %s 모드에서는 %d kHz 가 상한입니다 — SPI 40 MHz 에서 카드가 멈췄습니다 (CHECKLIST 5장)\n",
+                       sdcard::testSdmmc() ? "SDMMC" : "SPI", sdcard::testSdmmc() ? 40000 : 20000);
+                return;
+            }
             sdcard::setTestFreqKhz((int)(k < 0 ? 0 : k));
         }
         printf("[SDHZ] 다음 마운트부터 %s (지금 붙은 카드 %d kHz)\n",

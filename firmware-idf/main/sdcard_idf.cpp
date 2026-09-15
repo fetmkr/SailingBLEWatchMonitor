@@ -9,6 +9,8 @@
 
 #include "sdcard.h"
 
+#include "driver/gpio.h"
+#include "driver/sdmmc_host.h"   // 시험: SDMMC 1비트 (sdmode sdmmc)
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "esp_vfs_fat.h"
@@ -25,9 +27,53 @@ Owner   gOwner = Owner::None;
 Refusal gRefusal = Refusal::None;
 sdmmc_card_t* gCard = nullptr;          // 붙어 있으면 null 아님
 int gTestFreqKhz = 0;                   // 0 이면 board_rak kSdHz (sdhz 시험 명령)
+bool gTestSdmmc = false;                // 시험: SPI 대신 SDMMC 1비트로 붙인다 (sdmode 명령, 09-15 속도 조사)
+bool gMountedSdmmc = false;             // 지금 붙은 카드가 SDMMC 로 붙었나 — 내릴 때 SPI 버스를 풀지 가른다
+
+// ── 시험: SDMMC 1비트 ─────────────────────────────────────────────────────────
+// 사용자(친구) 연결표: CLK 13 · CMD 11(SPI MOSI 자리) · DAT0 10(SPI MISO 자리) · DAT3 12(SPI CS 자리) · DAT1·DAT2 없음.
+// 1비트에 필요한 CLK·CMD·DAT0 는 있다. 회로도의 풀업은 확인 중 [모름] — 내부 풀업을 켠다.
+// ★ DAT3(12) 는 CMD0 때 LOW 면 카드가 SPI 모드로 들어간다 (SD 규격) — 마운트 전 HIGH 로 둔다.
+// ★ 카드가 이미 SPI 모드로 초기화됐으면 전원을 끊기 전엔 SD 모드로 못 돌아간다 [추측 — 확인 중]. 카드는 VDD 라 뽑았다 꽂아야 한다.
+bool mountSdmmc1bit(const esp_vfs_fat_mount_config_t& mcfg) {
+    const gpio_num_t d3 = static_cast<gpio_num_t>(rak::kSPI_CS);
+    gpio_set_direction(d3, GPIO_MODE_OUTPUT);
+    gpio_set_level(d3, 1);
+
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.flags = SDMMC_HOST_FLAG_1BIT;
+    host.max_freq_khz = gTestFreqKhz > 0 ? gTestFreqKhz : SDMMC_FREQ_DEFAULT;
+    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot.clk = static_cast<gpio_num_t>(rak::kSPI_CLK);
+    slot.cmd = static_cast<gpio_num_t>(rak::kSPI_MOSI);
+    slot.d0  = static_cast<gpio_num_t>(rak::kSPI_MISO);
+    slot.d1 = slot.d2 = slot.d3 = GPIO_NUM_NC;
+    slot.d4 = slot.d5 = slot.d6 = slot.d7 = GPIO_NUM_NC;
+    slot.cd = SDMMC_SLOT_NO_CD;
+    slot.wp = SDMMC_SLOT_NO_WP;
+    slot.width = 1;
+    slot.flags = SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    sdmmc_card_t* card = nullptr;
+    const esp_err_t e = esp_vfs_fat_sdmmc_mount("/sd", &host, &slot, &mcfg, &card);
+    if (e != ESP_OK) {
+        printf("[SD] ★ SDMMC 1비트 마운트 실패 (%s)\n", esp_err_to_name(e));
+        return false;
+    }
+    gCard = card;
+    gMountedSdmmc = true;
+    return true;
+}
 
 // SD.begin 과 같은 일. 붙으면 true.
 bool mountCard() {
+    if (gTestSdmmc) {
+        esp_vfs_fat_mount_config_t mcfg = {};
+        mcfg.format_if_mount_failed = false;   // ★ 절대 포맷하지 않는다
+        mcfg.max_files = 5;
+        mcfg.allocation_unit_size = 0;
+        return mountSdmmc1bit(mcfg);
+    }
     spi_bus_config_t bus = {};
     bus.mosi_io_num = rak::kSPI_MOSI;
     bus.miso_io_num = rak::kSPI_MISO;
@@ -64,6 +110,7 @@ void unmountCard() {
     if (!gCard) return;
     esp_vfs_fat_sdcard_unmount("/sd", gCard);
     gCard = nullptr;
+    if (gMountedSdmmc) { gMountedSdmmc = false; return; }   // SDMMC 로 붙었으면 SPI 버스는 안 만들었다
     spi_bus_free(SPI2_HOST);
 }
 } // namespace
@@ -123,6 +170,8 @@ void endForSleep() {
 }
 
 void setTestFreqKhz(int khz) { gTestFreqKhz = khz > 0 ? khz : 0; }
+void setTestSdmmc(bool on) { gTestSdmmc = on; }
+bool testSdmmc() { return gTestSdmmc; }
 int  cardFreqKhz() { return gCard ? gCard->real_freq_khz : 0; }
 
 } // namespace sdcard
