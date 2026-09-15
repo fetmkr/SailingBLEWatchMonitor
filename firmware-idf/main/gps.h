@@ -145,6 +145,7 @@ void updateFix();
 bool weekTow(uint16_t* week, uint32_t* tow);
 float sogOut();
 void setDampLevel(uint8_t level);
+void resetDamping();                            // 다듬은 속도·침로를 비운다 (smooth 명령)
 void setDeadbandKn(float kn);
 void testPause(long sec);                       // test gps <초> (0~300)
 

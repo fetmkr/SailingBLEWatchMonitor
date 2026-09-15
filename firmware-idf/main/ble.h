@@ -67,6 +67,7 @@ const sail::Telemetry& latest();
 bool    connected();
 bool    subscribed();
 uint8_t connectedCount();
+uint8_t seq();                              // 광고 manufacturer data 시퀀스 (1 Hz 시리얼 줄)
 void    requestAdvApply();
 
 // ── 설정 통로 (PROTOCOL.md §9) ───────────────────────────────────────────

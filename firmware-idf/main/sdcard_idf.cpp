@@ -122,3 +122,6 @@ void endForSleep() {
 }
 
 } // namespace sdcard
+
+// diagnostics.cpp `sd` 가 카드 종류·크기를 찍는다 (약한 심볼로 받는다). 안 붙어 있으면 nullptr
+sdmmc_card_t* sailSdCard() { return sdcard::gCard; }

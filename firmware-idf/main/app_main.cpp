@@ -15,13 +15,16 @@
 //   recOnResult · recControlTick · rec 명령(4600-4756) · loadSettings(380) · applySensorPower(474) ·
 //   reportResetReason(3759) · watchdogBegin(3776) · setup(5507) · loop(5658)
 
+#include <cctype>
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_adc/adc_cali.h"
@@ -42,6 +45,7 @@
 #include "heading_math.h"  // sanitizeFloat · sanitizeAxes · wrap180 · eulerYawRate
 #include "heading_tilt.h"  // 방위 식 하나 (앱 heading.ts 와 같음)
 #include "hlog.h"
+#include "magcal.h"        // 자력 공 맞추기 판정 (firmware-rak/include — 맥에서 시험하는 식 한 곳)
 #include "rec_control.h"
 #include "sdcard.h"
 
@@ -51,6 +55,7 @@
 #include "imu.h"
 #include "lora.h"      // firmware-rak/include/lora.h — 아두이노 흔적 없어 같이 쓴다 (몸통은 main/lora.cpp)
 #include "netsrv.h"    // firmware-rak/include/netsrv.h — 같이 쓴다 (몸통은 main/netsrv.cpp)
+#include "power.h"     // 7단계 — 깊은잠·저장 버튼·깬 뒤 문턱 (diagnostics.h 도 여기서)
 
 static inline uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static inline void delayMs(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
@@ -219,7 +224,9 @@ static void batteryInit() {
 }
 
 // firmware-rak readBatteryVolts: 16번 · 2 ms · 분압 0.6. 못 읽으면 0 (지어내지 않는다)
-static float readBatteryVolts() {
+//   rawMvOut: 분압 전 핀 mV 평균 (firmware-rak 과 같이 `batt` 가 찍는다). 못 읽으면 0
+static float readBatteryVolts(uint32_t* rawMvOut = nullptr) {
+    if (rawMvOut) *rawMvOut = 0;
     if (!gAdc || !gCali) return 0.0f;
     uint32_t sum = 0; int ok = 0;
     for (int i = 0; i < 16; ++i) {
@@ -228,7 +235,9 @@ static float readBatteryVolts() {
         delayMs(2);
     }
     if (!ok) return 0.0f;
-    return (sum / (float)ok / 1000.0f) / rak::kBattDivider * rak::kBattCorrection;
+    const uint32_t pinMv = sum / (uint32_t)ok;
+    if (rawMvOut) *rawMvOut = pinMv;
+    return (pinMv / 1000.0f) / rak::kBattDivider * rak::kBattCorrection;
 }
 
 // 방전 곡선 표에서 잔량을 찾는다. 표 사이는 직선으로 잇는다 (firmware-rak batteryPercent 그대로)
@@ -249,6 +258,11 @@ static float batteryPercent(float volts) {
     return 0.0f;   // 여기까지 오면 표가 잘못 적힌 것이다
 }
 static float gBattPct = 0.0f;
+
+// diagnostics.cpp 가 부른다 (firmware-rak 과 같은 이름 — 헤더를 서로 물지 않게 함수로 준다)
+void  sailFeedWatchdog() { feedWatchdog(); }
+float sailReadBatteryVolts(uint32_t* mv) { return readBatteryVolts(mv); }
+float sailBatteryPercent(float volts) { return batteryPercent(volts); }
 static constexpr float kBattWarnVolts = 3.0f;   // 저전압 경고 (사용자 결정, firmware-rak main.cpp:65)
 
 // ── 자세·방위 (firmware-rak 과 같은 식 · 같은 입력) ────────────────────────
@@ -613,6 +627,7 @@ static void recOnResult(const recctl::SessionResult& r, uint32_t now) {
 static void recControlTick(uint32_t now) {
     recctl::SessionResult r;
     if (hlog::poll(&r)) recOnResult(r, now);
+    if (power::offTick(now)) return;   // 끄기를 기다리는 중 — 닫히면 power 가 잠든다
     const recctl::Phase ph = hlog::phase();
     if (ph == recctl::Phase::Recording) {
         if (gRecRestarts && now - hlog::recStartedMs() >= kRecRestartOkMs) gRecRestarts = 0;
@@ -738,6 +753,425 @@ static sail::Telemetry buildTelemetry(uint32_t ms) {
     return t;
 }
 
+// ── NVS float (아두이노 Preferences putFloat = 4바이트 blob) ───────────────
+static bool nvPutFloat(nvs_handle_t h, const char* k, float v) { return nvs_set_blob(h, k, &v, sizeof v) == ESP_OK; }
+
+// 기록 중에는 방위·자력·힐·피치 설정을 못 바꾼다 (firmware-rak 2777, 2026-09-15 검토 4번).
+// HLG 머리글은 시작 때 설정 하나만 담는다. 도중에 바꾸면 보드 화면·워치와 앱 재생이 어긋난다.
+static bool settingsLockedWhileRecording(const char* what) {
+    if (hlog::phase() == recctl::Phase::Idle) return false;
+    printf("[설정] %s — 기록 중에는 못 바꿉니다 (파일 머리글과 어긋남). rec off 뒤에 바꾸세요.\n", what);
+    return true;
+}
+
+// ── 자력계 치우침 빼기 — magcal (firmware-rak 2101-2125, 2783-2914) ─────────
+// 잰 값 = 지구 자기장 + 보드 쇠붙이가 만드는 상수. 점들이 공 껍질에 놓이고 밀린 중심이 그 상수다.
+// 서로 6 µT 이상 떨어진 점만 128개까지 — 가만히 있으면 안 쌓이고, 골고루 돌려야 찬다.
+static constexpr int   kMagCalMax    = 128;
+static constexpr float kMagCalMinGap = 6.0f;   // µT
+static int16_t  gMagCalPts[kMagCalMax][3];     // 0.1 µT 단위
+static int      gMagCalN  = 0;
+static bool     gMagCalOn = false;
+static uint32_t gMagCalSaidAt = 0;
+
+static void magCalCollect() {
+    if (!gMagCalOn || gMagCalN >= kMagCalMax) return;
+    const imu::Vec& r = imu::magRaw();   // 빼기 전 원본
+    for (int i = 0; i < gMagCalN; i++) {
+        const float dx = r.x - gMagCalPts[i][0] * 0.1f;
+        const float dy = r.y - gMagCalPts[i][1] * 0.1f;
+        const float dz = r.z - gMagCalPts[i][2] * 0.1f;
+        if (dx * dx + dy * dy + dz * dz < kMagCalMinGap * kMagCalMinGap) return;
+    }
+    gMagCalPts[gMagCalN][0] = (int16_t)lroundf(r.x * 10.0f);
+    gMagCalPts[gMagCalN][1] = (int16_t)lroundf(r.y * 10.0f);
+    gMagCalPts[gMagCalN][2] = (int16_t)lroundf(r.z * 10.0f);
+    gMagCalN++;
+}
+
+// firmware-rak imuUpdate 는 새 자력 표본이 오면 그 자리에서 magCalCollect 를 불렀다
+static void imuUpdateCollect() {
+    if (imu::update()) magCalCollect();
+}
+
+static bool magCalSave() {
+    const float* o = imu::magOffset();
+    const float r = imu::magRadius(), res = imu::magResid();
+    return nv::writeWith([&](nvs_handle_t h) {
+        return nvPutFloat(h, "mag_ox", o[0]) && nvPutFloat(h, "mag_oy", o[1]) && nvPutFloat(h, "mag_oz", o[2]) &&
+               nvPutFloat(h, "mag_r", r) && nvPutFloat(h, "mag_res", res);
+    });
+}
+
+static void magCalSpread(float out[3]) {
+    for (int c = 0; c < 3; c++) {
+        int16_t lo = 32767, hi = -32768;
+        for (int i = 0; i < gMagCalN; i++) {
+            if (gMagCalPts[i][c] < lo) lo = gMagCalPts[i][c];
+            if (gMagCalPts[i][c] > hi) hi = gMagCalPts[i][c];
+        }
+        out[c] = gMagCalN ? (hi - lo) * 0.1f : 0.0f;
+    }
+}
+
+static void magCalStatus(char* out, size_t n) {
+    const float* o = imu::magOffset();
+    if (gMagCalOn) {
+        float sp[3]; magCalSpread(sp);
+        snprintf(out, n, "magcal on %d/%d  퍼짐 %.0f/%.0f/%.0f uT", gMagCalN, kMagCalMax, sp[0], sp[1], sp[2]);
+    } else if (o[0] != 0.0f || o[1] != 0.0f || o[2] != 0.0f) {
+        snprintf(out, n, "magcal off  치우침 %.1f %.1f %.1f uT  반지름 %.1f  남은흔들림 %.2f",
+                 o[0], o[1], o[2], imu::magRadius(), imu::magResid());
+    } else {
+        snprintf(out, n, "magcal off  아직 안 잼 (magcal on 으로 시작)");
+    }
+}
+
+// 명령 처리. 답 한 줄을 out 에 쓴다. 시리얼·BLE 공용.
+// ★ firmware-rak 은 clear/stop 이 기록 중이라 막힐 때 out 을 안 채운 채 돌아가, 부르는 쪽이 채워지지 않은 버퍼를 찍었다.
+//   여기서는 out 을 빈 줄로 시작한다 (잠금 이유는 settingsLockedWhileRecording 이 이미 찍었다).
+static void magCalCmd(const char* arg, char* out, size_t n) {
+    if (n) out[0] = '\0';
+    if (!strcmp(arg, "on") || !strcmp(arg, "start")) {
+        if (gMagCalOn) {
+            // 이미 모으는 중이면 지우지 않는다. 두 번 눌렀다고 날리면 사람은 왜 0 인지 모른다.
+            snprintf(out, n, "magcal 이미 모으는 중 %d/%d — 계속 돌리세요 (다시 시작하려면 magcal reset)", gMagCalN, kMagCalMax);
+            return;
+        }
+        gMagCalN = 0; gMagCalOn = true; gMagCalSaidAt = 0;
+        snprintf(out, n, "magcal 시작 — 사방으로 천천히 돌리세요. %d점", kMagCalMax);
+        return;
+    }
+    if (!strcmp(arg, "reset")) {
+        gMagCalN = 0; gMagCalOn = true; gMagCalSaidAt = 0;
+        snprintf(out, n, "magcal 처음부터 다시 — %d점", kMagCalMax);
+        return;
+    }
+    if (!strcmp(arg, "clear")) {
+        if (settingsLockedWhileRecording("magcal clear")) return;
+        imu::setMagOffset(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        const bool ok = magCalSave();
+        snprintf(out, n, ok ? "magcal 지웠습니다 (치우침 0)" : "magcal 지웠지만 보드에 못 적었습니다");
+        return;
+    }
+    if (!strcmp(arg, "stop")) {
+        if (settingsLockedWhileRecording("magcal stop")) return;
+        if (!gMagCalOn) { snprintf(out, n, "magcal 모으는 중이 아닙니다 — magcal on 부터 누르세요"); return; }
+        // 너무 적으면 끄지 않는다. 꺼버리면 다시 처음부터 모아야 한다.
+        if (gMagCalN < 20) {
+            snprintf(out, n, "magcal 아직 %d점뿐 — 스무 개 넘게 필요합니다. 계속 돌리세요", gMagCalN);
+            return;
+        }
+        // ★ 후보를 따로 풀고 조건을 모두 통과해야만 쓴다 (magcal.h)
+        magcal::Fit fit;
+        const magcal::Verdict v = magcal::fitAndJudge((const int16_t (*)[3])gMagCalPts, gMagCalN, &fit);
+        if (v != magcal::Verdict::Ok) {
+            snprintf(out, n, "magcal 안 씀 — %s | 후보 반지름 %.1f 잔차 %.2f 두께 %.1f uT | 점 %d | 기존 보정 그대로%s",
+                     magcal::verdictText(v), fit.r, fit.resid, fit.thickness, gMagCalN,
+                     gMagCalN >= kMagCalMax ? " — magcal reset 뒤 사방으로 다시" : " — 계속 돌리세요");
+            return;
+        }
+        gMagCalOn = false;
+        imu::setMagOffset(fit.c[0], fit.c[1], fit.c[2], fit.r, fit.resid);
+        const bool saved = magCalSave();
+        const float* o = imu::magOffset();
+        snprintf(out, n, "magcal %s — 치우침 %.1f %.1f %.1f uT | 반지름 %.1f±%.2f uT | 두께 %.1f | 점 %d",
+                 saved ? "저장" : "적용(보드에 못 적음)", o[0], o[1], o[2], imu::magRadius(), imu::magResid(),
+                 fit.thickness, gMagCalN);
+        return;
+    }
+    magCalStatus(out, n);
+}
+
+// 모으는 동안 1초에 한 번 알려준다. ★ BLE 로도 보낸다 — 워치·폰이 막대로 그린다 (2026-09-10 사용자)
+static void magCalTick(uint32_t ms) {
+    if (!gMagCalOn) return;
+    if (ms - gMagCalSaidAt < 1000) return;
+    gMagCalSaidAt = ms;
+    float sp[3]; magCalSpread(sp);
+    char msg[120];
+    snprintf(msg, sizeof msg, "magcal %d/%d  퍼짐 %.0f/%.0f/%.0f uT%s", gMagCalN, kMagCalMax, sp[0], sp[1], sp[2],
+             gMagCalN >= kMagCalMax ? "  다 찼습니다" : "");
+    ble::controlSay(msg);   // 시리얼과 BLE 양쪽으로
+}
+
+// ── level · calib (firmware-rak 2353-2447) ──────────────────────────────────
+// 지금 자세를 평형 기준각으로 삼고 NVS 에 남긴다. 운영 설정을 바꾸는 곳은 이 함수 하나다.
+static bool setLevelFromNow() {
+    imuUpdateCollect();
+    gHeelOffsetDeg  = rawTiltDeg(gHeelAxis, gHeelSign);
+    gPitchOffsetDeg = rawTiltDeg(gPitchAxis, gPitchSign);
+    return nv::writeWith([](nvs_handle_t h) {
+        return nvPutFloat(h, "heel_off2", gHeelOffsetDeg) && nvPutFloat(h, "pitch_off", gPitchOffsetDeg);
+    });
+}
+
+static void doLevel() {
+    if (!imu::ok()) { printf("[IMU] 붙어 있지 않습니다.\n"); return; }
+    const bool saved = setLevelFromNow();
+    const AxisName hAx(gHeelAxis, gHeelSign), pAx(gPitchAxis, gPitchSign);
+    printf("──────────────────────────────────────────\n");
+    printf("  지금 자세를 평형으로 삼았습니다.\n");
+    printf("  힐   가속 %s  기준각 %+.1f°  →  지금 %+.1f°\n", hAx.text, gHeelOffsetDeg, currentHeelDeg());
+    printf("  피치 가속 %s  기준각 %+.1f°  →  지금 %+.1f°\n", pAx.text, gPitchOffsetDeg, currentPitchDeg());
+    printf("%s\n", saved ? "  NVS 에 저장했습니다. 다시 구워도 남습니다." : "  ★ NVS 에 못 적었습니다 — 껐다 켜면 옛 기준각");
+    printf("──────────────────────────────────────────\n");
+    printf("  ★ 배를 물에 띄우고 평형일 때 다시 한 번 잡으세요.\n");
+    printf("    책상에서 잡은 기준은 배 위에서 맞지 않습니다.\n");
+}
+
+// 자이로 0점 다시 잡기. 자이로만 만진다 — 배가 기울어 있어도 안전하다. 멈춰 있기만 하면 된다.
+static void doCalib() {
+    if (!imu::ok()) { printf("[IMU] 붙어 있지 않습니다.\n"); return; }
+    printf("──────────────────────────────────────────\n");
+    printf("  자이로 0점을 다시 잡습니다. 보드를 움직이지 마세요.\n");
+    printf("  (기울어 있어도 괜찮습니다. 멈춰 있기만 하면 됩니다)\n");
+    if (imu::calibrateGyro(/*persist=*/true)) printf("  됐습니다. 이제 가만히 두면 자이로가 0 근처로 나옵니다.\n");
+    else                                      printf("  다시 해보세요. 손을 떼고 보드가 멈춘 뒤에 치면 됩니다.\n");
+    printf("──────────────────────────────────────────\n");
+}
+
+// ── hdgtilt — 기울기 보정이 제대로 되는지 손으로 기울여 확인 (firmware-rak 2930-3012) ──
+// ★ 이 명령으로 축·부호가 맞다고 확정할 수는 없다. 확인은 아는 방위에서 hdg ref.
+static void doHeadingTilt() {
+    if (!imu::magOk()) { printf("[HDG] 자력계가 없습니다.\n"); return; }
+    const hdg::HeadingCfg cfg = hdgCfgNow();
+    const uint8_t d = (uint8_t)(3 - gHdgAxisA - gHdgAxisB);
+    const char* nm[3] = {"X", "Y", "Z"};
+    printf("──────────────────────────────────────────\n");
+    printf("  기울기 보정 방위 확인 — 5초. 뱃머리는 두고 좌우로 기울여 보세요.\n");
+    printf("  자력계 축 배정   앞 %s%s   오른쪽 %s%s   아래 %s%s\n",
+           gHdgSignB < 0 ? "-" : "+", nm[gHdgAxisB], gHdgSignA > 0 ? "-" : "+", nm[gHdgAxisA],
+           hdg::downSign(cfg) < 0 ? "-" : "+", nm[d < 3 ? d : 0]);
+    printf("  ※ 힐은 보정에 쓰는 중력 기준입니다 (heel 축 설정이 아님).\n");
+    printf("  ──────────────────────────────────────\n");
+    printf("      힐     피치     평평     보정     차이    자력크기\n");
+    const uint32_t t0 = nowMs();
+    float flatS[32], tiltS[32];
+    int flatN = 0, tiltN = 0, rows = 0;
+    float magMin = 9999, magMax = -9999;
+    const float yaw0 = gYawIntDeg;
+    float rollMin = 999, rollMax = -999;
+    while (nowMs() - t0 < 5000) {
+        // ★ FIFO 를 여기서 안 퍼 오면 가속도계가 얼어붙은 채로 자력계만 움직인다 (2026-09-09)
+        imuDrain();
+        imuUpdateCollect();
+        const float flat = flatHeadingDeg(), tilt = headingTiltDeg();
+        if (flat >= 0.0f && flatN < 32) flatS[flatN++] = flat;
+        if (tilt >= 0.0f && tiltN < 32) tiltS[tiltN++] = tilt;
+        float roll = NAN, pitch = NAN;
+        const imu::Vec& a = imu::acc();
+        const float acc[3] = {a.x, a.y, a.z};
+        if (hdg::gravityRollPitch(acc, cfg, &roll, &pitch)) {
+            const float rd = roll * 180.0f / (float)M_PI;
+            if (rd < rollMin) rollMin = rd;
+            if (rd > rollMax) rollMax = rd;
+        }
+        const imu::Vec& m = imu::mag();
+        const float mm = sqrtf(m.x * m.x + m.y * m.y + m.z * m.z);
+        if (mm < magMin) magMin = mm;
+        if (mm > magMax) magMax = mm;
+        printf("  %+6.1f  %+6.1f   %5.1f°   %5.1f°   %+5.1f°   %5.1f\n", roll * 180.0f / (float)M_PI,
+               pitch * 180.0f / (float)M_PI, flat, tilt, (flat >= 0.0f && tilt >= 0.0f) ? wrap180(tilt - flat) : NAN, mm);
+        ++rows;
+        delayMs(250);
+        feedWatchdog();
+    }
+    const float flatSp = hdg::circularSpread(flatS, flatN);
+    const float tiltSp = hdg::circularSpread(tiltS, tiltN);
+    printf("  ──────────────────────────────────────\n");
+    printf("  흔들린 폭(원형)   평평 %.1f° (%d/%d줄)   보정 %.1f° (%d/%d줄)\n", flatSp, flatN, rows, tiltSp, tiltN, rows);
+    printf("  기울인 폭   %.0f°  (%.0f° 에서 %.0f° 까지)\n", rollMax - rollMin, rollMin, rollMax);
+    if (rollMax - rollMin < 40.0f)       printf("  ※ 기울기가 모자랍니다. 좌우로 40° 넘게 흔들어야 비교할 수 있습니다.\n");
+    else if (tiltN < rows / 2)           printf("  ※ 보정 방위가 절반 넘게 무효입니다 — 흔들 때 가속이 1 g 에서 0.15 g 넘게 벗어났습니다. 천천히.\n");
+    else if (tiltSp < flatSp * 0.6f)     printf("  보정한 쪽이 덜 흔들립니다 — 기울기 영향은 줄었습니다.\n");
+    else                                 printf("  ※ 보정한 쪽이 덜 흔들리지 않습니다 — 축·치우침을 확인하세요.\n");
+    printf("  ★ 흔들림 폭으로는 축 부호를 확정할 수 없습니다. 아는 방위 네 곳에서 hdg ref <참 방위>.\n");
+    printf("  돌아간 각   %+.1f°  (자이로 100 Hz 적분)\n", gYawIntDeg - yaw0);
+    printf("  자력 크기   %.1f ~ %.1f µT   흔들림 %.0f%%\n", magMin, magMax,
+           magMax > 0 ? (magMax - magMin) * 100.0f / magMax : 0.0f);
+    printf("%s\n", ((magMax - magMin) > magMax * 0.15f) ? "  ★ 크기가 15% 넘게 변합니다 — 하드아이언 보정이 먼저입니다."
+                                                        : "  자력 크기는 거의 일정합니다.");
+    printf("  ※ 한국의 지구 자기장은 약 50 µT 입니다. 크게 벗어나면 주변 쇠붙이\n");
+    printf("    때문입니다. 책상·노트북에서 떨어진 데서 다시 해보세요.\n");
+    printf("──────────────────────────────────────────\n");
+}
+
+// ── scan — I2C 두 버스 훑기 (firmware-rak 548-641) ─────────────────────────
+// I2C1 은 IMU·화면이 쓰는 버스를 그대로 두드린다 (i2c_master_probe). firmware-rak 은 Wire.begin(…, 100 kHz) 로 다시 열었다.
+// I2C2(17/18) 는 이 판에서 아무도 안 쓰니 잠깐 만들고 지운다.
+static bool gSawDisplay = false;
+static bool gSawImu     = false;
+
+static const char* guessI2CDevice(uint8_t addr) {
+    switch (addr) {
+        case 0x3C: return "★ SSD1306 화면 — RAK1921 (J12 헤더)";
+        case 0x68: return "★ MPU-9250 IMU — RAK1905";
+        case 0x0C: return "★ AK8963 자력계 — RAK1905 안에 들어있음";
+        case 0x3D: return "SSD1306 화면 (주소 점퍼가 반대쪽)";
+        case 0x69: return "MPU-9250 (AD0 가 HIGH) 또는 다른 IMU";
+        case 0x18:
+        case 0x19: return "LIS3DH 가속도 (RAK1904)";
+        case 0x1D:
+        case 0x53: return "ADXL 계열 가속도";
+        case 0x0D: return "자력계 (BMM150 등)";
+        case 0x76:
+        case 0x77: return "BME280/BMP280/BME680 환경센서";
+        case 0x42: return "u-blox GNSS (RAK12500)";
+        case 0x51:
+        case 0x52: return "RTC";
+        case 0x28:
+        case 0x29: return "BNO055 자세센서 또는 거리센서";
+        default:   return "";
+    }
+}
+
+static int scanBus(i2c_master_bus_handle_t bus, const char* label, int sda, int scl) {
+    printf("  %s (SDA GPIO%d / SCL GPIO%d)\n", label, sda, scl);
+    if (!bus) { printf("    (버스를 못 열었습니다)\n"); return 0; }
+    int found = 0;
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        if (i2c_master_probe(bus, addr, 50) == ESP_OK) {
+            const char* guess = guessI2CDevice(addr);
+            printf("    0x%02X  %s\n", addr, guess[0] ? guess : "(알 수 없음)");
+            if (addr == rak::kAddrDisplay) gSawDisplay = true;
+            if (addr == rak::kAddrImu)     gSawImu     = true;
+            found++;
+        }
+        feedWatchdog();
+    }
+    if (found == 0) printf("    (응답 없음)\n");
+    return found;
+}
+
+static void doScan() {
+    gSawDisplay = false; gSawImu = false;
+    printf("──────────────────────────────────────────\n");
+    printf("  I2C 스캔 — 센서 전원 %s\n", gSensorPowerPin ? "ON" : "OFF (power 명령으로 켜세요)");
+    if (!imu::bus()) imu::begin();
+    const int a = scanBus(imu::bus(), "I2C1 — 센서 슬롯 A~D + J12 헤더", rak::kI2C1_SDA, rak::kI2C1_SCL);
+    i2c_master_bus_config_t cfg = {};
+    cfg.i2c_port = -1;                      // 빈 포트를 알아서 고른다
+    cfg.sda_io_num = static_cast<gpio_num_t>(rak::kI2C2_SDA);
+    cfg.scl_io_num = static_cast<gpio_num_t>(rak::kI2C2_SCL);
+    cfg.clk_source = I2C_CLK_SRC_DEFAULT;
+    cfg.glitch_ignore_cnt = 7;
+    cfg.flags.enable_internal_pullup = true;
+    i2c_master_bus_handle_t bus2 = nullptr;
+    if (i2c_new_master_bus(&cfg, &bus2) != ESP_OK) bus2 = nullptr;
+    const int b = scanBus(bus2, "I2C2 — 코어 커넥터에서 끝나는 버스", rak::kI2C2_SDA, rak::kI2C2_SCL);
+    if (bus2) i2c_del_master_bus(bus2);
+
+    printf("──────────────────────────────────────────\n");
+    printf("  화면 RAK1921 (0x%02X)  %s\n", rak::kAddrDisplay, gSawDisplay ? "보임" : "안 보임");
+    printf("  IMU  RAK1905 (0x%02X)  %s\n", rak::kAddrImu, gSawImu ? "보임" : "안 보임");
+    printf("  GPS(UART)와 SD(SPI)는 I2C 가 아니라 여기 안 나옵니다.\n");
+    printf("──────────────────────────────────────────\n");
+    printf("  ※ IMU 는 항상 켜져 있는 VDD 를 쓴다. 전원 스위치와 무관하다.\n");
+    printf("    전원 핀 판정은 scan 이 아니라 gps 명령으로 한다.\n");
+    printf("──────────────────────────────────────────\n");
+    if (a + b == 0) {
+        printf("  아무것도 안 잡혔습니다. 모듈이 덜 꽂혔는지 보세요.\n");
+        printf("  (IMU 조차 안 보이면 I2C 배선 자체를 의심할 상황입니다)\n");
+    } else if (!gSawDisplay) {
+        printf("  화면이 안 보입니다. J12 헤더에 꽂혀 있는지 보세요.\n");
+        printf("  (센서 슬롯이 아니라 2.54mm I2C 핀헤더입니다)\n");
+    }
+    if (gSawDisplay && sail::displayBegin()) printf("  화면을 붙였습니다 — 값이 바로 나옵니다.\n");
+}
+
+// ── help (firmware-rak printHelp 4239-4306 글자 그대로) ─────────────────────
+static void printHelp() {
+    printf("──────────────────────────────────────────\n");
+    printf("  name <이름>   보드 이름 설정 (최대 11자, 영숫자/-/_)\n");
+    printf("                예) name hojun  →  SAIL-hojun\n");
+    printf("  hz <1~100>    notify 주기 설정. 예) hz 20  (기본 10)\n");
+    printf("  boat <0~32>   로라 배 번호. 0 은 번호 없음. 예) boat 7\n");
+    printf("  lora          로라 상태 (주파수·전파시간·받은 개수)\n");
+    printf("  lora on       로라 켜기\n");
+    printf("  lora regs     칩 버그 세 개가 실제로 걸렸는지 레지스터로 확인\n");
+    printf("  lora rssi     이 주파수의 바닥 잡음. 보드 한 대로 하는 확인\n");
+    printf("  lora tx       시험 삼아 하나 보내기\n");
+    printf("  lora watch    받을 때마다 한 줄씩 뱉기 (두 대로 시험할 때)\n");
+    printf("  info          현재 설정 출력\n");
+    printf("\n");
+    printf("  ── 보드 진단 ──\n");
+    printf("  power %-2d      센서 전원을 GPIO%d 로 (datasheet 쪽)\n", rak::kSensorPowerA, rak::kSensorPowerA);
+    printf("  power %-2d      센서 전원을 GPIO%d 로 (pins_arduino.h 쪽)\n", rak::kSensorPowerB, rak::kSensorPowerB);
+    printf("  power off     센서 전원 끄기\n");
+    printf("  check         ★ 아래를 한 번에 — 처음엔 이것부터\n");
+    printf("  fix           GPS 파싱 상태 (위성 수, 위치, 속도, 침로)\n");
+    printf("  imu           9축 값 5초 출력 — 기울여 보세요\n");
+    printf("  scan          I2C — 화면 RAK1921(0x3C) / IMU RAK1905(0x68)\n");
+    printf("  oledw         화면에 쓸 한글 줄의 폭을 잰다 (128px 안에 드나)\n");
+    printf("  hdgtilt       기울기 보정 방위 확인 — 손으로 기울이며 5초 본다\n");
+    printf("  magcal        자력계 치우침 재기. on / stop / clear (BLE 로도 됨)\n");
+    printf("  off           보드를 끈다 (깊은잠). 버튼 5초 누르면 켜진다\n");
+    printf("  sleepstat     지난번에 정말 잤나 — 헛깬 횟수·잔 시간·3V3_S\n");
+    printf("  sd            SD카드 마운트 + 쓰기 시험\n");
+    printf("  sdbench [줄수] SD 쓰기 속도·최대 멈춤 실측 (기본 3600줄)\n");
+    printf("  rec           ★ 기록 상태. rec on / rec off / rec mark\n");
+    printf("  rec ls / rec check [번호]   파일 목록 / 되읽어 검사\n");
+    printf("  rec tail [번호] [줄수]      TXT 사본 끝줄 (전압·멈춤·버퍼)\n");
+    printf("  rec rm <번호>               그 세션 파일을 지운다 (못 되돌린다)\n");
+    printf("  pin <번호>    그 GPIO 를 5초 지켜본다 (버튼 달 자리 찾기)\n");
+    printf("  wifi          ★ 기록 파일을 WiFi 로 내보내기. wifi ap / join / off\n");
+    printf("  oled          화면을 나중에 꽂았을 때 다시 붙이기\n");
+    printf("  gps           UART1 원시 NMEA 5초 (GPS 가 슬롯 A)\n");
+    printf("  gps d         같은 것 (GPS 가 슬롯 D — IO6 로 리셋 해제)\n");
+    printf("  gpshz <1|2|5|10> GPS 갱신율 (기본 5). 실제로 걸렸는지 세어 줍니다\n");
+    printf("  gpscfg        모듈에 실제로 걸린 설정을 되물어봅니다\n");
+    printf("  smooth <0~5>  속도·침로 다듬기 세기 (0 원본, 기본 2)\n");
+    printf("  dead <kn>     잡음 바닥. 이보다 작은 속도는 0 (기본 0.10)\n");
+    printf("  navpv         NMEA 거치기 전 속도를 RMC 와 나란히 (navpv l 은 길게)\n");
+    printf("  gpscfg mode <0~7>  움직임 종류 (0휴대 1정지 2보행 3자동차 4선박)\n");
+    printf("  gpscfg static <m/s> 정지로 볼 속도 문턱값\n");
+    printf("  nmea <본문>   NMEA 명령을 보내고 응답을 봅니다 (체크섬 자동)\n");
+    printf("  batt          배터리 전압 실측\n");
+    printf("  tz [분]       파일 이름에 쓸 시각 기울기 (기본 540 = 한국)\n");
+    printf("  sess [번호]   세션 번호 보기·고치기 (NVS 에 남는다)\n");
+    printf("  usbbench [KB] USB 시리얼 속도 실측 (기본 512 KB)\n");
+    printf("  level         ★ 지금 자세를 힐·피치 0° 로 삼기 (배가 평형일 때)\n");
+    printf("  heel [x|y|z]  힐을 어느 가속도 축에서 볼지 (앞에 - 로 뒤집기)\n");
+    printf("  hdg <A> <B>   방위를 만들 자력계 두 축. 예) hdg -z x\n");
+    printf("  hdg off <도>  방위 0점 보정 (자기 편각 + 보드 어긋남)\n");
+    printf("  pitch [x|y|z] 피치를 어느 가속도 축에서 볼지\n");
+    printf("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)\n");
+    printf("  status        한 줄 상태 / loopstat  루프가 어디에 시간을 쓰나\n");
+    printf("  battboot      켠 뒤 1초마다 담은 배터리 값\n");
+    printf("  wifi ssid/pass <값>   망 이름·비밀번호를 NVS 에 넣는다\n");
+    printf("  wifi scan / status / idle <초> / off\n");
+    printf("  help          이 도움말  (전체 목록은 저장소 COMMANDS.md)\n");
+    printf("──────────────────────────────────────────\n");
+    printf("  붙어 있는 것:  GPS 슬롯A · IMU 슬롯C · 화면 J12 · SD IO슬롯\n");
+    printf("  값이 없으면 --- 로 나옵니다. 지어낸 값(시뮬레이터)은 없습니다.\n");
+    printf("──────────────────────────────────────────\n");
+}
+
+// ── 한 바퀴에 얼마나 걸리나 — loopstat (firmware-rak 3676-3702) ─────────────
+static inline uint32_t microsNow() { return (uint32_t)esp_timer_get_time(); }
+static bool     gLoopStat = false;
+static uint32_t gLoopCount = 0;
+static uint32_t gLoopMaxUs = 0;
+struct SecStat { uint32_t maxUs = 0; uint32_t sumUs = 0; };
+static SecStat gStGps, gStImu, gStNotify, gStDraw, gStLog;
+static inline void secDone(SecStat& st, uint32_t us) {
+    if (us > st.maxUs) st.maxUs = us;
+    st.sumUs += us;
+}
+static void loopStatPrint(uint32_t elapsedMs) {
+    if (!gLoopStat) return;
+    const float sec = elapsedMs / 1000.0f;
+    printf("   루프  %.0f바퀴/초  한 바퀴 최대 %.1fms\n", gLoopCount / sec, gLoopMaxUs / 1000.0f);
+    printf("   ├ GPS읽기 최대 %5.1fms  합 %5.1fms/초\n", gStGps.maxUs / 1000.0f, gStGps.sumUs / 1000.0f / sec);
+    printf("   ├ IMU읽기 최대 %5.1fms  합 %5.1fms/초\n", gStImu.maxUs / 1000.0f, gStImu.sumUs / 1000.0f / sec);
+    printf("   ├ notify  최대 %5.1fms  합 %5.1fms/초\n", gStNotify.maxUs / 1000.0f, gStNotify.sumUs / 1000.0f / sec);
+    printf("   ├ 화면    최대 %5.1fms  합 %5.1fms/초\n", gStDraw.maxUs / 1000.0f, gStDraw.sumUs / 1000.0f / sec);
+    printf("   └ 기록    최대 %5.1fms  합 %5.1fms/초\n", gStLog.maxUs / 1000.0f, gStLog.sumUs / 1000.0f / sec);
+    gLoopCount = 0; gLoopMaxUs = 0;
+    gStGps = gStImu = gStNotify = gStDraw = gStLog = SecStat();
+}
+
 // ── BLE 제어 특성으로 들어온 줄 (firmware-rak controlLine, main.cpp 4015-4150) ──
 // ★ 콜백이 아니라 루프가 부른다. ble.cpp 콜백은 줄을 베껴 두기만 한다.
 // 아직 없는 것: magcal — firmware-rak 이 모르는 줄에 하던 대로 "err unknown" 으로 답한다.
@@ -856,6 +1290,13 @@ static void controlLine(const char* raw) {
         ble::controlSay(out);
         return;
     }
+    // 자력계 치우침. **시리얼과 같은 함수를 부른다** — 말이 어긋날 수가 없다.
+    if (!strcmp(line, "magcal") || !strncmp(line, "magcal ", 7)) {
+        char msg[200];
+        magCalCmd(strlen(line) > 7 ? line + 7 : "", msg, sizeof msg);
+        if (msg[0]) ble::controlSay(msg);
+        return;
+    }
     if (!strcmp(line, "help")) {
         ble::controlSay("cmds: wifi ssid|pass|scan|on|ap|off|status | magcal on|stop|clear");
         return;
@@ -925,7 +1366,7 @@ static void doImu() {
             feedWatchdog();
             delayMs(10);
         }
-        imu::update();
+        imuUpdateCollect();
         printImuLine();
     }
     imu::diagEnd();
@@ -1055,6 +1496,358 @@ static void cmdRec(const char* arg) {
     printf("  rec rm <번호>     그 세션의 HLG·TXT 를 지운다 (못 되돌린다)\n");
 }
 
+// ── 7단계 power 가 부를 메인 쪽 함수 (power.h Hooks) ────────────────────────
+// 센서 전원 핀이 바뀌면(power 명령) 다시 부른다.
+static void installPowerHooks() {
+    power::Hooks ph;
+    ph.readBatteryVolts = []() { return readBatteryVolts(); };
+    ph.feedWatchdog     = feedWatchdog;
+    ph.pollRecResult    = []() { recctl::SessionResult r; if (hlog::poll(&r)) recOnResult(r, nowMs()); };
+    ph.recWantOff       = recWantOff;
+    ph.recWantOn        = recWantOn;
+    ph.dropWantIfSet    = []() {
+        if (gWantRec || gRecGaveUp) { gWantRec = false; gRecGaveUp = false; gRecRestartAt = 0; recSaveWant(false); }
+    };
+    ph.clearWantFlag    = []() { gWantRec = false; };
+    ph.recStartErrShort = []() -> const char* { hlog::Status st; hlog::getStatus(&st); return st.lastErrorShort; };
+    ph.sensorPowerPin   = gSensorPowerPin;
+    power::setHooks(ph);
+}
+
+// ── 설정·진단 명령 몸통 (firmware-rak handleCommand 에서 그대로) ────────────
+
+// hdg — 방위를 만드는 두 축 · 장착 오프셋 · 편각 · 아는 방위와 대조 (firmware-rak 4783-4888)
+static bool parseAxisTok(const char* t, uint8_t* axis, float* sign) {
+    *sign = 1.0f;
+    if (*t == '-') { *sign = -1.0f; ++t; }
+    else if (*t == '+') { ++t; }
+    if (!strcmp(t, "x")) { *axis = 0; return true; }
+    if (!strcmp(t, "y")) { *axis = 1; return true; }
+    if (!strcmp(t, "z")) { *axis = 2; return true; }
+    return false;
+}
+
+static void cmdHdg(const char* rest) {
+    char arg[64];
+    restTrim(rest, 0, arg, sizeof arg);
+    for (char* p = arg; *p; ++p) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+
+    if (!strncmp(arg, "off", 3) || !strncmp(arg, "decl", 4)) {
+        // ★ 숫자만 받고 범위를 본다. 옛 코드는 1e10 을 저장해 방위 정규화가 끝나지 않아 루프가 멎었다.
+        const bool isDecl = !strncmp(arg, "decl", 4);
+        char v[32];
+        restTrim(arg, isDecl ? 4 : 3, v, sizeof v);
+        float deg = 0.0f;
+        const float lim = isDecl ? 30.0f : 360.0f;
+        if (!hdg::parseNumber(v, &deg) || deg < -lim || deg > lim) {
+            if (isDecl) printf("  hdg decl <도>   자기 편각, 동편 +·서편 − (-30~30). 예) hdg decl -8.5\n");
+            else        printf("  hdg off <도>    장착 오프셋 (-360~360). 예) hdg off 12.5\n");
+            return;
+        }
+        if (settingsLockedWhileRecording(isDecl ? "hdg decl" : "hdg off")) return;
+        if (!isDecl) deg = hdg::wrap180(deg);
+        (isDecl ? gHdgDeclDeg : gHdgOffsetDeg) = deg;
+        const bool ok = nv::writeWith([&](nvs_handle_t h) { return nvPutFloat(h, isDecl ? "hdg_decl" : "hdg_off", deg); });
+        printf("[IMU] %s %+.2f°%s\n", isDecl ? "자기 편각" : "장착 오프셋", deg, ok ? "" : " — ★ 보드에 못 적었습니다");
+    } else if (!strncmp(arg, "ref", 3)) {
+        // 아는 방위(참 방위)에 대고 두 방위의 오차를 본다. 네 방향에서 해야 뜻이 있다.
+        char v[32];
+        restTrim(arg, 3, v, sizeof v);
+        float ref = 0.0f;
+        if (!hdg::parseNumber(v, &ref) || ref < 0.0f || ref >= 360.0f) {
+            printf("  hdg ref <참 방위 0~359>   예) 부두 방향이 045° 면 hdg ref 45\n");
+            return;
+        }
+        imuDrain();
+        imuUpdateCollect();
+        const float flat = flatHeadingDeg(), tilt = headingTiltDeg();
+        printf("──────────────────────────────────────────\n");
+        if (flat >= 0.0f) printf("  기준 %.1f°   평평 %.1f° (오차 %+.1f°)\n", ref, flat, wrap180(flat - ref));
+        else              printf("  기준 %.1f°   평평 --- (자력 새 표본 없음)\n", ref);
+        if (tilt >= 0.0f) printf("               보정 %.1f° (오차 %+.1f°)  ← 화면·BLE·기록에 쓰는 값\n", tilt, wrap180(tilt - ref));
+        else              printf("               보정 --- (자력 없음 또는 가속이 1 g 에서 벗어남)\n");
+        printf("  수평으로 두고 0°·90°·180°·270° 네 방향에서 해 보세요.\n");
+        printf("    오차가 네 방향 모두 비슷하다   → 상수다. hdg off / hdg decl 로 뺀다\n");
+        printf("    방향마다 다르다 (특히 부호가 바뀐다) → 축·부호·자력 치우침 문제다\n");
+        printf("──────────────────────────────────────────\n");
+        return;
+    } else if (arg[0]) {
+        char* sp = strchr(arg, ' ');
+        if (!sp || sp == arg) {
+            printf("  hdg <A> <B>   예) hdg -z x   (앞에 - 를 붙이면 뒤집기)\n");
+            printf("  hdg off <도>  0점 보정\n");
+            return;
+        }
+        *sp = '\0';
+        char ta[16], tb[16];
+        restTrim(arg, 0, ta, sizeof ta);
+        restTrim(sp + 1, 0, tb, sizeof tb);
+        uint8_t a = 0, b = 0; float sa = 1.0f, sb = 1.0f;
+        if (!parseAxisTok(ta, &a, &sa) || !parseAxisTok(tb, &b, &sb)) {
+            printf("  축은 x y z 중에서 고르세요. 예) hdg -z x\n");
+            return;
+        }
+        if (a == b) { printf("  두 축이 같으면 방위가 안 나옵니다. 서로 다른 축이어야 합니다.\n"); return; }
+        if (settingsLockedWhileRecording("hdg 축")) return;
+        gHdgAxisA = a; gHdgAxisB = b; gHdgSignA = sa; gHdgSignB = sb;
+        const bool ok = nv::writeWith([&](nvs_handle_t h) {
+            return nvs_set_u8(h, "hdg_a", a) == ESP_OK && nvs_set_u8(h, "hdg_b", b) == ESP_OK &&
+                   nvs_set_i8(h, "hdg_sa", sa < 0 ? -1 : 1) == ESP_OK && nvs_set_i8(h, "hdg_sb", sb < 0 ? -1 : 1) == ESP_OK;
+        });
+        if (!ok) printf("  ★ 보드에 못 적었습니다 — 껐다 켜면 옛 축\n");
+    }
+
+    imuUpdateCollect();
+    const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
+    const imu::Vec& m = imu::mag();
+    printf("──────────────────────────────────────────\n");
+    printf("  지금 자력  %+.1f %+.1f %+.1f µT\n", m.x, m.y, m.z);
+    const float hNow = flatHeadingDeg(), hBoat = boatHeadingDeg();
+    if (hNow >= 0.0f)
+        printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  %.1f°  (진단용)\n",
+               aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg, hNow);
+    else
+        printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  --- (자력 새 표본 없음)\n",
+               aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg);
+    if (hBoat >= 0.0f) printf("  방위  기울기 보정 (화면·BLE·기록)  →  %.1f°\n", hBoat);
+    else               printf("  방위  기울기 보정 (화면·BLE·기록)  →  --- (자력 없음 또는 가속이 1 g 에서 벗어남)\n");
+    char ago[40];
+    const uint32_t lc = imu::magLastChangeMs();
+    if (lc) snprintf(ago, sizeof ago, "%lu ms 전 바뀜", (unsigned long)(nowMs() - lc));
+    else    snprintf(ago, sizeof ago, "없음");
+    printf("  자력 표본  새 %lu · 반복 %lu · 짧음 %lu · 넘침 %lu · 0벡터 %lu · 마지막 새 표본 %s\n",
+           (unsigned long)imu::magCount(0), (unsigned long)imu::magCount(1), (unsigned long)imu::magCount(2),
+           (unsigned long)imu::magCount(3), (unsigned long)imu::magCount(4), ago);
+    printf("  공장 감도값 ASA %02X %02X %02X  →  계수 %.4f %.4f %.4f\n",
+           imu::asaRaw(0), imu::asaRaw(1), imu::asaRaw(2), imu::asa(0), imu::asa(1), imu::asa(2));
+    printf("──────────────────────────────────────────\n");
+    printf("  케이스를 평평하게 두고 제자리에서 한 바퀴 돌려 보세요.\n");
+    printf("  수평인 두 축은 크게 오르내리고, 위아래 축은 거의 그대로입니다.\n");
+}
+
+// heel · pitch — 힐·피치를 어느 가속도 축에서 볼지 (firmware-rak 4890-4946)
+static void cmdHeelPitch(const char* line) {
+    const bool isHeel = !strncmp(line, "heel", 4);
+    // 값만 보는 heel · pitch 는 된다. 축·부호를 바꾸는 heel -y 같은 것만 막는다.
+    if ((!strncmp(line, "heel ", 5) || !strncmp(line, "pitch ", 6)) &&
+        settingsLockedWhileRecording(isHeel ? "heel 축" : "pitch 축")) return;
+    const char* what = isHeel ? "힐" : "피치";
+    uint8_t& axisRef = isHeel ? gHeelAxis : gPitchAxis;
+    float&   signRef = isHeel ? gHeelSign : gPitchSign;
+    float&   offRef  = isHeel ? gHeelOffsetDeg : gPitchOffsetDeg;
+
+    char arg[16];
+    restTrim(line, isHeel ? 4 : 5, arg, sizeof arg);
+    if (arg[0]) {
+        float sign = 1.0f;
+        char* t = arg;
+        if (*t == '-') { sign = -1.0f; ++t; }
+        else if (*t == '+') { ++t; }
+        for (char* p = t; *p; ++p) if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+        int axis = -1;
+        if (!strcmp(t, "x")) axis = 0;
+        else if (!strcmp(t, "y")) axis = 1;
+        else if (!strcmp(t, "z")) axis = 2;
+        if (axis < 0) {
+            const char* w = isHeel ? "heel" : "pitch";
+            printf("[IMU] %s x | %s y | %s z (앞에 - 를 붙이면 뒤집기)\n", w, w, w);
+            return;
+        }
+        axisRef = (uint8_t)axis;
+        signRef = sign;
+        offRef  = 0.0f;   // 축을 바꾸면 옛 기준각은 다른 축에서 잡은 값이라 뜻이 없다
+        nv::writeWith([&](nvs_handle_t h) {
+            return nvs_set_u8(h, isHeel ? "heel_axis" : "pitch_axis", axisRef) == ESP_OK &&
+                   nvs_set_i8(h, isHeel ? "heel_sgn" : "pitch_sgn", sign < 0.0f ? -1 : 1) == ESP_OK &&
+                   nvPutFloat(h, isHeel ? "heel_off2" : "pitch_off", 0.0f);
+        });
+        printf("  기준각은 0 으로 되돌렸습니다. 평형일 때 level 을 다시 치세요.\n");
+    }
+
+    imuUpdateCollect();
+    const AxisName hAx(gHeelAxis, gHeelSign), pAx(gPitchAxis, gPitchSign);
+    const imu::Vec& a = imu::acc();
+    printf("──────────────────────────────────────────\n");
+    printf("  지금 가속   %+.2f %+.2f %+.2f g\n", a.x, a.y, a.z);
+    printf("  힐    가속 %s  기준각 %+.1f°  →  %+.1f° (기준각 빼기 전 %+.1f°)\n",
+           hAx.text, gHeelOffsetDeg, currentHeelDeg(), rawTiltDeg(gHeelAxis, gHeelSign));
+    printf("  피치  가속 %s  기준각 %+.1f°  →  %+.1f° (기준각 빼기 전 %+.1f°)\n",
+           pAx.text, gPitchOffsetDeg, currentPitchDeg(), rawTiltDeg(gPitchAxis, gPitchSign));
+    printf("──────────────────────────────────────────\n");
+    printf("  배가 평형일 때 %s 축이 0 g 에 가까워야 맞는 축입니다.\n", what);
+    printf("  남은 한 축이 위아래를 향하는 축이라 ±1 g 를 읽습니다.\n");
+}
+
+// dead <kn> — 잡음 바닥 (firmware-rak 5013-5037)
+static void cmdDead(const char* line) {
+    char a[32];
+    restTrim(line, 4, a, sizeof a);
+    const gps::State& gs = gps::state();
+    if (a[0]) {
+        const bool numeric = isdigit((unsigned char)a[0]) || a[0] == '.';   // toFloat 은 글자여도 0 을 준다
+        const float v = strtof(a, nullptr);
+        if (!numeric || !std::isfinite(v) || v < 0.0f || v > 2.0f) { printf("  0 ~ 2.0 kn 사이 숫자로 주세요\n"); return; }
+        gps::setDeadbandKn(v);
+        if (!nv::writeWith([v](nvs_handle_t h) { return nvPutFloat(h, "dead_kn", v); }))
+            printf("  ★ 보드에 못 적었습니다 — 껐다 켜면 옛 값으로 돌아갑니다\n");
+    }
+    printf("──────────────────────────────────────────\n");
+    printf("  잡음 바닥  %.2f kn — 이보다 작으면 0 으로 보여줍니다\n", gs.deadbandKn);
+    printf("  도플러의 이론 잡음이 초당 몇 cm(=0.1 kn 언저리)라서 기본값이 0.10 입니다.\n");
+    printf("  Velocitek ProStart V2 가 파는 물건의 사양도 ±0.1 kn 입니다.\n");
+    if (gs.fix) printf("  지금  다듬은 값 %.2f  →  보여주는 값 %.2f kn\n", gs.sogDamped, gps::sogOut());
+    printf("──────────────────────────────────────────\n");
+}
+
+// smooth <0~5> — 다듬기 세기 (firmware-rak 5040-5064)
+static void cmdSmooth(const char* line) {
+    char a[16];
+    restTrim(line, 6, a, sizeof a);
+    const gps::State& gs = gps::state();
+    if (a[0]) {
+        if (strlen(a) != 1 || !isdigit((unsigned char)a[0])) { printf("  0~5 중에서 고르세요\n"); return; }
+        const int lv = a[0] - '0';
+        if (lv < 0 || lv > 5) { printf("  0~5 중에서 고르세요\n"); return; }
+        gps::setDampLevel((uint8_t)lv);
+        gps::resetDamping();
+        if (!nv::writeWith([lv](nvs_handle_t h) { return nvs_set_u8(h, "damp", (uint8_t)lv) == ESP_OK; }))
+            printf("  ★ 보드에 못 적었습니다 — 껐다 켜면 옛 값으로 돌아갑니다\n");
+    }
+    printf("──────────────────────────────────────────\n");
+    printf("  다듬기 세기  %u단계  (시상수 %.1f초)\n", gs.dampLevel, gps::kDampTau[gs.dampLevel <= 5 ? gs.dampLevel : 2]);
+    printf("  0 없음 / 1 0.3초 / 2 0.6초 / 3 1.2초 / 4 2.5초 / 5 5초\n");
+    printf("  잔잔하면 낮게, 물결이 거칠면 높게. 요트 계기들이 쓰는 방식이다.\n");
+    if (gs.fix)
+        printf("  지금  원본 %.2f kn %5.1f°  →  다듬은 값 %.2f kn %5.1f°\n",
+               gps::parser().speed.knots(), gps::parser().course.deg(), gs.sogDamped, gs.cogDamped);
+    printf("──────────────────────────────────────────\n");
+}
+
+// sess [번호] — 세션 번호 보기·고치기 (firmware-rak 4396-4409)
+static void cmdSess(const char* line) {
+    nv::writeWith([&](nvs_handle_t h) {
+        if (strlen(line) > 5) {
+            const uint32_t n = (uint32_t)strtol(line + 5, nullptr, 10);
+            nvs_set_u32(h, "sess_n", n);
+            printf("[SESS] 다음 세션은 %u 번부터 (카드에 더 큰 번호가 있으면 그 다음으로 올라갑니다)\n", (unsigned)(n + 1));
+        }
+        printf("[SESS] 마지막으로 쓴 번호 %u\n", (unsigned)nv::u32(h, "sess_n", 0));
+        return true;
+    });
+}
+
+// tz [분] — 파일 이름에 쓸 시각 기울기 (firmware-rak 4415-4443)
+static void cmdTz(const char* line) {
+    int32_t cur = 540;
+    nv::writeWith([&](nvs_handle_t h) {
+        if (strlen(line) > 3) {
+            const int32_t m = (int32_t)strtol(line + 3, nullptr, 10);
+            if (m < -720 || m > 840) printf("[TZ] -720 ~ 840 분 사이여야 합니다.\n");
+            else {
+                nvs_set_i32(h, "tz_min", m);
+                printf("[TZ] %+d분 (%+.1f시간) 으로 두었습니다.\n", (int)m, m / 60.0f);
+            }
+        }
+        cur = nv::i32(h, "tz_min", 540);
+        return true;
+    });
+    printf("[TZ] 지금 %+d분 (%+.1f시간). 파일 이름에만 쓰입니다.\n", (int)cur, cur / 60.0f);
+    const time_t tnow = time(nullptr);
+    if (tnow > 1600000000) {
+        struct tm t; gmtime_r(&tnow, &t);
+        printf("[TZ] 보드 시계 %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+               t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+    } else {
+        printf("[TZ] 보드 시계가 아직 안 맞았습니다 — 위성을 잡으면 맞습니다.\n");
+    }
+}
+
+// pin <번호> — 그 GPIO 를 5초 지켜본다 (firmware-rak 4448-4498)
+static void cmdPin(const char* line) {
+    const int g = (int)strtol(line + 4, nullptr, 10);
+    if (!GPIO_IS_VALID_GPIO(g)) { printf("[PIN] GPIO%d 는 없는 번호입니다\n", g); return; }
+    const gpio_num_t gn = static_cast<gpio_num_t>(g);
+    gpio_set_direction(gn, GPIO_MODE_INPUT);
+    // 풀업 HIGH · 풀다운 LOW 여야 비어 있다. 풀업만 보면 아무것도 안 물린 핀과 못 가른다.
+    gpio_set_pull_mode(gn, GPIO_PULLUP_ONLY);   delayMs(20); const int up   = gpio_get_level(gn);
+    gpio_set_pull_mode(gn, GPIO_PULLDOWN_ONLY); delayMs(20); const int down = gpio_get_level(gn);
+    gpio_set_pull_mode(gn, GPIO_PULLUP_ONLY);   delayMs(20);
+    printf("[PIN] GPIO%d  풀업 %s · 풀다운 %s  → %s\n", g, up ? "HIGH" : "LOW", down ? "HIGH" : "LOW",
+           (up && !down) ? "비어 있음 (버튼 달 수 있다)" : (!up && !down) ? "무언가 LOW 로 잡고 있다"
+           : (up && down) ? "무언가 HIGH 로 잡고 있다" : "이상한 값");
+    printf("[PIN] GPIO%d 를 5초 봅니다 (내부 풀업). 눌러 보세요.\n", g);
+    int last = gpio_get_level(gn);
+    uint32_t changes = 0, lowMs = 0;
+    const uint32_t t0 = nowMs();
+    uint32_t lastT = t0;
+    while (nowMs() - t0 < 5000) {
+        const int v = gpio_get_level(gn);
+        if (v != last) {
+            const uint32_t now2 = nowMs();
+            if (!last) lowMs += now2 - lastT;
+            lastT = now2;
+            last = v;
+            ++changes;
+        }
+        esp_rom_delay_us(200);
+        if ((nowMs() - t0) % 1000 == 0) feedWatchdog();
+    }
+    printf("[PIN] 바뀐 횟수 %u,  LOW 로 있던 시간 %u ms,  지금 %s\n", (unsigned)changes, (unsigned)lowMs, last ? "HIGH" : "LOW");
+    if (changes == 0 && !last) {
+        printf("      ★ 풀업을 걸었는데 LOW 입니다. 누가 이 선을 끌어내리고\n");
+        printf("        있습니다. 버튼을 달면 눌린 것과 구별이 안 됩니다.\n");
+    } else if (changes == 0) {
+        printf("      아무도 안 건드립니다 — 버튼 달아도 됩니다.\n");
+    } else if (changes >= 8) {
+        printf("      ★ 누가 이 선을 흔들고 있습니다 (PPS 같은 것). 다른 핀을 쓰세요.\n");
+    } else {
+        printf("      몇 번 바뀌었습니다. 누른 게 아니라면 다른 핀을 쓰세요.\n");
+    }
+}
+
+// usbbench [KB] — USB 시리얼 속도 실측 (firmware-rak 4508-4526)
+static void cmdUsbBench(const char* line) {
+    uint32_t kb = 512;
+    if (strlen(line) > 9) kb = (uint32_t)strtol(line + 9, nullptr, 10);
+    if (kb < 1) kb = 1;
+    if (kb > 8192) kb = 8192;
+    static uint8_t buf[1024];
+    memset(buf, '.', sizeof buf);
+    printf("BENCH START %lu\n", (unsigned long)kb);
+    fflush(stdout);
+    const uint32_t t0 = nowMs();
+    for (uint32_t i = 0; i < kb; i++) { fwrite(buf, 1, sizeof buf, stdout); if ((i & 63) == 0) feedWatchdog(); }
+    fflush(stdout);
+    const uint32_t dt = nowMs() - t0;
+    printf("\nBENCH END %lu KB  %.2f초  %.0f KB/초\n", (unsigned long)kb, dt / 1000.0f, dt ? kb * 1000.0f / dt : 0.0f);
+}
+
+// power [14|2|off] — 센서 전원 핀 (firmware-rak 5112-5149)
+static void cmdPower(const char* line) {
+    char arg[16];
+    restTrim(line, 5, arg, sizeof arg);
+    if (!arg[0]) { printIdentity(); return; }
+    int pin;
+    if (!strcmp(arg, "off")) {
+        pin = 0;
+    } else {
+        pin = (int)strtol(arg, nullptr, 10);
+        if (pin != rak::kSensorPowerA && pin != rak::kSensorPowerB) {
+            printf("[PWR] %d 은 후보가 아닙니다. %d, %d, off 중에서 고르세요.\n", pin, rak::kSensorPowerA, rak::kSensorPowerB);
+            return;
+        }
+        // 후보 B(GPIO2)는 저장 버튼과 같은 핀이다. 막는다.
+        if (pin == rak::kAin1) { printf("[PWR] GPIO%d 은 저장 버튼 자리입니다. 못 씁니다.\n", pin); return; }
+    }
+    gSensorPowerPin = pin;
+    installPowerHooks();   // 잠들 때 끌 핀이 바뀌었다
+    applySensorPower(pin, /*cycle=*/true);
+    // 전원을 껐다 켰으니 GPS 가 기본값으로 돌아갔다 — 휴대(0), NAV-PV 끔. 켤 때와 같은 절차로 다시 건다.
+    if (pin) { gps::applyNavPv(); gps::applyBoatMode(); }
+    nv::writeWith([pin](nvs_handle_t h) { return nvs_set_i32(h, "pwr_pin", pin) == ESP_OK; });
+    if (pin) printf("[PWR] 이어서 scan 을 쳐서 모듈이 보이는지 확인하세요.\n");
+}
+
 static void handleLine(char* line) {
     while (*line == ' ') ++line;
     size_t n = strlen(line);
@@ -1106,6 +1899,68 @@ static void handleLine(char* line) {
         return;
     }
     if (!strcmp(line, "info")) { printIdentity(); return; }
+    if (!strcmp(line, "help") || !strcmp(line, "?")) { printHelp(); return; }
+    if (!strcmp(line, "batt"))      { diag::batteryReport(); return; }
+    if (!strcmp(line, "sleepstat")) { diag::sleepReport(power::sleepStats()); return; }
+    if (!strcmp(line, "battboot"))  { power::battBootReport(gBattVolts); return; }
+    if (!strcmp(line, "off"))       { power::requestPowerOff(false); return; }
+    // 닫기가 15초 넘게 안 끝났을 때 사람이 고르는 길. 끝이 잘린다 (단추로는 5초 한 번 더)
+    if (!strcmp(line, "off force")) { power::requestPowerOff(true); return; }
+    if (!strncmp(line, "off ", 4)) {   // `off 120` — 120초 뒤 스스로 깬다 (시험용)
+        if (hlog::phase() != recctl::Phase::Idle) { printf("[SLEEP] 기록 중에는 시험 잠자기를 못 합니다. rec off 먼저.\n"); return; }
+        power::goToSleep((uint32_t)strtol(line + 4, nullptr, 10));
+        return;
+    }
+    if (!strcmp(line, "sd"))        { if (sdFreeFor("sd")) diag::sdCheck(); return; }
+    // SD 쓰기 속도 실측. 기본 3600줄 = 10 Hz 로 6분치.
+    if (!strcmp(line, "sdbench") || !strncmp(line, "sdbench ", 8)) {
+        long n = (strlen(line) > 8) ? strtol(line + 8, nullptr, 10) : 3600;
+        if (n < 100) n = 100;
+        if (n > 2000000) n = 2000000;
+        if (sdFreeFor("sdbench")) diag::sdBench((uint32_t)n);
+        return;
+    }
+    // 붙어 있는 것을 한 번에 훑는다. 보드를 처음 구웠을 때 이것부터 친다.
+    if (!strcmp(line, "check")) {
+        if (!sdFreeFor("check") || !blockingDiagOk("check")) return;
+        printf("\n");
+        printf("════ 모듈 전체 점검 ════\n");
+        printIdentity();
+        doScan();
+        doImu();
+        diag::sdCheck();
+        gps::printFix();
+        printf("════ 점검 끝 ════\n");
+        printf("  안 잡힌 게 있으면 power 값을 바꿔 다시 check 하세요.\n");
+        return;
+    }
+    if (!strcmp(line, "scan"))     { doScan(); return; }
+    if (!strcmp(line, "hdgtilt"))  { if (blockingDiagOk("hdgtilt")) doHeadingTilt(); return; }
+    if (!strcmp(line, "magcal") || !strncmp(line, "magcal ", 7)) {
+        char msg[200];
+        magCalCmd(strlen(line) > 7 ? line + 7 : "", msg, sizeof msg);
+        if (msg[0]) printf("  %s\n", msg);
+        return;
+    }
+    if (!strcmp(line, "sess") || !strncmp(line, "sess ", 5)) { cmdSess(line); return; }
+    if (!strcmp(line, "tz") || !strncmp(line, "tz ", 3))     { cmdTz(line); return; }
+    if (!strncmp(line, "pin ", 4))                            { cmdPin(line); return; }
+    if (!strcmp(line, "usbbench") || !strncmp(line, "usbbench ", 9)) { cmdUsbBench(line); return; }
+    if (!strcmp(line, "loopstat")) {
+        gLoopStat = !gLoopStat;
+        printf("[STAT] 루프 시간 출력 %s\n", gLoopStat ? "켬" : "끔");
+        return;
+    }
+    if (!strcmp(line, "calib"))    { doCalib(); return; }
+    if (!strcmp(line, "level"))    { if (!settingsLockedWhileRecording("level")) doLevel(); return; }
+    if (!strcmp(line, "hdg") || !strncmp(line, "hdg ", 4)) { cmdHdg(line + 3); return; }
+    if (!strcmp(line, "heel") || !strncmp(line, "heel ", 5) || !strcmp(line, "pitch") || !strncmp(line, "pitch ", 6)) {
+        cmdHeelPitch(line);
+        return;
+    }
+    if (!strncmp(line, "dead", 4))   { cmdDead(line); return; }
+    if (!strncmp(line, "smooth", 6)) { cmdSmooth(line); return; }
+    if (!strncmp(line, "power", 5))  { cmdPower(line); return; }
     // WiFi 로 기록 파일 내보내기 (firmware-rak main.cpp 4529-4590). 자세히는 netsrv.h
     if (!strcmp(line, "wifi") || !strncmp(line, "wifi ", 5)) {
         char orig[64] = "";
@@ -1263,6 +2118,11 @@ extern "C" void app_main(void) {
     usb_serial_jtag_driver_install(&ucfg);
     usb_serial_jtag_vfs_use_driver();
 
+    // ★ 제일 먼저 한다. 깊은잠에서 깼으면 5초를 채웠는지 여기서 가른다. 못 채웠으면 이 안에서 도로 잠든다.
+    //   플래시에 쓰기 전, 워치독을 걸기 전이어야 한다 (firmware-rak setup 5517 wakeGate).
+    installPowerHooks();
+    power::wakeGate();
+
     esp_err_t err = nvs_flash_init();
     if (err != ESP_OK) printf("[BOOT] ★ NVS 초기화 실패 %s — 지우지 않는다\n", esp_err_to_name(err));
 
@@ -1289,6 +2149,7 @@ extern "C" void app_main(void) {
     }
 
     loadSettings();
+    installPowerHooks();   // NVS 의 센서 전원 핀을 읽었다
     ble::loadIdentity();   // NVS name · notify_ms
     logBoot();
 
@@ -1296,6 +2157,8 @@ extern "C" void app_main(void) {
     applySensorPower(gSensorPowerPin, /*cycle=*/true);
 
     batteryInit();
+    // 깬 뒤에는 분압 마디 콘덴서가 비어 전압이 낮게 나온다. 1초면 찬다 (firmware-rak 5588, 2026-09-08 battboot 실측)
+    if (power::wokeFromSleep()) { delayMs(1000); feedWatchdog(); }
     gBattVolts = readBatteryVolts();
     gBattPct   = batteryPercent(gBattVolts);
 
@@ -1304,9 +2167,12 @@ extern "C" void app_main(void) {
         return nvs_set_u32(h, "boot_n", n + 1) == ESP_OK;
     });
     hlog::begin();
+    // 깊은잠에서 깼으면 그 기록부터 남긴다. 사람이 명령을 안 쳐도 남게.
+    power::reportAfterBoot();
 
     gps::setWaitHook(waitHook);
     gps::begin();
+    power::buttonBegin();
 
     if (imu::gyrNeedSave()) {
         const bool ok = imu::saveGyrOffsets();
@@ -1343,18 +2209,24 @@ extern "C" void app_main(void) {
     bool ledOn = false;
     for (;;) {
         const uint32_t now = nowMs();
+        const uint32_t loopT0 = microsNow();
         // 코어 0 받기 일꾼이 링버퍼에 넣어 둔 것을 꺼낸다. 안 꺼내면 64개 뒤로 버린다
         lora::pump();
         pollSerial();
         netsrv::poll();
 
         // GPS 는 쉬지 않고 읽는다. UART 버퍼가 넘치면 문장 중간이 잘린다.
-        gps::poll();
+        { const uint32_t t = microsNow(); gps::poll(); secDone(gStGps, microsNow() - t); }
 
         // 10 ms 마다 FIFO 를 퍼 온다. 값 사이 간격은 칩이 만든 10 ms 그대로다.
-        if (now - lastImuFast >= 10) { lastImuFast = now; imuDrain(); }
+        if (now - lastImuFast >= 10) {
+            const uint32_t t = microsNow();
+            lastImuFast = now;
+            imuDrain();
+            secDone(gStImu, microsNow() - t);
+        }
         // 10 Hz — 자력계까지
-        if (now - lastImu >= 100) { lastImu = now; imu::update(); }
+        if (now - lastImu >= 100) { lastImu = now; imuUpdateCollect(); }
 
         // 이어 시작한 뒤 1분 넘게 멀쩡히 돌면 세던 것을 지운다
         if (gResumeTries && hlog::recording() && now - hlog::recStartedMs() >= kResumeOkMs) {
@@ -1380,7 +2252,18 @@ extern "C" void app_main(void) {
         const bool want = hlog::recording() && (now % 1000) < 80;
         if (want != ledOn) { ledOn = want; gpio_set_level(static_cast<gpio_num_t>(rak::kLedGreen), want); }
 
-        if (hlog::recording() && now - lastText >= 10000) { lastText = now; logWriteText(now); }
+        if (hlog::recording() && now - lastText >= 10000) {
+            lastText = now;
+            const uint32_t t = microsNow();
+            logWriteText(now);
+            secDone(gStLog, microsNow() - t);
+        }
+
+        // 자력계 치우침을 재는 중이면 1초에 한 번 진행을 알려준다
+        magCalTick(now);
+        // 켠 뒤 20초 동안 배터리 값을 1초마다 담는다 (battboot) · 저장 버튼
+        power::battBootTick(now);
+        power::buttonPoll(now);
 
         // 항법 10 Hz — 칸을 더해 나간다. 많이 밀렸으면 지금부터.
         const uint32_t navMs = 1000u / hlog::kRateNav;
@@ -1429,7 +2312,12 @@ extern "C" void app_main(void) {
                 ds.gpsFix       = gs.fix;
                 ds.satellites   = p.satellites.isValid() ? (int)p.satellites.value() : 0;
                 ds.hdop         = p.hdop.isValid() ? (float)p.hdop.hdop() : -1.0f;
-                sail::displayUpdate(ds);   // 버튼 막대(gBtnOwnsScreen)는 7단계에서
+                // 버튼이 막대를 그리고 있으면 평소 계기 화면은 건너뛴다. 안 그러면 4 Hz 로 막대를 지운다.
+                if (!power::buttonOwnsScreen()) {
+                    const uint32_t tD = microsNow();
+                    sail::displayUpdate(ds);
+                    secDone(gStDraw, microsNow() - tD);
+                }
             }
         }
 
@@ -1443,7 +2331,9 @@ extern "C" void app_main(void) {
             if (now - lastNotify >= period) {
                 lastNotify += period;
                 if (now - lastNotify >= period * 5) lastNotify = now;
+                const uint32_t tN = microsNow();
                 ble::publish(buildTelemetry(now), buildExtra());
+                secDone(gStNotify, microsNow() - tN);
             }
             if (now - lastAdv >= sail::kAdvRefreshMs) { lastAdv = now; ble::refreshAdvPayload(); }
         }
@@ -1456,6 +2346,46 @@ extern "C" void app_main(void) {
             if (want == 1) netsrv::startJoin();
             else if (want == 2) netsrv::startAP();
             else netsrv::stop();
+        }
+
+        // 1 Hz — 시리얼 로그 (firmware-rak 5882-5923). 값 옆에 그 값이 어디서 왔는지 붙인다.
+        {
+            static uint32_t lastLog = 0;
+            if (now - lastLog >= sail::kLogPeriodMs) {
+                lastLog = now;
+                const sail::Telemetry& lt = ble::latest();
+                char sogTxt[16], cogTxt[16], heelTxt[16];
+                if (lt.sogValid)  snprintf(sogTxt, sizeof sogTxt, "%5.2f", lt.sogKn);
+                else              snprintf(sogTxt, sizeof sogTxt, "%5s", "--.--");
+                if (lt.cogValid)  snprintf(cogTxt, sizeof cogTxt, "%5.1f", lt.cogDeg);
+                else              snprintf(cogTxt, sizeof cogTxt, "%5s", "---");
+                if (lt.heelValid) snprintf(heelTxt, sizeof heelTxt, "%+6.1f", lt.heelDeg);
+                else              snprintf(heelTxt, sizeof heelTxt, "%6s", "---");
+                // 움직임 종류 한 글자 — 늘 찍는다. h 휴대 · s 정지 · p 보행 · c 자동차 · b 선박 · ? 모름
+                const uint8_t dm = gps::state().dyModel;
+                const char modeCh = dm == 0 ? 'h' : dm == 1 ? 's' : dm == 2 ? 'p' : dm == 3 ? 'c' : dm == 4 ? 'b' : '?';
+                printf("[%7.1fs] %s | SOG %c %s kn | COG %s° | HEEL %s° | BATT %3d%% %.2fV | seq %3u | %s%s\n",
+                       now / 1000.0f, ble::fullName(), modeCh, sogTxt, cogTxt, heelTxt,
+                       (int)sail::encodeBatt(lt.battPct), gBattVolts, (unsigned)ble::seq(),
+                       ble::connected() ? "CONNECTED" : "ADVERTISING",
+                       ble::connected() ? (ble::subscribed() ? " (notify ON)" : " (notify OFF)") : "");
+                gps::printLine();
+                if (gps::state().fix) {
+                    char pos[16];
+                    if (gps::state().sogFromPos >= 0) snprintf(pos, sizeof pos, "%.2f", gps::state().sogFromPos);
+                    else                              snprintf(pos, sizeof pos, " --- ");
+                    printf("   속도 비교  도플러 %5.2f kn  |  위치차분 %s kn\n", gps::parser().speed.knots(), pos);
+                }
+                printImuLine();
+                loopStatPrint(sail::kLogPeriodMs);
+            }
+        }
+
+        // 한 바퀴에 얼마나 걸렸나
+        {
+            const uint32_t dt = microsNow() - loopT0;
+            if (dt > gLoopMaxUs) gLoopMaxUs = dt;
+            ++gLoopCount;
         }
 
         feedWatchdog();   // 여기까지 왔으면 살아 있다

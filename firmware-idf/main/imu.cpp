@@ -759,6 +759,7 @@ float readTempC() {
 bool ok() { return sImuOk; }
 bool magOk() { return sMagOk; }
 bool magFresh() { return sMagOk && sMagFreshness.usable(millis32()); }
+uint32_t magLastChangeMs() { return sMagFreshness.lastChangeMs; }
 bool fifoOn() { return sFifoOn; }
 const Vec& acc() { return sAcc; }
 const Vec& gyr() { return sGyr; }

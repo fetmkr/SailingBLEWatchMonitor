@@ -945,4 +945,7 @@ void rateCommand(long hz) {
     }
 }
 
+// smooth 명령이 세기를 바꾼 뒤 부른다 (firmware-rak smooth → dampingReset)
+void resetDamping() { dampingReset(); }
+
 } // namespace gps

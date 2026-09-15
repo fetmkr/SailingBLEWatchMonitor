@@ -107,6 +107,7 @@ float readTempC();
 bool ok();
 bool magOk();
 bool magFresh();
+uint32_t magLastChangeMs();       // 자력 값이 마지막으로 바뀐 때 (0 = 없음). hdg 명령이 찍는다
 bool fifoOn();
 const Vec& acc();
 const Vec& gyr();

@@ -366,4 +366,7 @@ void controlSay(const char* line) {
     sControlChr->notify();
 }
 
+// 1 Hz 시리얼 줄에 찍는 manufacturer data 시퀀스 (firmware-rak gSeq)
+uint8_t seq() { return sSeq; }
+
 } // namespace ble
