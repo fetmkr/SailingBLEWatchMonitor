@@ -157,7 +157,7 @@ function renderList(now: number) {
   const list = [...boats.values()].sort((a, b) => a.boat - b.boat);
   $("fleetCount").textContent = `${list.filter((b) => now - b.receivedAt <= 3000).length}척 수신`;
   if (!list.length) {
-    box.innerHTML = `<div class="fleet-empty"><b>아직 들린 배가 없습니다</b><span>수신 보드를 연결하고 장거리 수신을 켜세요.</span></div>`;
+    box.innerHTML = `<div class="fleet-empty"><b>아직 들린 배가 없습니다</b><span>오른쪽 보드 칸에서 수신 보드를 연결하세요.</span></div>`;
     return;
   }
   box.innerHTML = list.map((b) => {
@@ -235,6 +235,7 @@ function render() {
   }
   $("fleetLinkName").textContent = linkedName || "수신 보드 연결 안 됨";
   $("fleetLinkName").closest(".fleet-link-row")?.classList.toggle("connected", !!link);
+  $("fleetLinkName").closest(".fleet-board-block")?.classList.toggle("connected", !!link);
   $("fleetDisconnect").toggleAttribute("hidden", !link);
 }
 
@@ -288,6 +289,7 @@ async function connectBoard(board: ble.Board) {
     link = fresh;
     opening = null;
     linkedName = board.name;
+    boards = []; renderReceivers();
     boats.clear(); selected = []; firstPosition = true;
     setState(`${board.name} · LoRa 수신 중`, "good");
     render();

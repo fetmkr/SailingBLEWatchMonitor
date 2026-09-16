@@ -207,15 +207,8 @@
       <aside id="fleetListPane">
         <div class="fleet-pane-head">
           <div><b>함대</b><span id="fleetCount">0척 수신</span></div>
-          <button id="fleetScan">수신 보드 찾기</button>
         </div>
-        <div class="fleet-link-row">
-          <span><i></i><b id="fleetLinkName">수신 보드 연결 안 됨</b></span>
-          <button id="fleetDisconnect" class="ghost" hidden>연결 끊기</button>
-        </div>
-        <div id="fleetReceivers"></div>
         <div id="fleetBoats"></div>
-        <div id="fleetState" class="dim">수신 보드를 연결하세요.</div>
       </aside>
 
       <section id="fleetMapPane">
@@ -229,6 +222,18 @@
       </section>
 
       <aside id="fleetDetailPane">
+        <section class="fleet-board-block">
+          <div class="fleet-pane-head">
+            <div><b>보드</b><span>LoRa 수신 전용</span></div>
+            <button id="fleetScan">수신 보드 찾기</button>
+          </div>
+          <div class="fleet-link-row">
+            <span><i></i><b id="fleetLinkName">수신 보드 연결 안 됨</b></span>
+            <button id="fleetDisconnect" class="ghost" hidden>연결 끊기</button>
+          </div>
+          <div id="fleetReceivers"></div>
+          <div id="fleetState" class="dim">수신 보드를 연결하세요.</div>
+        </section>
         <div class="fleet-pane-head">
           <div><b>상세 · 비교</b><span>최대 2척</span></div>
         </div>
