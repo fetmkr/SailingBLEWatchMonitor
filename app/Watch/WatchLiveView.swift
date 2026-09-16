@@ -276,12 +276,11 @@ private struct MainPage: View {
         .frame(maxWidth: .infinity)
     }
 
-    // 상단 한 줄 — REC 상태를 먼저, 연결 경로는 오른쪽에 작게 둔다.
-    // 녹색 점은 "연결됨"이 아니라 실제 SD 기록 중이라는 뜻이다.
+    // 상단 한 줄 — 주황=통신 없음, 녹색=수신 중, 빨강 점멸=SD 기록 중.
     private var statusLine: some View {
         HStack(spacing: 5) {
-            RecordingDot(recording: confirmedRecording,
-                         failed: recordingNeedsAttention,
+            RecordingDot(communicating: ble.isLive,
+                         recording: ble.isLive && ble.sample?.recording == true,
                          isDim: isDim)
             Text(recordingLabel)
                 .font(.system(size: 12, weight: .semibold))
@@ -298,28 +297,17 @@ private struct MainPage: View {
         }
     }
 
-    private var confirmedRecording: Bool? {
-        ble.isLive ? ble.sample?.recording : nil
-    }
-
-    private var recordingNeedsAttention: Bool {
-        ble.sample?.recordingFailed == true || (ble.hasPinnedModule && !ble.isLive)
-    }
-
     private var recordingLabel: String {
-        if ble.hasPinnedModule && !ble.isLive { return "REC 확인 불가" }
-        if ble.sample?.recordingFailed == true {
-            return ble.sample?.recording == true ? "REC 오류" : "REC 끊김"
-        }
+        if !ble.isLive { return "통신 없음" }
+        if ble.sample?.recordingFailed == true && ble.sample?.recording != true { return "REC 끊김" }
         if ble.sample?.recording == true { return "REC" }
-        if ble.sample?.recording == false { return "REC 꺼짐" }
-        return "REC —"
+        return "연결됨"
     }
 
     private var recordingColor: Color {
-        if recordingNeedsAttention { return .red }
-        if ble.sample?.recording == true { return .green }
-        return .secondary
+        if !ble.isLive { return .orange }
+        if ble.sample?.recording == true || ble.sample?.recordingFailed == true { return .red }
+        return .green
     }
 
     private var connectionLabel: String {
@@ -335,21 +323,21 @@ private struct MainPage: View {
     }
 }
 
-/// REC 실패는 밝은 화면에서 0.5초마다 깜박인다.
-/// Always On에서는 애니메이션이 보장되지 않으므로 빨간 점을 계속 켜 둔다.
+/// 통신은 고정색, 실제 SD 기록만 빨간색으로 깜박인다.
+/// Always On에서는 애니메이션이 보장되지 않으므로 기록 중이면 빨간 점을 계속 켜 둔다.
 private struct RecordingDot: View {
-    let recording: Bool?
-    let failed: Bool
+    let communicating: Bool
+    let recording: Bool
     let isDim: Bool
 
     var body: some View {
-        if failed && !isDim {
+        if recording && !isDim {
             TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
                 let on = Int(timeline.date.timeIntervalSinceReferenceDate * 2) % 2 == 0
                 dot(color: .red, opacity: on ? 1.0 : 0.15)
             }
         } else {
-            dot(color: failed ? .red : (recording == true ? .green : .gray), opacity: 1.0)
+            dot(color: recording ? .red : (communicating ? .green : .orange), opacity: 1.0)
         }
     }
 
@@ -445,9 +433,8 @@ private struct SettingsPage: View {
     private var recSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                RecordingDot(recording: ble.isLive ? ble.sample?.recording : nil,
-                             failed: ble.sample?.recordingFailed == true ||
-                                     (ble.hasPinnedModule && !ble.isLive),
+                RecordingDot(communicating: ble.isLive,
+                             recording: ble.isLive && ble.sample?.recording == true,
                              isDim: false)
                 Text(recStatusText)
                     .font(.caption.weight(.semibold))
@@ -503,9 +490,9 @@ private struct SettingsPage: View {
     }
 
     private var recStatusColor: Color {
-        if ble.sample?.recordingFailed == true || (ble.hasPinnedModule && !ble.isLive) { return .red }
-        if ble.sample?.recording == true { return .green }
-        return .secondary
+        if !ble.isLive { return .orange }
+        if ble.sample?.recording == true || ble.sample?.recordingFailed == true { return .red }
+        return .green
     }
 
     // ── 자력계 치우침 보정 (REQUIREMENTS B4·D3)
