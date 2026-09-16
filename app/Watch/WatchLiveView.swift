@@ -24,6 +24,7 @@
 //
 
 import SwiftUI
+import WatchKit
 
 struct WatchLiveView: View {
 
@@ -455,6 +456,7 @@ private struct SettingsPage: View {
             }
 
             Button {
+                WKInterfaceDevice.current().play(.click)
                 ble.sendControl(ble.sample?.recording == true ? "rec off" : "rec on")
             } label: {
                 Text(ble.sample?.recording == true ? "REC 정지" : "REC 시작")
@@ -465,11 +467,27 @@ private struct SettingsPage: View {
             .tint(ble.sample?.recording == true ? .red : .green)
 
             if !ble.controlReady {
-                Text("보드에 연결되면 시작·정지할 수 있습니다")
+                Text("보드에 연결되면 자동으로 명령을 보냅니다")
                     .font(.system(size: 9))
                     .foregroundStyle(.orange)
             }
+            if let reply = recentRecReply {
+                Text(reply)
+                    .font(.system(size: 9))
+                    .foregroundStyle(reply.hasPrefix("실패") ? .red : .secondary)
+            }
         }
+    }
+
+    private var recentRecReply: String? {
+        guard ble.lastControlCommand.hasPrefix("rec"),
+              let at = ble.controlReplyAt,
+              Date().timeIntervalSince(at) < 10,
+              !ble.controlReply.isEmpty else { return nil }
+        if ble.controlReply.hasPrefix("ok rec on") { return "기록을 시작했습니다" }
+        if ble.controlReply.hasPrefix("ok rec off") { return "기록을 멈추는 중입니다" }
+        if ble.controlReply.hasPrefix("err rec") { return "실패: \(ble.controlReply)" }
+        return ble.controlReply
     }
 
     private var recStatusText: String {

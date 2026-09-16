@@ -1242,6 +1242,29 @@ static void controlLine(const char* raw) {
     char out[240];
     char v[192];
 
+    // REC 시작·종료도 USB 명령과 같은 진입점을 쓴다.
+    if (!strcmp(line, "rec on") || !strcmp(line, "rec start")) {
+        const bool ok = recWantOn("BLE rec on");
+        if (ok) {
+            ble::controlSay("ok rec on");
+        } else {
+            snprintf(out, sizeof out, "err rec on %s", gRecStartErr ? gRecStartErr : "시작 실패");
+            ble::controlSay(out);
+        }
+        return;
+    }
+    if (!strcmp(line, "rec off") || !strcmp(line, "rec stop")) {
+        recWantOff("BLE rec off");
+        ble::controlSay("ok rec off");
+        return;
+    }
+    if (!strcmp(line, "rec")) {
+        snprintf(out, sizeof out, "rec %s",
+                 hlog::recording() ? "on" : (hlog::busy() ? "closing" : "off"));
+        ble::controlSay(out);
+        return;
+    }
+
     // wifi ssid <이름>
     if (!strncmp(line, "wifi ssid ", 10)) {
         restTrim(line, 10, v, sizeof v);
@@ -1342,7 +1365,7 @@ static void controlLine(const char* raw) {
         return;
     }
     if (!strcmp(line, "help")) {
-        ble::controlSay("cmds: wifi ssid|pass|scan|on|ap|off|status | magcal on|stop|clear");
+        ble::controlSay("cmds: rec on|off | wifi ssid|pass|scan|on|ap|off|status | magcal on|stop|clear");
         return;
     }
     snprintf(out, sizeof out, "err unknown %s", line);

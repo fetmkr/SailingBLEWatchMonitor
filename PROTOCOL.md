@@ -387,6 +387,8 @@ BLE 로 찾아서 BLE 로 켜라고 시킨다.
 
 | 줄 | 하는 일 |
 |---|---|
+| `rec on` / `rec off` | SD 기록 시작 / 종료 요청 |
+| `rec` | 현재 기록 상태 (`on` / `closing` / `off`) |
 | `wifi ssid <이름>` | 붙을 WiFi 이름. NVS 에 남는다 |
 | `wifi pass <비밀번호>` | 비밀번호. NVS 에 남는다 |
 | `wifi scan` | 주변 WiFi 훑기. **BLE 를 안 내리고 된다** |
@@ -399,6 +401,9 @@ BLE 로 찾아서 BLE 로 켜라고 시킨다.
 ### 돌아오는 말
 
 ```
+ok rec on
+ok rec off
+rec on
 ok wifi ssid 우리WiFi
 ok wifi pass 10자
 scan begin 8

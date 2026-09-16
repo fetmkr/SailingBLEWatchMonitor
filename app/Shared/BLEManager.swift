@@ -160,8 +160,12 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var controlReply: String = ""
     /// 그 답이 온 시각. 오래되면 화면이 흐리게 만든다.
     @Published private(set) var controlReplyAt: Date?
-    /// 제어 통로가 열려 있나. 안 열려 있으면 단추를 잠근다.
+    /// 제어 통로가 열려 있나.
     @Published private(set) var controlReady = false
+    /// 화면에서 어떤 명령의 결과인지 구분할 때 쓴다.
+    @Published private(set) var lastControlCommand = ""
+    /// 사용자가 연결 직전에 누른 명령 하나. 연결되면 바로 보낸다.
+    private var pendingControlLine: String?
 
     /// 점 수와 명령 결과를 분리한다. 저장 거절 이유가 매초 진행에 묻히면 안 된다.
     @Published private(set) var magcal = MagCalibrationState()
@@ -171,16 +175,34 @@ final class BLEManager: NSObject, ObservableObject {
     /// - 답은 `controlReply` 로 온다. 바로 안 온다 — 보드가 처리하고 알려준다.
     /// - 통로가 안 열려 있으면 조용히 버리지 않고 그 사실을 남긴다.
     func sendControl(_ line: String) {
-        guard let chr = controlChar, let p = peripheral else {
-            appendLog("제어 통로가 아직 안 열렸습니다 — \(line)")
-            controlReply = "보드에 안 붙어 있습니다"
+        lastControlCommand = line
+
+        guard pinnedModule != nil else {
+            controlReply = "먼저 보드를 선택하세요"
             controlReplyAt = Date()
-            if line.hasPrefix("magcal") { magcal.showConnectionError(controlReply) }
+            appendLog("제어 보류 — 고정한 보드 없음: \(line)")
             return
         }
+
+        guard let chr = controlChar, let p = peripheral, p.state == .connected else {
+            pendingControlLine = line
+            controlReady = false
+            controlReply = "보드 연결 중…"
+            controlReplyAt = Date()
+            appendLog("제어 보류 — 연결되면 전송: \(line)")
+            resume()
+            return
+        }
+        writeControl(line, to: p, characteristic: chr)
+    }
+
+    private func writeControl(_ line: String, to peripheral: CBPeripheral,
+                              characteristic: CBCharacteristic) {
         guard let data = (line + "\n").data(using: .utf8) else { return }
+        controlReply = "명령 전송 중…"
+        controlReplyAt = Date()
         appendLog("→ \(line)")
-        p.writeValue(data, for: chr, type: .withResponse)
+        peripheral.writeValue(data, for: characteristic, type: .withResponse)
     }
     private var housekeeping: Timer?
     private var disconnectedAt: Date?
@@ -265,6 +287,10 @@ final class BLEManager: NSObject, ObservableObject {
         }
         peripheral = nil
         telemetryChar = nil
+        controlChar = nil
+        controlReady = false
+        pendingControlLine = nil
+        lastControlCommand = ""
         sample = nil
         isLive = false
         rssi = nil
@@ -368,6 +394,8 @@ final class BLEManager: NSObject, ObservableObject {
 
     private func handleConnected(_ p: CBPeripheral) {
         stopScanIfNeeded()
+        controlChar = nil
+        controlReady = false
         state = .connected
         if let since = disconnectedAt {
             appendLog(String(format: "재연결 완료 — %.2f초 걸림", Date().timeIntervalSince(since)))
@@ -398,6 +426,8 @@ final class BLEManager: NSObject, ObservableObject {
             ModulePinStore.save(pin)
         }
         telemetryChar = nil
+        controlChar = nil
+        controlReady = false
         isLive = false
         peripheral = nil
         central.cancelPeripheralConnection(p)
@@ -567,6 +597,8 @@ extension BLEManager: CBCentralManagerDelegate {
         default:
             state = .idle
             isLive = false
+            controlChar = nil
+            controlReady = false
         }
     }
 
@@ -662,6 +694,8 @@ extension BLEManager: CBCentralManagerDelegate {
         appendLog("didDisconnect — \(error?.localizedDescription ?? "정상 종료")")
 
         telemetryChar = nil
+        controlChar = nil
+        controlReady = false
         connRateHz = 0
         connEma = 0
         connLastAt = nil   // 연결 경로는 죽었다. 광고가 있으면 그쪽으로 자동 전환된다.
@@ -730,6 +764,10 @@ extension BLEManager: CBPeripheralDelegate {
             controlReady = true
             peripheral.setNotifyValue(true, for: ctl)   // 보드의 답을 받는다
             appendLog("제어 통로 열림")
+            if let pending = pendingControlLine {
+                pendingControlLine = nil
+                writeControl(pending, to: peripheral, characteristic: ctl)
+            }
         } else {
             controlReady = false
             appendLog("제어 통로 없음 — 옛 펌웨어입니다")
@@ -785,6 +823,19 @@ extension BLEManager: CBPeripheralDelegate {
 
         ingest(decoded, from: .connection)
         if state != .connected { state = .connected }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral,
+                    didWriteValueFor characteristic: CBCharacteristic,
+                    error: Error?) {
+        guard characteristic.uuid == SailProtocol.controlUUID else { return }
+        if let error {
+            controlReply = "명령 전송 실패: \(error.localizedDescription)"
+            controlReplyAt = Date()
+            appendLog(controlReply)
+        } else {
+            appendLog("제어 쓰기 완료")
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
