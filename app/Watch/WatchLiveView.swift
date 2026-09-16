@@ -63,6 +63,7 @@ struct WatchLiveView: View {
 
 private struct DebugPage: View {
     @EnvironmentObject private var ble: BLEManager
+    @Environment(\.isLuminanceReduced) private var isDim
 
     private var extra: TelemetryExtra? { ble.sample?.extra }
 
@@ -85,25 +86,28 @@ private struct DebugPage: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            metricRow(
-                "SOG", ble.sample?.sogKnots.map { String(format: "%.2f kn", $0) } ?? "—",
-                extra?.headingIsTrue == true ? "HDG T" : "HDG M",
-                extra?.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—"
-            )
-            Divider().opacity(0.35)
-            metricRow(
-                "COG T", ble.sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—",
-                "DIF", courseDeltaText
-            )
-            Divider().opacity(0.35)
-            metricRow(
-                "HEEL", ble.sample?.heelDegrees.map { String(format: "%+d°", $0) } ?? "—",
-                "PITCH", extra.map { String(format: "%+.1f°", $0.pitchDegrees) } ?? "—"
-            )
+        VStack(spacing: 4) {
+            BoardStatusHeader(isDim: isDim)
+
+            VStack(spacing: 5) {
+                metricRow(
+                    "SOG", ble.sample?.sogKnots.map { String(format: "%.2f kn", $0) } ?? "—",
+                    extra?.headingIsTrue == true ? "HDG T" : "HDG M",
+                    extra?.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—"
+                )
+                metricRow(
+                    "COG T", ble.sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—",
+                    "DIF", courseDeltaText
+                )
+                metricRow(
+                    "HEEL", ble.sample?.heelDegrees.map { String(format: "%+d°", $0) } ?? "—",
+                    "PITCH", extra.map { String(format: "%+.1f°", $0.pitchDegrees) } ?? "—"
+                )
+            }
+            .opacity(ble.isLive ? 1 : 0.45)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 2)
+        .padding(.bottom, 3)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -111,7 +115,6 @@ private struct DebugPage: View {
                            _ rightLabel: String, _ rightValue: String) -> some View {
         HStack(spacing: 6) {
             metric(leftLabel, leftValue)
-            Divider().frame(height: 30).opacity(0.35)
             metric(rightLabel, rightValue)
         }
         .frame(maxHeight: .infinity)
@@ -120,7 +123,7 @@ private struct DebugPage: View {
     private func metric(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(label)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 1)
@@ -130,7 +133,12 @@ private struct DebugPage: View {
                 .minimumScaleFactor(0.55)
                 .lineLimit(1)
         }
-        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 7)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.075))
+        )
     }
 }
 
@@ -153,7 +161,7 @@ private struct MainPage: View {
     var body: some View {
         VStack(spacing: 0) {
 
-            statusLine
+            BoardStatusHeader(isDim: isDim)
 
             Group {
                 // 잠겨 있으면 푸는 법을 적어 둔다. 워치는 물방울 아이콘만 그려 주고
@@ -236,9 +244,15 @@ private struct MainPage: View {
         .frame(maxWidth: .infinity)
     }
 
-    // 상단 첫 줄은 상태, 둘째 줄은 선택한 보드 이름이다.
-    // 주황=통신 없음, 녹색=수신 중, 빨강 점멸=SD 기록 중.
-    private var statusLine: some View {
+}
+
+/// 1·2페이지가 공유하는 보드·기록 상태 헤더.
+/// 주황=통신 없음, 녹색=수신 중, 빨강 점멸=SD 기록 중.
+private struct BoardStatusHeader: View {
+    @EnvironmentObject private var ble: BLEManager
+    let isDim: Bool
+
+    var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 5) {
                 RecordingDot(communicating: ble.isLive,
@@ -273,7 +287,6 @@ private struct MainPage: View {
         if ble.sample?.recording == true || ble.sample?.recordingFailed == true { return .red }
         return .green
     }
-
 }
 
 /// 통신은 고정색, 실제 SD 기록만 빨간색으로 깜박인다.
