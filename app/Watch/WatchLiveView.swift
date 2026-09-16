@@ -373,7 +373,7 @@ private struct SettingsPage: View {
             VStack(spacing: 8) {
                 card { boardSection }
                 card { recSection }
-                card { sessionSection }
+                card { waterLockSection }
                 card {
                     VStack(alignment: .leading, spacing: 0) {
                         Button {
@@ -409,22 +409,23 @@ private struct SettingsPage: View {
     @ViewBuilder
     private var boardSection: some View {
         if ble.pinnedModule != nil {
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(ble.isLive ? Color.green : Color.orange)
-                    .frame(width: 10, height: 10)
-                VStack(alignment: .leading, spacing: 1) {
+            VStack(spacing: 6) {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(ble.isLive ? Color.green : Color.orange)
+                        .frame(width: 10, height: 10)
                     Text(ble.isLive ? "보드 연결됨" : "보드 연결 대기")
-                        .font(.headline)
-                        .lineLimit(1)
-                    Text(ble.isLive ? "데이터 수신 중" : ble.state.displayText)
-                        .font(.system(size: 9))
-                        .foregroundStyle(ble.isLive ? Color.secondary : Color.orange)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(ble.isLive ? Color.primary : Color.orange)
+                    Spacer()
                 }
-                Spacer(minLength: 2)
-                Button("변경") { showUnpinConfirm = true }
-                    .font(.caption2)
-                    .buttonStyle(.bordered)
+
+                Button { showUnpinConfirm = true } label: {
+                    Text("보드 변경")
+                        .font(.caption2)
+                        .frame(maxWidth: .infinity, minHeight: 30)
+                }
+                .buttonStyle(.bordered)
             }
             .confirmationDialog("다른 보드를 선택할까요?", isPresented: $showUnpinConfirm) {
                 Button("선택 해제", role: .destructive) { ble.unpinModule() }
@@ -523,25 +524,13 @@ private struct SettingsPage: View {
         return .green
     }
 
-    private var sessionSection: some View {
+    private var waterLockSection: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                Image(systemName: session.isRunning ? "display" : "moon.zzz")
-                    .foregroundStyle(session.isRunning ? .green : .secondary)
-                Text(session.isRunning ? "화면 유지 중  \(session.elapsedText)" : "화면 유지 꺼짐")
-                    .font(.caption.weight(.semibold))
-                Spacer()
-            }
-
             if let error = session.errorMessage {
                 Text(error)
                     .font(.system(size: 9))
                     .foregroundStyle(.red)
                     .lineLimit(3)
-            } else if !session.isRunning {
-                Text("화면과 연결을 계속 유지하려면 운동 권한이 필요합니다")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
             }
 
             Button {
