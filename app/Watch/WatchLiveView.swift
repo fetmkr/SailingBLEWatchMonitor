@@ -91,20 +91,21 @@ private struct DebugPage: View {
     var body: some View {
         Group {
             if let e = extra {
-                VStack(spacing: 2) {
-                    HStack(spacing: 0) {
-                        metric(ble.sample?.sogKnots.map { String(format: "%.2f", $0) } ?? "—", "SOG kn")
-                        metric(e.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—", e.headingIsTrue ? "HDG T" : "HDG M")
+                VStack(spacing: 4) {
+                    HStack(spacing: 8) {
+                        metric("SOG", ble.sample?.sogKnots.map { String(format: "%.2f kn", $0) } ?? "—")
+                        metric(e.headingIsTrue ? "HDG T" : "HDG M",
+                               e.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—")
                     }
 
-                    HStack(spacing: 0) {
-                        metric(ble.sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—", "COG T")
-                        metric(courseDeltaText, "DIF")
+                    HStack(spacing: 8) {
+                        metric("COG T", ble.sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—")
+                        metric("DIF", courseDeltaText)
                     }
 
-                    HStack(spacing: 0) {
-                        metric(ble.sample?.heelDegrees.map { String(format: "%+d°", $0) } ?? "—", "HEEL")
-                        metric(String(format: "%+.1f°", e.pitchDegrees), "PITCH")
+                    HStack(spacing: 8) {
+                        metric("HEEL", ble.sample?.heelDegrees.map { String(format: "%+d°", $0) } ?? "—")
+                        metric("PITCH", String(format: "%+.1f°", e.pitchDegrees))
                     }
 
                     Divider().opacity(0.35)
@@ -132,17 +133,19 @@ private struct DebugPage: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 
-    private func metric(_ value: String, _ label: String, warn: Bool = false) -> some View {
-        VStack(spacing: -1) {
+    private func metric(_ label: String, _ value: String, warn: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 1)
             Text(value)
                 .font(.system(size: 17, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .minimumScaleFactor(0.5)
+                .minimumScaleFactor(0.65)
                 .lineLimit(1)
                 .foregroundStyle(warn ? Color.sailWarn : Color.primary)
-            Text(label)
-                .font(.system(size: 8, weight: .medium))
-                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
     }
