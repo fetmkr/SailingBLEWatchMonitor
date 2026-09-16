@@ -1,6 +1,111 @@
 # 다음에 할 일
 
-> **새 세션은 여기부터 읽는다.** 맨 위 "지금 상태" → "다음 할 일" → "사용자 결정 대기" 순서.
+## ★★★ 현재 인수인계 — 여기부터 읽기 (2026-09-16)
+
+아래의 09-15 기록은 역사 자료라 일부가 현재 코드와 다르다. **이 절이 현재 상태의 기준이다.**
+새 문서를 만들지 말고 이후 변경도 우선 이 절과 `firmware-idf/CHECKLIST.md`에 반영한다.
+
+### 저장소·Git·보드
+
+- 저장소: `/Users/hojunsong/Desktop/Desktop - hojun’s mbp/SailingBLEWatchMonitor`
+- 브랜치: `main`
+- 헤딩 기능 기준 커밋: `b34279a feat: add calibrated fused heading and display damping`
+- 이 인수인계 커밋까지 포함하면 `origin/main`(`98f9b25`)보다 로컬이 **6커밋 앞**이다. 작업 트리는 깨끗하다.
+- GitHub 원격: `git@github.com:fetmkr/SailingBLEWatchMonitor.git`
+- 푸시는 자동 승인 검토가 막았다. 이유: 원격과 전송할 payload의 명시적 승인이 필요함. 우회하지 말 것.
+  다음 세션에서 사용자가 위 원격의 `main`에 로컬 커밋을 보내라고 명시하면 `git push origin main`을 다시 실행한다.
+- 연결 포트는 마지막 확인 때 `/dev/cu.usbmodem1101`이었다.
+- 보드에는 `b34279a`와 **소스 내용이 같은** 펌웨어를 플래시했다. 커밋하기 전에 빌드했으므로 내장 버전 문자열은
+  이전 Git describe/dirty 문자열일 수 있다. 기능 코드는 최신이다. NVS와 SD 파일은 지우지 않았다.
+- USB 시리얼을 열면 보드가 `USB_UART_CHIP_RESET`으로 다시 시작할 수 있다. 부팅 직후 3초의 HDG `?`를
+  반복 관측하게 만들 수 있으므로 화면 시험 중에는 불필요하게 포트를 열지 않는다.
+
+### 현재 HDG 구현 — 식 5
+
+한 흐름만 쓴다.
+
+```
+AK8963 원본 자력
+  → 3차원 자력 보정: corrected = 3x3 matrix × (raw - bias)
+  → x-io Fusion v1.3.3: 자이로 100 Hz + 가속도 + 자력계 약 8 Hz
+  → 최단 각도 원형 IIR, 반감기 1초
+  → 장착 오프셋 + 자기편각
+  → OLED · BLE · TXT · HLG 모두 같은 HDG
+```
+
+- COG/GPS로 HDG를 고치지 않는다.
+- Fusion 설정: NED, gain 0.5, gyro ±1000°/s, 가속·자력 거절 10°, 복구 5초.
+- 최종 댐핑은 오래된 PNI TCM2 전자나침반의 IIR 방식을 따라 1초로 시작했다.
+  설정·모드·필터를 더 겹치지 않는다. 바꿀 때는 `heading_filter.h`의
+  `kDisplayDampingHalfLifeSec` 하나만 조정한다.
+- `?`는 부팅 초기화, 자력 공백, 자력 거절/복구, gyro overrange 복구 때만 표시한다.
+  걷기·파도 때문에 가속도 피드백만 정상 거절된 경우에는 표시하지 않고 내부 진단에만 남긴다.
+- 자력 표본 나이는 마지막 **값 변화**가 아니라 마지막 정상 읽기(New/Repeat) 시각으로 계산한다.
+  세 축이 5초 동안 변하지 않는 동결 검사는 기존 `mag::Freshness`가 별도로 한다.
+- 자력 공백은 2초까지 자이로로 이어가며 `?`; 그보다 길면 `---`.
+- 핵심 파일:
+  - `firmware-idf/main/heading_filter.{h,cpp}` — Fusion 어댑터와 최종 원형 IIR
+  - `firmware-idf/main/mag_calibration.{h,cpp}` — hard/soft-iron 타원체 보정
+  - `firmware-idf/main/imu.{h,cpp}` — NVS 로드·자력 보정 적용
+  - `firmware-idf/main/app_main.cpp` — 수집·저장·OLED/BLE/HLG 연결
+  - `firmware-idf/tests/{heading_test,mag_calibration_test}.cpp`
+
+### 자력 보정 v2
+
+- 기존 보정은 hard-iron 중심만 뺐다. 현재 코드는 80~128개의 3차원 점으로 타원체를 맞춰
+  hard-iron bias와 대칭 3×3 soft-iron 행렬을 함께 구한다.
+- 품질 검사: 3차원 분포 ≥0.30, 자기장 25~70 µT, 왜곡비 ≤2.5, RMS 잔차 ≤자기장 8%,
+  양의 정부호·유한값. 실패하면 **새 값을 쓰지 않고 기존 보정을 유지**한다.
+- NVS: 기존 `mag_ox/y/z`, `mag_r`, `mag_res` + `mag_ver=2`, `mag_mtx`, `mag_cond`, `mag_cov`.
+- 이번 플래시는 기존 NVS를 보존했다. **실물에서 v2 보정을 완료·저장했는지는 아직 확인하지 않았다.**
+- 보정 절차: REC 끔 → 워치/제어에서 보정 시작(`magcal on`) → 수평 한 바퀴만 돌리지 말고
+  장치를 앞뒤·좌우·뒤집기까지 천천히 모든 자세로 돌림 → 80점 이상, 가능하면 128점 → 저장(`magcal stop`).
+- 저장 결과에 `v2`, 중심, 자기장, 잔차, 왜곡, 분포가 나와야 한다. `안 씀`이면 문구의 실패 이유를 그대로 남긴다.
+- 보정 후 모든 방향에서 일정한 20여 도 차이가 남으면 soft-iron 문제가 아니라 장착 방향/자북·진북 기준일 가능성이 크다.
+  Iris 50과 자북 기준을 맞춰 0/90/180/270°에서 같은 오차인지 확인한 뒤 `hdg off`를 한 번만 적용한다.
+
+### HLG·앱 호환
+
+- `hdg_formula=5`: 3D 자력 보정 + Fusion + 1초 원형 출력 댐핑.
+- NAV 36~37에는 실제 OLED/BLE와 같은 저장 HDG가 들어간다.
+- NAV event bit 3 `0x08`은 위의 HDG `?` 상태다.
+- 식 5부터 HLG NAV의 mag는 **센서 원본**이다. 헤더 94~105에는 bias, 106~117에는 대칭 행렬 6개(Q12),
+  118에는 보정 버전을 저장한다. 옛 식 1~4의 mag 의미는 바꾸지 않는다.
+- 데스크탑 파서·TXT 파서·Python 파서는 식 5와 행렬을 읽도록 수정했다.
+  Fusion은 이전 필터 상태가 필요한 상태식이라 앱이 단일 NAV 행으로 재계산하지 않고 저장 HDG를 쓴다.
+
+### 검증 완료
+
+- `./tools/verify.sh quick` 통과
+  - 기존 펌웨어 순수 로직 153개
+  - 보드↔앱 방위 벡터 960줄, 어긋남 0
+  - 576개 정적 자세
+  - 45°/s 회전 원본 Fusion 최대 오차 1.955°
+  - 걷기 형태 합성 가속: Fusion 최대 0.138°, 순간 기울기 식 45.283°
+  - 교번 자력 방위 잡음: Fusion 0.347° → 최종 댐핑 0.116°
+  - 자력 보정 합성 시험: worst angle 0.44°, 나쁜 분포/평면/과왜곡 거절
+- 데스크탑 `tsc --noEmit` 통과.
+- ESP-IDF 전체 빌드 통과: `/tmp/sail-heading-build-live/sail_idf.bin`, 앱 파티션 76% 남음.
+- 실제 보드 플래시 검증 통과. 부팅 후 GPS UART/NAV-PV, IMU/FIFO, AK8963, OLED, LoRa, BLE가 올라왔다.
+- 책상에서 부팅 초기 `?` 3회 뒤 정상 숫자로 바뀌는 것을 확인했다. USB 포트 시험이 보드를 다시 시작시킬 수 있음에 주의.
+
+### 다음 세션에서 바로 할 일
+
+1. **v2 자력 보정부터 완료하고 결과 문구를 기록한다.** 보정 전 걷기 결과로 필터를 또 바꾸지 않는다.
+2. 보정 후 같은 방향을 향해 걸으며 OLED HDG가 얼마나 흔들리는지 본다. iPhone Compass와 Iris 50도 같은 자북 기준으로 비교한다.
+3. 0/90/180/270°와 기울이기에서 오차를 분리한다.
+   - 네 방향이 비슷하게 일정: 장착 오프셋/편각 문제
+   - 방향에 따라 크기·부호가 달라짐: 자력 보정/축/주변 자기장 문제
+   - 걸을 때만 커짐: 동적 자세·댐핑 문제
+4. 1초 댐핑이 느리면 다른 필터를 추가하지 말고 반감기 상수 하나만 낮춘다. 빠른 회전 지연과 정지 흔들림을 함께 적는다.
+5. 새 항해 HLG를 받은 뒤 원본 자력 크기, 저장 HDG, COG를 시간축으로 비교한다. COG를 HDG 정답으로 맞추지는 않는다.
+6. 사용자가 원격과 브랜치를 명시해 승인하면 로컬 커밋들을 `origin/main`으로 푸시한다.
+
+---
+
+## 이전 기록 — 아래 내용은 현재 상태와 충돌할 수 있음
+
+> 09-15 당시 안내. 현재 작업은 문서 맨 위 `현재 인수인계`를 따른다.
 > 합격 기준은 `docs/testing/boat-device-checklist.md`, 항목별 막는 것은 `docs/testing/checklist-gaps.md`.
 
 ---
