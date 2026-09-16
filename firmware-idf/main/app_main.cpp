@@ -765,6 +765,9 @@ static sail::TelemetryExtra buildExtra() {
     e.gyrX = g.x; e.gyrY = g.y; e.gyrZ = g.z;
     e.magX = m.x; e.magY = m.y; e.magZ = m.z;
     e.battVolts = gBattVolts;
+    e.boatId = gBoatId;
+    e.loraEnabled = lora::liveEnabled();
+    e.loraPpsReady = lora::ppsReady();
     return e;
 }
 
@@ -1169,13 +1172,12 @@ static void printHelp() {
     printf("  hz <1~100>    notify 주기 설정. 예) hz 20  (기본 10)\n");
     printf("  boat <0~32>   로라 배 번호. 0 은 번호 없음. 예) boat 7\n");
     printf("  lora          로라 상태 (주파수·전파시간·받은 개수)\n");
-    printf("  lora on       로라 켜기\n");
     printf("  lora regs     칩 버그 세 개가 실제로 걸렸는지 레지스터로 확인\n");
     printf("  lora rssi     이 주파수의 바닥 잡음. 보드 한 대로 하는 확인\n");
     printf("  lora tx       시험 삼아 하나 보내기\n");
     printf("  lora watch    받을 때마다 한 줄씩 뱉기 (두 대로 시험할 때)\n");
     printf("  lora peers    최근 3초에 받은 배 목록\n");
-    printf("  lora live on|off  GPS PPS 차례에 실시간 위치 송신 (부팅 기본 off)\n");
+    printf("  lora live on|off  장거리 송수신 시작/종료. off면 SX1262 sleep\n");
     printf("  info          현재 설정 출력\n");
     printf("\n");
     printf("  ── 보드 진단 ──\n");
@@ -1270,6 +1272,29 @@ static void restTrim(const char* line, size_t from, char* out, size_t cap) {
     while (n && (out[n - 1] == ' ' || out[n - 1] == '\t' || out[n - 1] == '\r')) out[--n] = '\0';
 }
 
+// 시리얼과 BLE가 같은 배 번호 규칙을 쓴다. 번호는 보드 NVS에 남지만
+// 장거리 통신 on/off는 안전하게 매 부팅 off로 시작한다.
+static bool setBoatIdValue(long id, char* out, size_t cap) {
+    if (id < 0 || id > kBoatIdMax) {
+        snprintf(out, cap, "err boat range 0-%u", kBoatIdMax);
+        return false;
+    }
+    if (hlog::recording() || lora::liveEnabled()) {
+        snprintf(out, cap, "err boat busy — REC와 장거리 통신을 먼저 끄세요");
+        return false;
+    }
+    const uint8_t old = gBoatId;
+    gBoatId = (uint8_t)id;
+    if (!nv::writeWith([](nvs_handle_t h) { return nvs_set_u8(h, "boat", gBoatId) == ESP_OK; })) {
+        gBoatId = old;
+        snprintf(out, cap, "err boat save");
+        return false;
+    }
+    if (gBoatId != old) lora::noteBoatChanged();
+    snprintf(out, cap, "ok boat %u", gBoatId);
+    return true;
+}
+
 static void controlLine(const char* raw) {
     while (*raw == ' ' || *raw == '\t') ++raw;
     char line[192];
@@ -1304,6 +1329,40 @@ static void controlLine(const char* raw) {
         snprintf(out, sizeof out, "rec %s",
                  hlog::recording() ? "on" : (hlog::busy() ? "closing" : "off"));
         ble::controlSay(out);
+        return;
+    }
+
+    if (!strcmp(line, "boat")) {
+        snprintf(out, sizeof out, "boat %u", gBoatId);
+        ble::controlSay(out);
+        return;
+    }
+    if (!strncmp(line, "boat ", 5)) {
+        char* end = nullptr;
+        const long id = strtol(line + 5, &end, 10);
+        while (end && (*end == ' ' || *end == '\t')) ++end;
+        if (!end || end == line + 5 || *end) snprintf(out, sizeof out, "err boat number");
+        else setBoatIdValue(id, out, sizeof out);
+        ble::controlSay(out);
+        return;
+    }
+    if (!strcmp(line, "lora live")) {
+        snprintf(out, sizeof out, "lora live %s boat %u pps %s",
+                 lora::liveEnabled() ? "on" : "off", gBoatId,
+                 lora::ppsReady() ? "ready" : "wait");
+        ble::controlSay(out);
+        return;
+    }
+    if (!strcmp(line, "lora live on")) {
+        const bool ok = lora::setLiveEnabled(true);
+        snprintf(out, sizeof out, ok ? "ok lora live on boat %u pps %s" : "err lora live on boat %u",
+                 gBoatId, lora::ppsReady() ? "ready" : "wait");
+        ble::controlSay(out);
+        return;
+    }
+    if (!strcmp(line, "lora live off")) {
+        const bool ok = lora::setLiveEnabled(false);
+        ble::controlSay(ok ? "ok lora live off" : "err lora live off");
         return;
     }
 
@@ -1407,7 +1466,7 @@ static void controlLine(const char* raw) {
         return;
     }
     if (!strcmp(line, "help")) {
-        ble::controlSay("cmds: rec on|off | wifi ssid|pass|scan|on|ap|off|status | magcal on|stop|clear");
+        ble::controlSay("cmds: rec on|off | boat 0..32 | lora live on|off | wifi ... | magcal ...");
         return;
     }
     snprintf(out, sizeof out, "err unknown %s", line);
@@ -2235,7 +2294,9 @@ static void handleLine(char* line) {
     if (!strcmp(line, "lora watch")) { lora::watchToggle(); return; }
     if (!strcmp(line, "lora peers")) { lora::reportPeers(); return; }
     if (!strcmp(line, "lora live")) {
-        printf("[LORA] 실시간 함대 송신 %s\n", lora::liveEnabled() ? "켬" : "끔");
+        printf("[LORA] 장거리 송수신 %s · 배 %u · PPS %s\n",
+               lora::liveEnabled() ? "켬" : "끔", gBoatId,
+               lora::ppsReady() ? "준비" : "대기");
         return;
     }
     if (!strcmp(line, "lora live on"))  { lora::setLiveEnabled(true);  return; }
@@ -2248,27 +2309,18 @@ static void handleLine(char* line) {
             else printf("[BOAT] %u번 (차례 %u)\n", gBoatId, gBoatId - 1);
             return;
         }
-        // ★ 달리는 중에는 안 바꾼다. 번호가 바뀌면 말할 차례가 옮겨 가 남의 차례에 떨어질 수 있다.
-        if (hlog::recording() || lora::liveEnabled()) {
-            printf("[BOAT] 기록 또는 LoRa 실시간 송신 중에는 못 바꿉니다. 먼저 rec off / lora live off 하세요\n");
-            return;
-        }
         char* arg = line + 5;
         while (*arg == ' ') ++arg;
         char* end = nullptr;
         const long n = strtol(arg, &end, 10);
-        // firmware-rak: 빈 칸 · 숫자 아님(toInt 0 인데 "0" 아님) · 범위 밖을 거절
-        if (!*arg || end == arg || n < 0 || n > kBoatIdMax) {
+        while (end && (*end == ' ' || *end == '\t')) ++end;
+        if (!*arg || end == arg || !end || *end) {
             printf("[BOAT] 0~%u 로 입력하세요. 0 은 번호 없음. 예) boat 7\n", kBoatIdMax);
             return;
         }
-        const uint8_t oldBoatId = gBoatId;
-        gBoatId = (uint8_t)n;
-        if (!nv::writeWith([](nvs_handle_t h) { return nvs_set_u8(h, "boat", gBoatId) == ESP_OK; }))
-            printf("[BOAT] ★ 보드에 못 적었습니다 — 껐다 켜면 옛 번호로 돌아갑니다\n");
-        if (gBoatId == 0) printf("[BOAT] 번호 없음 — 로라로 안 보낸다\n");
-        else printf("[BOAT] %u번 (차례 %u). 뱃머리 번호표와 같은지 보세요\n", gBoatId, gBoatId - 1);
-        if (gBoatId != oldBoatId) lora::noteBoatChanged();
+        char reply[128];
+        setBoatIdValue(n, reply, sizeof reply);
+        printf("[BOAT] %s\n", reply);
         return;
     }
     if (!strcmp(line, "oledw")) { diag::oledWidths(); return; }
@@ -2429,8 +2481,8 @@ extern "C" void app_main(void) {
         printf("[OLED] 없음 — J12 헤더에 꽂으면 자동으로 잡힙니다\n");
     }
 
-    // 무전기는 켤 때 올린다. 배에서 명령을 칠 수가 없다. 번호가 있든 없든 늘 받는다 (PROTOCOL.md §10.11).
-    // 없거나 실패해도 보드는 그대로 돈다.
+    // 무전기 설정과 일꾼은 켤 때 준비하지만 SX1262는 sleep으로 둔다.
+    // 워치나 시리얼에서 장거리 통신을 켜야 같은 펌웨어로 송신과 수신을 함께 시작한다.
     lora::begin();
 
     printf("[SRC] SOG/COG 는 GPS fix와 방금 잰 속도 품질이 모두 맞을 때만 값이 있습니다\n");

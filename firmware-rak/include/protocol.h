@@ -177,15 +177,18 @@ inline void encodeTelemetryPacket(const Telemetry& t, uint8_t out[kTelemetryLen]
 //  [31..36]  6   i16le×3  mag XYZ    µT × 10
 //  [37..38]  2   u16le    batt mV    배터리 전압 (mV). 0 = 아직 못 잼
 //  [39..40]  2   i16le    decl       자기편각 deg × 100 (동편 +, 서편 -)
+//  [41]       1   u8       boat       LoRa 배 번호 0…32. 0=미지정
+//  [42]       1   u8       lora       bit0 장거리 통신 켬 / bit1 PPS 시각 있음
 //  ------  ----  -------  ---------  --------------------------------------
-//  total    41
+//  total    43
 //
 // ※ [37..38] 은 나중에 덧붙였다. 앞 37바이트는 한 글자도 안 바뀌었으므로
 //   옛 앱은 그대로 돈다 (PROTOCOL.md §7 "길면 앞부분만 파싱").
 //   그래서 앱 쪽은 "37 이상이면 9축, 39 이상이면 전압까지" 로 읽는다.
 static constexpr size_t kTelemetryExtBaseLen = 37; // 9축까지
 static constexpr size_t kTelemetryExtVoltsLen = 39; // + 배터리 전압
-static constexpr size_t kTelemetryExtLen      = 41; // + 진북 계산용 자기편각
+static constexpr size_t kTelemetryExtDeclinationLen = 41; // + 진북 계산용 자기편각
+static constexpr size_t kTelemetryExtLen      = 43; // + LoRa 배 번호·상태
 
 struct TelemetryExtra {
     bool    gpsFix       = false;
@@ -209,6 +212,9 @@ struct TelemetryExtra {
     /// 그래서 둘을 나란히 보여준다.
     float   battVolts = 0.0f;
     float   magneticDeclinationDeg = 0.0f; // HDG는 M으로 보내고, 수신 측이 T 비교할 때만 더한다.
+    uint8_t boatId = 0;
+    bool    loraEnabled = false;
+    bool    loraPpsReady = false;
 };
 
 // 실수를 int16 칸에 넣는다. 범위를 벗어나면 자른다.
@@ -270,6 +276,8 @@ inline void encodeTelemetryExt(const Telemetry& t, const TelemetryExtra& e,
     if (mv > 65535) mv = 65535;
     putU16LE(&out[37], (uint16_t)mv);
     putI16LE(&out[39], clampToI16(e.magneticDeclinationDeg * 100.0f));
+    out[41] = e.boatId;
+    out[42] = (e.loraEnabled ? 0x01 : 0) | (e.loraPpsReady ? 0x02 : 0);
 }
 
 // Manufacturer Specific Data. Company ID(2) + 페이로드(10) = 12바이트. PROTOCOL.md §4.3

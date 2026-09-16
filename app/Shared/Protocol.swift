@@ -40,6 +40,8 @@ enum SailProtocol {
     static let telemetryExtVoltsLength = 39
     /// 자기편각까지 붙은 현재 길이. HDG는 기본 자북이고 이 값은 진북 비교 때만 쓴다.
     static let telemetryExtDeclinationLength = 41
+    /// LoRa 배 번호와 장거리 통신 상태까지 붙은 현재 길이.
+    static let telemetryExtLoraLength = 43
     /// 옛 광고의 길이. 새 디코더도 이 길이부터 받아 이전 펌웨어와 호환한다.
     static let manufacturerBasePayloadLength = 9
     /// Manufacturer Data 중 Company ID(2바이트)를 제외한 현재 페이로드 길이.
@@ -171,6 +173,12 @@ struct TelemetryExtra: Equatable {
     var batteryVolts: Double?
     /// 자기편각(동편 +, 서편 -). HDG 표시값에는 섞지 않고 COG와 비교할 때만 쓴다.
     var magneticDeclinationDegrees: Double? = nil
+    /// LoRa 시간표에 쓰는 배 번호. 0은 코치용 수신 전용이다.
+    var boatID: Int = 0
+    /// 켜져 있으면 무전기가 동작한다. boatID 1...32는 송수신, 0은 수신만 한다.
+    var loraEnabled: Bool = false
+    /// 최근 GPS PPS가 있어 충돌 없는 자기 슬롯 송신이 가능한가.
+    var loraPPSReady: Bool = false
 }
 
 // MARK: - 텔레메트리 샘플
@@ -268,6 +276,16 @@ extension TelemetrySample {
                 declination = Double(r.i16()) / 100.0
             }
 
+            var boatID = 0
+            var loraEnabled = false
+            var loraPPSReady = false
+            if data.count >= SailProtocol.telemetryExtLoraLength {
+                boatID = Int(r.u8())
+                let lora = r.u8()
+                loraEnabled = lora & 0x01 != 0
+                loraPPSReady = lora & 0x02 != 0
+            }
+
             extra = TelemetryExtra(
                 gpsFix:         flags & 0x01 != 0,
                 imuOK:          flags & 0x02 != 0,
@@ -281,7 +299,10 @@ extension TelemetrySample {
                 pitchDegrees:   Double(pitchRaw) / 10.0,
                 accel: accel, gyro: gyro, mag: mag,
                 batteryVolts: volts,
-                magneticDeclinationDegrees: declination
+                magneticDeclinationDegrees: declination,
+                boatID: boatID,
+                loraEnabled: loraEnabled,
+                loraPPSReady: loraPPSReady
             )
         }
 

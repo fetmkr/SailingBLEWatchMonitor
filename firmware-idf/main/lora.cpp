@@ -226,7 +226,7 @@ Rx       gRing[kRingLen];
 volatile size_t   gHead = 0, gTail = 0;
 volatile uint32_t gDropped = 0, gReceived = 0, gCrcErrors = 0;
 
-// ── 실시간 함대 송신 ────────────────────────────────────────────────────
+// ── 실시간 함대 송수신 ──────────────────────────────────────────────────
 // 메인 루프는 최신 값의 사본만 바꾼다. 별도 일꾼이 GPS PPS 뒤 자기 차례에서
 // 송신하므로 14~22ms 걸리는 RadioLib::transmit가 GPS·IMU·BLE 루프를 막지 않는다.
 portMUX_TYPE gLiveMux = portMUX_INITIALIZER_UNLOCKED;
@@ -240,8 +240,10 @@ volatile uint32_t gPpsCount = 0;
 volatile bool gPpsEver = false;
 TaskHandle_t gTxTask = nullptr;
 volatile bool gTransmitting = false;
-volatile bool gLiveEnabled = false; // 위치 방송은 `lora live on` 뒤에만. 재부팅하면 꺼진다.
+volatile bool gRadioAwake = false;
+volatile bool gLiveEnabled = false; // 장거리 송수신은 `lora live on` 뒤에만. 재부팅하면 꺼진다.
 volatile uint32_t gTxOk = 0, gTxFailed = 0, gTxLate = 0;
+uint32_t gAirTimeUs = 0; // 설정 직후, 무전기를 재우기 전에 한 번 계산한다.
 
 struct PeerSlot {
     bool seen = false;
@@ -271,7 +273,7 @@ uint32_t heardMask(uint32_t now) {
 //   IRAM_ATTR 은 이 함수를 램에 두라는 표시다. 플래시를 읽는 중에도
 //   인터럽트가 들어올 수 있는데, 그때 플래시에 있는 코드는 못 부른다.
 void IRAM_ATTR onDio1() {
-    if (gTransmitting) return; // 송신 완료 DIO1은 RX 일꾼을 깨울 사건이 아니다
+    if (!gRadioAwake || gTransmitting) return; // sleep·송신 완료 DIO1은 RX 사건이 아니다
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(gRxSem, &woken);
     if (woken) portYIELD_FROM_ISR();
@@ -301,6 +303,7 @@ void rxWorker(void*) {
     uint8_t buf[kPayloadLen];
     for (;;) {
         if (xSemaphoreTake(gRxSem, portMAX_DELAY) != pdTRUE) continue;
+        if (!gRadioAwake) continue;
 
         RadioLock lk;
         if (!lk.ok) {
@@ -310,6 +313,7 @@ void rxWorker(void*) {
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
+        if (!gRadioAwake) continue;
         const uint32_t at = millis32();
         const int16_t  st = gRadio.readData(buf, kPayloadLen);
 
@@ -345,7 +349,11 @@ void txWorker(void*) {
         portENTER_CRITICAL(&gLiveMux);
         live = gLive;
         portEXIT_CRITICAL(&gLiveMux);
-        if (!gUp || !gLiveEnabled || !ever || live.boat < 1 || live.boat > 32) {
+        if (!gUp || !gLiveEnabled) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+        if (!ever || live.boat < 1 || live.boat > 32) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -422,13 +430,21 @@ bool begin() {
     gRadio.implicitHeader(kPayloadLen);
     gRadio.setCRC(2);
 
+    // RadioLib은 SX1262가 sleep인 동안 getTimeOnAir()를 부르면 오류값(UINT32_MAX)을
+    // 돌려줄 수 있다. 설정이 살아 있는 지금 한 번만 계산해 진단에도 같은 값을 쓴다.
+    const uint32_t airTimeUs = (uint32_t)gRadio.getTimeOnAir(kPayloadLen);
+    if (airTimeUs >= 1000u && airTimeUs <= 1000000u) {
+        gAirTimeUs = airTimeUs;
+    } else {
+        printf("[LORA] ★ 전파시간 계산 실패 (%lu)\n", (unsigned long)airTimeUs);
+    }
+
     if (!gRxSem) gRxSem = xSemaphoreCreateBinary();
     if (!gRxSem) { printf("[LORA] 세마포어를 못 만들었습니다\n"); return false; }
     if (!gRadioMux) gRadioMux = xSemaphoreCreateMutex();
     if (!gRadioMux) { printf("[LORA] 무전기 잠금을 못 만들었습니다\n"); return false; }
 
     gRadio.setPacketReceivedAction(onDio1);
-    gRadio.startReceive();
 
     // GPS PPS는 슬롯 A의 GPIO21. 무전기 DIO1과 같은 ISR 서비스를 나눠 쓴다.
     gpio_config_t pps = {};
@@ -460,13 +476,21 @@ bool begin() {
             txWorker, "lora_tx", 4096, nullptr, /*priority=*/4, &gTxTask, /*core=*/0);
         if (ok != pdPASS) { gTxTask = nullptr; printf("[LORA] 송신 일꾼을 못 띄웠습니다 — 받기만 합니다\n"); }
     }
+    // 장거리 모드를 직접 켜기 전에는 SX1262도 실제 sleep이다. 수신만 상시 켜 두지 않는다.
+    const int16_t sleepSt = gRadio.sleep();
+    if (sleepSt != RADIOLIB_ERR_NONE) printf("[LORA] ★ 초기 sleep 실패 %d\n", sleepSt);
+    gRadioAwake = sleepSt != RADIOLIB_ERR_NONE;
     printf("[LORA] %.2f ㎒ SF%u BW%.0f㎑ CR4:%u  송신 %d dBm (EIRP 10 dBm)\n",
            kFreqMHz, kSf, kBwKHz, kCr, kTxDbm);
-    printf("[LORA] 송수신 일꾼 코어 0 · GPS PPS GPIO%d · 실시간 송신 기본 꺼짐\n",
+    printf("[LORA] 송수신 일꾼 코어 0 · GPS PPS GPIO%d · 장거리 통신 기본 꺼짐(SX1262 sleep)\n",
            rak::kGpsPpsSlotA);
-    printf("[LORA] 전파시간 %lu ms (짐 %u바이트) · 보내려면 `lora live on`\n",
-           (unsigned long)gRadio.getTimeOnAir(kPayloadLen) / 1000,
-           (unsigned)kPayloadLen);
+    if (gAirTimeUs) {
+        printf("[LORA] 전파시간 %lu us (짐 %u바이트) · 보내려면 `lora live on`\n",
+               (unsigned long)gAirTimeUs, (unsigned)kPayloadLen);
+    } else {
+        printf("[LORA] 전파시간 계산 안 됨 (짐 %u바이트) · 보내려면 `lora live on`\n",
+               (unsigned)kPayloadLen);
+    }
     return true;
 }
 
@@ -474,6 +498,8 @@ bool up() { return gUp; }
 
 void sleep() {
     if (!gUp) return;
+    gLiveEnabled = false;
+    gRadioAwake = false;
     RadioLock lk;
     const int16_t st = lk.ok ? gRadio.sleep() : (int16_t)-1;
     printf("[LORA] 재웁니다 (st=%d)\n", (int)st);
@@ -502,8 +528,12 @@ void report() {
            kSf, kBwKHz, kCr, kPreamble);
     printf("  헤더       implicit, 짐 %u바이트 고정,  CRC 켬\n", (unsigned)kPayloadLen);
     printf("  송신       %d dBm + 안테나 2 dBi = EIRP 10 dBm = 10 ㎽\n", kTxDbm);
-    printf("  전파시간   %lu us  (§10 의 계산값 14140 us 와 견줄 것)\n",
-           (unsigned long)gRadio.getTimeOnAir(kPayloadLen));
+    if (gAirTimeUs) {
+        printf("  전파시간   %lu us  (§10 의 계산값 14140 us 와 견줄 것)\n",
+               (unsigned long)gAirTimeUs);
+    } else {
+        printf("  전파시간   계산 안 됨\n");
+    }
     printf("  받음       %u개,  CRC 깨짐 %u개,  버림 %u개\n",
            (unsigned)gReceived, (unsigned)gCrcErrors, (unsigned)gDropped);
     uint32_t ppsAt, ppsCount;
@@ -515,8 +545,8 @@ void report() {
     portENTER_CRITICAL(&gLiveMux);
     live = gLive;
     portEXIT_CRITICAL(&gLiveMux);
-    printf("  실시간     %s · 배 %u · 송신 %u 성공 / %u 실패 / %u 차례 놓침\n",
-           gLiveEnabled ? "켬" : "끔", live.boat,
+    printf("  장거리     %s · 무전기 %s · 배 %u · 송신 %u 성공 / %u 실패 / %u 차례 놓침\n",
+           gLiveEnabled ? "송수신" : "끔", gRadioAwake ? "깨어 있음" : "sleep", live.boat,
            (unsigned)gTxOk, (unsigned)gTxFailed, (unsigned)gTxLate);
     if (ppsEver) {
         const uint32_t ageMs = (micros32() - ppsAt) / 1000u;
@@ -548,14 +578,24 @@ void txTest() {
     const uint32_t us = micros32() - t0;
     const uint8_t after = gRadio.peek(RADIOLIB_SX126X_REG_SENSITIVITY_CONFIG);
 
-    gRadio.startReceive(); // 다시 듣는 자리로 돌려놓는다
+    if (gLiveEnabled) {
+        gRadio.startReceive(); // 장거리 모드였으면 다시 듣는 자리로
+        gRadioAwake = true;
+    } else {
+        gRadio.sleep();        // 진단 한 번 때문에 절전 상태를 바꾸지 않는다
+        gRadioAwake = false;
+    }
     gTransmitting = false;
 
     printf("──────────────────────────────────────────\n");
     if (st == RADIOLIB_ERR_NONE) printf("  보냈다.  실제로 걸린 시간 %lu us\n", (unsigned long)us);
     else                         printf("  ★ 보내기 실패 %d\n", st);
-    printf("  라이브러리가 미리 계산한 전파시간 %lu us\n",
-           (unsigned long)gRadio.getTimeOnAir(kPayloadLen));
+    if (gAirTimeUs) {
+        printf("  라이브러리가 미리 계산한 전파시간 %lu us\n",
+               (unsigned long)gAirTimeUs);
+    } else {
+        printf("  라이브러리 전파시간 계산 안 됨\n");
+    }
     printf("  15.1  보내기 전 0x%02X (bit2=%u)  →  보낸 뒤 0x%02X (bit2=%u)  %s\n",
            before, (before >> 2) & 1, after, (after >> 2) & 1,
            ((after >> 2) & 1) == 0 ? "걸렸다" : "★ 안 걸렸다");
@@ -565,6 +605,7 @@ void txTest() {
 // `lora rssi` — 지금 이 주파수에 뭐가 있나 (바닥 잡음). -65 dBm 은 고시의 LBT 문턱이다 (§10.7).
 void reportNoise(uint16_t samples) {
     if (!gUp) { printf("[LORA] 안 올라와 있습니다\n"); return; }
+    if (!gRadioAwake) { printf("[LORA] 장거리 통신이 꺼져 무전기가 sleep입니다\n"); return; }
     RadioLock lk;
     if (!lk.ok) { printf("[LORA] 무전기가 바쁩니다\n"); return; }
     float mn = 999.0f, mx = -999.0f, sum = 0.0f;
@@ -642,27 +683,71 @@ void updateLive(const Live& live) {
 
 void noteBoatChanged() { gBoatChangedAt = millis32(); }
 
-void setLiveEnabled(bool enabled) {
+bool setLiveEnabled(bool enabled) {
     if (enabled && !gUp) {
         printf("[LORA] 무전기가 올라오지 않아 실시간 송신을 못 켭니다\n");
-        return;
+        return false;
     }
-    if (enabled) {
-        Live live;
-        portENTER_CRITICAL(&gLiveMux);
-        live = gLive;
-        portEXIT_CRITICAL(&gLiveMux);
-        if (live.boat < 1 || live.boat > 32) {
-            printf("[LORA] 배 번호가 0입니다 — 먼저 `boat 1~32`를 정하세요. 수신은 계속합니다\n");
-            return;
+    if (enabled == gLiveEnabled && gRadioAwake == enabled) return true;
+
+    if (!enabled) {
+        // 먼저 일꾼과 ISR을 막고 칩을 재운다.
+        gLiveEnabled = false;
+        gRadioAwake = false;
+        RadioLock lk;
+        if (!lk.ok) {
+            gRadioAwake = true;
+            printf("[LORA] ★ 무전기가 바빠 sleep에 못 넣었습니다\n");
+            return false;
         }
+        const int16_t st = gRadio.sleep();
+        if (st != RADIOLIB_ERR_NONE) {
+            gRadioAwake = true;
+            printf("[LORA] ★ sleep 실패 %d\n", st);
+            return false;
+        }
+        printf("[LORA] 장거리 송수신 끔 — SX1262 sleep\n");
+        return true;
     }
-    gLiveEnabled = enabled;
-    printf("[LORA] 실시간 함대 송신 %s%s\n", enabled ? "켬" : "끔",
-           enabled ? " — GPS PPS 뒤 자기 차례에만 보냅니다" : "");
+
+    RadioLock lk;
+    if (!lk.ok) {
+        printf("[LORA] ★ 무전기가 바빠 장거리 송수신을 못 켭니다\n");
+        return false;
+    }
+    gRadioAwake = true;
+    const int16_t st = gRadio.startReceive();
+    if (st != RADIOLIB_ERR_NONE) {
+        gRadioAwake = false;
+        gRadio.sleep();
+        printf("[LORA] ★ 수신 시작 실패 %d\n", st);
+        return false;
+    }
+    gLiveEnabled = true;
+    Live live;
+    portENTER_CRITICAL(&gLiveMux);
+    live = gLive;
+    portEXIT_CRITICAL(&gLiveMux);
+    if (live.boat == 0) {
+        printf("[LORA] 장거리 수신 켬 — 배 번호 0은 송신하지 않습니다\n");
+    } else {
+        printf("[LORA] 장거리 송수신 켬 — 자기 슬롯 송신, 나머지 슬롯 수신\n");
+        if (!ppsReady()) printf("[LORA] GPS PPS를 기다립니다 — 수신은 지금부터, 송신은 PPS 뒤부터\n");
+    }
+    return true;
 }
 
 bool liveEnabled() { return gLiveEnabled; }
+
+bool ppsReady() {
+    uint32_t at;
+    bool ever;
+    portENTER_CRITICAL(&gPpsMux);
+    at = gPpsAtUs;
+    ever = gPpsEver;
+    portEXIT_CRITICAL(&gPpsMux);
+    return ever && (micros32() - at) / 1000u <= kPpsHoldoverMs;
+}
 
 void reportPeers() {
     const uint32_t now = millis32();

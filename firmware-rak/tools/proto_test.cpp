@@ -132,7 +132,7 @@ static void testManufacturerEncoding() {
 // 앞 12바이트가 한 글자도 안 달라야 한다. 옛 수신 측이 앞부분만 읽고 그대로
 // 돌 수 있는 근거가 이것이다 (PROTOCOL.md §7).
 static void testExtendedEncoding() {
-    std::printf("\n── 4. 확장 페이로드 41바이트 ──\n");
+    std::printf("\n── 4. 확장 페이로드 43바이트 ──\n");
 
     Telemetry t;
     t.moduleID = 9;
@@ -156,6 +156,9 @@ static void testExtendedEncoding() {
     e.magX = -31.8f;  e.magY = 6.1f;    e.magZ = -23.8f;
     e.battVolts = 3.888f;
     e.magneticDeclinationDeg = -9.02f;
+    e.boatId = 7;
+    e.loraEnabled = true;
+    e.loraPpsReady = true;
 
     uint8_t base[sail::kTelemetryLen];
     sail::encodeTelemetryPacket(t, base);
@@ -178,8 +181,10 @@ static void testExtendedEncoding() {
     check(i16At(&p[31]) == -318,      "자력 X -31.8 µT → -318");
     check(u16At(&p[37]) == 3888,      "배터리 3.888 V → 3888 mV");
     check(i16At(&p[39]) == -902,      "자기편각 -9.02° → -902");
-    check(sail::kTelemetryExtLen == 41,
-          "현재 확장 패킷은 편각까지 41바이트");
+    check(p[41] == 7,                  "LoRa 배 번호 7");
+    check((p[42] & 0x03) == 0x03,     "LoRa 송수신 켬·GPS PPS 준비");
+    check(sail::kTelemetryExtLen == 43,
+          "현재 확장 패킷은 LoRa 상태까지 43바이트");
     check(sail::kTelemetryExtBaseLen == 37,
           "9축까지는 37바이트 — 옛 앱이 읽던 자리는 그대로");
 

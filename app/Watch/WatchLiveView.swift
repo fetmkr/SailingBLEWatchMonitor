@@ -324,12 +324,14 @@ private struct SettingsPage: View {
     @State private var showUnpinConfirm = false
     @State private var showCalibration = false
     @State private var showStatus = false
+    @State private var boatDraft = 0
 
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
                 card { boardSection }
                 card { recSection }
+                card { loraSection }
                 card { waterLockSection }
                 card {
                     VStack(alignment: .leading, spacing: 0) {
@@ -385,7 +387,13 @@ private struct SettingsPage: View {
             .padding(.bottom, 8)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .onAppear { ble.refreshDiscovery() }
+        .onAppear {
+            ble.refreshDiscovery()
+            if let id = ble.sample?.extra?.boatID, (0...32).contains(id) { boatDraft = id }
+        }
+        .onChange(of: ble.sample?.extra?.boatID) { _, id in
+            if let id, (0...32).contains(id) { boatDraft = id }
+        }
     }
 
     @ViewBuilder
@@ -504,6 +512,92 @@ private struct SettingsPage: View {
         if !ble.isLive { return .orange }
         if ble.sample?.recording == true || ble.sample?.recordingFailed == true { return .red }
         return .green
+    }
+
+    private var loraSection: some View {
+        let extra = ble.sample?.extra
+        let boat = extra?.boatID ?? 0
+        let enabled = extra?.loraEnabled == true
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .foregroundStyle(enabled ? Color.green : Color.secondary)
+                Text(loraStatusText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(enabled ? Color.primary : Color.secondary)
+                Spacer()
+            }
+
+            Stepper(value: $boatDraft, in: 0...32) {
+                HStack {
+                    Text("배 번호").font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(boatDraft == 0 ? "수신 전용" : String(format: "B%02d", boatDraft))
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                }
+            }
+
+            if boatDraft != boat {
+                Button {
+                    WKInterfaceDevice.current().play(.click)
+                    ble.sendControl("boat \(boatDraft)")
+                } label: {
+                    Text("배 번호 저장")
+                        .font(.caption2.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Button {
+                WKInterfaceDevice.current().play(.click)
+                ble.sendControl(enabled ? "lora live off" : "lora live on")
+            } label: {
+                Label(enabled ? "장거리 통신 종료" : "장거리 통신 시작",
+                      systemImage: enabled ? "antenna.radiowaves.left.and.right.slash" : "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(enabled ? .orange : .blue)
+
+            Text(boat == 0 ? "0번은 코치용 수신 전용입니다" : "켜면 자기 위치를 보내면서 다른 배도 받습니다")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+
+            if !ble.controlReady {
+                Text("보드 연결 후 명령을 자동으로 보냅니다")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+            }
+
+            if let reply = recentLoraReply {
+                Text(reply)
+                    .font(.system(size: 9))
+                    .foregroundStyle(reply.hasPrefix("실패") ? .red : .secondary)
+            }
+        }
+    }
+
+    private var loraStatusText: String {
+        guard ble.isLive, let extra = ble.sample?.extra else { return "장거리 상태 확인 불가" }
+        guard extra.loraEnabled else { return "장거리 꺼짐 · 절전" }
+        if extra.boatID == 0 { return "장거리 수신 중 · 코치" }
+        return extra.loraPPSReady
+            ? String(format: "장거리 송수신 중 · B%02d", extra.boatID)
+            : "수신 중 · GPS 시각 대기"
+    }
+
+    private var recentLoraReply: String? {
+        guard ble.lastControlCommand.hasPrefix("lora") || ble.lastControlCommand.hasPrefix("boat"),
+              let at = ble.controlReplyAt,
+              Date().timeIntervalSince(at) < 10,
+              !ble.controlReply.isEmpty else { return nil }
+        if ble.controlReply.hasPrefix("ok lora live on") { return "장거리 통신을 시작했습니다" }
+        if ble.controlReply.hasPrefix("ok lora live off") { return "장거리 통신을 종료했습니다" }
+        if ble.controlReply.hasPrefix("ok boat") { return "배 번호를 저장했습니다" }
+        if ble.controlReply.hasPrefix("err") { return "실패: \(ble.controlReply)" }
+        return ble.controlReply
     }
 
     private var waterLockSection: some View {

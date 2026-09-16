@@ -221,6 +221,17 @@ do {
     } else {
         failures.append("  41바이트 확장 패킷 디코딩이 nil")
     }
+
+    var withLora = withDeclination
+    withLora.append(contentsOf: [7, 0x03])
+    if let s = TelemetrySample.decodeTelemetryPacket(withLora) {
+        if s.extra?.boatID != 7 || s.extra?.loraEnabled != true || s.extra?.loraPPSReady != true {
+            failures.append("  43바이트 LoRa 상태가 어긋남")
+        }
+        print("  [ OK ] 43바이트 확장 패킷 → 배 7 · 장거리 송수신 · PPS 준비")
+    } else {
+        failures.append("  43바이트 확장 패킷 디코딩이 nil")
+    }
 }
 
 expectNil("짧은 gatt(11바이트)", TelemetrySample.decodeTelemetryPacket(Data(repeating: 1, count: 11)))

@@ -43,7 +43,7 @@ bool begin();
 /// SX1262 가 설정을 받고 응답하고 있나
 bool up();
 
-/// 무전기를 재운다. 보드가 깊은잠에 들기 직전에 부른다.
+/// 무전기를 재운다. 장거리 통신을 끄거나 보드가 깊은잠에 들 때 부른다.
 ///
 /// ★ SX1262 는 RAK3112 모듈 **안에** 있어서 센서 전원 스위치(3V3_S) 밖이다.
 ///   3V3_S 를 내려도 무전기는 안 꺼진다. 지금 계속 듣는 자리(startReceive)에
@@ -95,9 +95,13 @@ void noteBoatChanged();
 /// 최근 3초 안에 받은 배를 사람이 읽게 보여준다.
 void reportPeers();
 
-/// 실시간 위치 송신을 명시적으로 켜고 끈다. 안전을 위해 부팅 기본값은 꺼짐이며
-/// 수신은 계속한다. 설정은 재부팅 뒤 유지하지 않는다.
-void setLiveEnabled(bool enabled);
+/// 장거리 통신을 켜고 끈다. boat=1~32면 자기 슬롯 송신 + 나머지 시간 수신,
+/// boat=0이면 같은 펌웨어로 수신만 한다. 끄면 SX1262를 sleep에 넣는다.
+/// 부팅 기본값은 꺼짐이며 설정은 재부팅 뒤 유지하지 않는다. 요청을 적용했으면 true.
+bool setLiveEnabled(bool enabled);
 bool liveEnabled();
+
+/// 최근 GPS PPS가 있어 충돌 없는 자기 슬롯 송신이 가능한가.
+bool ppsReady();
 
 } // namespace lora
