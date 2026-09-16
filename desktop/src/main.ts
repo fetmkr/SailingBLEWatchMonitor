@@ -908,6 +908,7 @@ async function offLoad() {
     offMsg = `받은 영역 목록을 못 읽었습니다 — ${e}`;
   }
   tmap?.setOffline(offRegions.reduce((m, r) => Math.max(m, r.maxzoom), 0));
+  syncMapNetworkNotice();
   if (!$("offPanel").hidden) renderOffPanel();
 }
 
@@ -1887,6 +1888,20 @@ function othersDoing(): string {
 const LEASE_S = 15;
 const PING_MS = 4000;
 let pinger: ReturnType<typeof setInterval> | null = null;
+let boardApBlocksMap = false;
+
+/** 보드 AP를 쓰는 동안 온라인 지도가 비는 이유와 빠져나오는 길을 지도에 둔다. */
+function syncMapNetworkNotice() {
+  const box = $("mapNetNotice");
+  box.hidden = !boardApBlocksMap;
+  $("mapNetOffline").toggleAttribute("hidden", !offRegions.length ||
+    ($("baseSel") as HTMLSelectElement).value === "offline");
+}
+
+function usingBoardAp() {
+  try { return new URL(boardUrl()).hostname === "192.168.4.1"; }
+  catch { return false; }
+}
 
 function keepAliveStart() {
   if (pinger) return;
@@ -1920,6 +1935,8 @@ function keepAliveStart() {
         return;
       }
       keepAliveStop();
+      boardApBlocksMap = false;
+      syncMapNetworkNotice();
       boardFiles = [];
       // 보드가 기록을 시작하면 WiFi 를 스스로 끈다 (기록이 WiFi 를 이긴다). 그것도 여기로 온다.
       setStatus("보드와 연락이 끊겼습니다 — 보드가 기록을 시작했거나 꺼졌습니다. 배 찾기로 다시 깨우세요.", "bad");
@@ -1928,6 +1945,8 @@ function keepAliveStart() {
   };
   void tick();
   pinger = setInterval(() => void tick(), PING_MS);
+  boardApBlocksMap = usingBoardAp();
+  syncMapNetworkNotice();
   renderSide();
 }
 
@@ -1940,7 +1959,7 @@ function keepAliveStop() {
 }
 
 /** 다 썼다고 알린다. 못 해도 그만이다 — 요청이 끊기면 보드가 알아서 끈다. */
-async function sleepBoard(quiet = false) {
+async function sleepBoard(quiet = false): Promise<boolean> {
   keepAliveStop();
   try {
     const r = await askBoard("/api/wifi/off", 4000);
@@ -1953,16 +1972,32 @@ async function sleepBoard(quiet = false) {
                   "그쪽이 끝나면 저절로 꺼집니다.", "bad");
         renderSide();
       }
-      return;
+      return false;
     }
+    boardApBlocksMap = false;
+    syncMapNetworkNotice();
     boardFiles = [];
     if (!quiet) {
       setStatus("보드 WiFi 를 껐습니다. 블루투스로 다시 찾을 수 있습니다.", "good");
       renderSide();
     }
+    return true;
   } catch (e) {
     if (!quiet) setStatus(`끄기 실패 — ${boardWhy(e)}`, "bad");
+    return false;
   }
+}
+
+/** 사용자가 전송을 마쳤다고 고른 경우에만 AP를 끄고 온라인 지도를 다시 청한다. */
+async function finishBoardTransferForMap() {
+  if (!(await sleepBoard())) return;
+  showTab(null);
+  const sel = $("baseSel") as HTMLSelectElement;
+  if (sel.value === "offline") { sel.value = "osm"; tmap?.setBase("osm"); }
+  setStatus("전송을 마쳤습니다. 원래 Wi-Fi로 돌아오면 지도를 다시 불러옵니다.", "good");
+  // AP가 사라진 뒤 운영체제가 원래 Wi-Fi로 돌아오는 시간은 일정하지 않다.
+  // 자동으로 네트워크를 바꾸지는 않고, 같은 바탕만 몇 번 다시 요청한다.
+  for (const ms of [1500, 4000, 8000]) setTimeout(() => tmap?.reloadBase(), ms);
 }
 
 const dayText = (t: number) =>
@@ -3237,7 +3272,7 @@ function wire() {
   job("list", listBoard);
   // ── 보드 찾기 단추들 ──
   job("btScan", scanBoards);
-  job("btDrop", () => sleepBoard());
+  job("btDrop", finishBoardTransferForMap);
   $("byHand").onclick = () => {
     byHand = !byHand;
     renderSide();
@@ -3254,6 +3289,14 @@ function wire() {
   ($("bySog") as HTMLInputElement).onchange = (e) =>
     mapUp()?.setColorBySog((e.target as HTMLInputElement).checked);
   $("mapFit").onclick = () => mapUp()?.fit();
+  job("mapNetDone", finishBoardTransferForMap);
+  $("mapNetOffline").onclick = () => {
+    const sel = $("baseSel") as HTMLSelectElement;
+    sel.value = "offline";
+    mapUp()?.setBase("offline");
+    syncMapNetworkNotice();
+    setStatus("보드 연결은 유지하고, 받아 둔 오프라인 지도를 봅니다.", "good");
+  };
   $("offBtn").onclick = () => {
     const box = $("offPanel");
     box.hidden = !box.hidden;
@@ -3261,6 +3304,7 @@ function wire() {
   };
   // 오프라인 바탕을 골랐는데 받은 영역이 없으면 빈 지도가 된다. 이유를 말한다.
   baseSel.addEventListener("change", () => {
+    syncMapNetworkNotice();
     if (baseSel.value === "offline" && !offRegions.length) {
       setStatus("받은 오프라인 영역이 없습니다 — 지도 아래 '영역 받기' 를 누르세요.", "bad");
     }
@@ -3797,11 +3841,6 @@ function wire() {
 
   addEventListener("resize", () => { tmap?.resize(); redraw(); });
 
-  // 앱을 닫으면 보드 WiFi 도 끈다.
-  //
-  // 이건 빨리 끄려는 것뿐이고 못 해도 괜찮다. 연락이 끊기면 보드가 15초 뒤에
-  // 스스로 끈다. 창이 닫히는 중이라 답을 기다릴 수도 없다.
-  addEventListener("beforeunload", () => { if (pinger) void sleepBoard(true); });
   addEventListener("dragover", (e) => e.preventDefault());
   wirePickers();
 
@@ -3848,7 +3887,7 @@ function wire() {
 }
 
 wire();
-initFleetUI(() => sleepBoard(true));
+initFleetUI();
 loadLayout();
 redraw();
 // 영상이 아직 없으므로 싱크와 어긋남 맞추기를 흐리게 해 둔다.
@@ -3893,7 +3932,3 @@ if (import.meta.env.DEV) {
 if (import.meta.env.DEV) {
   void lib.load().then((l) => { if (!l.lastOpen) void loadSample(); });
 }
-
-
-
-

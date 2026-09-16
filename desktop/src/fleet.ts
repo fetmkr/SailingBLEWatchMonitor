@@ -311,16 +311,13 @@ async function disconnectFleet(turnRadioOff = true) {
   render();
 }
 
-let releaseReviewBoard: (() => void | Promise<void>) | null = null;
-
 function setMode(mode: "review" | "fleet") {
   const before = document.body.dataset.mode;
   document.body.dataset.mode = mode;
   document.querySelectorAll<HTMLElement>("#modeSeg button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
   localStorage.setItem("appMode.v1", mode);
-  // 두 모드가 전역 BLE 연결 하나를 동시에 잡지 않게 한다.
-  // 리뷰의 파일용 WiFi도 놓아야 보드가 BLE 광고로 돌아온다.
-  if (mode === "fleet" && before === "review") void Promise.resolve(releaseReviewBoard?.());
+  // 화면을 바꾸는 것만으로 파일 전송용 보드 AP를 끄면 안 된다.
+  // 함대 수신 보드는 BLE, 기록 보드는 WiFi라 두 연결을 함께 유지할 수 있다.
   if (mode === "review" && before === "fleet") void disconnectFleet();
   if (mode === "fleet") requestAnimationFrame(() => { mapUp().resize(); render(); });
 }
@@ -341,8 +338,7 @@ function seedBrowserPreview() {
   }
 }
 
-export function initFleetUI(onEnterFleet?: () => void | Promise<void>) {
-  releaseReviewBoard = onEnterFleet ?? null;
+export function initFleetUI() {
   document.querySelectorAll<HTMLElement>("#modeSeg button").forEach((b) => {
     b.onclick = () => setMode(b.dataset.mode === "fleet" ? "fleet" : "review");
   });

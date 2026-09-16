@@ -737,6 +737,20 @@ canvas {
 }
 #map { flex: 1; min-height: 0; background: var(--tl-plot); }
 
+/* 보드 AP는 인터넷이 없다. 빈 지도를 고장처럼 보이지 않게 설명하고,
+   끊기는 사용자가 명시적으로 고를 때만 한다. */
+#mapNetNotice {
+  position: absolute; left: 50%; top: 12px; z-index: 6; transform: translateX(-50%);
+  width: min(620px, calc(100% - 24px)); display: flex; align-items: center; gap: var(--sp2);
+  padding: var(--sp2) var(--sp3); border: 1px solid #f59e0b88; border-radius: var(--r);
+  background: color-mix(in srgb, var(--panel) 94%, #f59e0b); box-shadow: 0 6px 20px #0007;
+}
+#mapNetNotice[hidden] { display: none; }
+#mapNetNotice > div { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+#mapNetNotice b { color: #f59e0b; }
+#mapNetNotice span { color: var(--dim); font-size: var(--fs-sm); }
+#mapNetNotice button { flex: none; white-space: nowrap; }
+
 /* 지도 자체 글씨는 밝은 바탕 위라 어둡게 둔다 */
 #mapPane .maplibregl-ctrl-attrib { font-size: var(--fs-xxs); }
 #mapPane .maplibregl-ctrl-attrib a { color: #1e3a5f; }
@@ -990,6 +1004,8 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
      파일과 구간은 세션 서랍과 시간 막대에서 그대로 확인할 수 있다. */
   #topbar #range, #topbar #fileTag { display: none; }
   .mode-seg { width: 210px; }
+  #mapNetNotice { align-items: stretch; flex-wrap: wrap; }
+  #mapNetNotice > div { flex-basis: 100%; }
 
   /* 리뷰의 오른쪽 서랍은 가운데를 100px대로 짓누르지 않고 필요할 때 위에 뜬다. */
   #shell { position: relative; }

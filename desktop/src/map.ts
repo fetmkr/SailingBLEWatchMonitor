@@ -358,6 +358,11 @@ export class TrackMap {
     this.reskin();
   }
 
+  /** 네트워크가 돌아온 뒤 실패했던 온라인 타일을 다시 요청한다. */
+  reloadBase() {
+    this.reskin();
+  }
+
   setSeamark(on: boolean) {
     if (on === this.seamarkOn) return;
     this.seamarkOn = on;

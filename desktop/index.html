@@ -99,6 +99,14 @@
           </div>
           <div id="mapPane">
             <div id="map"></div>
+            <div id="mapNetNotice" hidden>
+              <div>
+                <b>보드 Wi-Fi 연결 중</b>
+                <span>인터넷이 없는 AP라 온라인 지도는 잠시 보이지 않습니다. 기록은 계속 받을 수 있습니다.</span>
+              </div>
+              <button id="mapNetOffline" class="ghost" hidden>오프라인 지도 보기</button>
+              <button id="mapNetDone">전송 마침 · 온라인 지도</button>
+            </div>
             <div id="mapBar">
               <select id="baseSel" title="바탕 지도"></select>
               <label class="chk"><input id="seamark" type="checkbox" /> 해도</label>
@@ -122,7 +130,7 @@
           <div class="subbar">
             <button id="btScan">배 찾기</button>
             <button id="btDrop" class="ghost" style="display: none"
-                    title="보드 WiFi 를 끄고 블루투스로 돌아갑니다">연결 해제</button>
+                    title="보드 AP를 끄고 온라인 지도로 돌아갑니다">전송 마침</button>
             <span style="flex: 1"></span>
             <button id="byHand" class="ghost" title="주소를 직접 치겠다">주소로</button>
           </div>
