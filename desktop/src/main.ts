@@ -274,7 +274,7 @@ function buildSeries(s: hlog.Session) {
   const hdg = new Float32Array(s.nav.length);
   // 보드가 그 줄을 만들 때 보여준 방위 (HLG v1.2 부터). 옛 파일은 전부 NaN
   const boardHdg = new Float32Array(s.nav.length);
-  let boardHdgRows = 0;
+  let boardHdgRows = 0, headingCautionRows = 0;
   const hacc = new Float32Array(s.nav.length);
   const magX = new Float32Array(s.nav.length);
   const magY = new Float32Array(s.nav.length);
@@ -320,6 +320,7 @@ function buildSeries(s: hlog.Session) {
     batt[i] = r.battMv ? r.battMv / 1000 : NaN;
     boardHdg[i] = r.boardHdgDeg ?? NaN;
     if (r.boardHdgDeg !== null) boardHdgRows++;
+    if (heading.isFusionFormula(hdrH.hdgFormula) && (r.event & 0x08)) headingCautionRows++;
 
     // ── 방위(HDG) — 보드와 같은 식 ──
     //   가속은 이 줄 시각 직전의 IMU 표본을 쓴다 (보드는 그 순간 들고 있던 가속). 자력이 0 이면 보드가
@@ -490,9 +491,9 @@ function buildSeries(s: hlog.Session) {
     hdgRows.push({
       code: "HDG", name: `${hdgName} · 보드 기록 HDG`, unit: "deg",
       color: sc("hdg", "#ffd166"), xs: navX, ys: boardHdg, limit: [0, 360],
-      ...(hdgCfg ? { alt: { ys: hdg, name: `${hdgName} · 머리글 설정으로 재계산`, tag: "재계산" } } : {}),
+      ...(hdgCfg && heading.canRecalculate(hdrH.hdgFormula) ? { alt: { ys: hdg, name: `${hdgName} · 머리글 설정으로 재계산`, tag: "재계산" } } : {}),
     });
-    hdgFitHtml = `<div class="row dim">보드 기록 HDG: HLG 줄마다 저장된 값 ${boardHdgRows.toLocaleString()}줄 / ${s.nav.length.toLocaleString()}줄</div>`;
+    hdgFitHtml = `<div class="row dim">보드 기록 HDG: HLG 줄마다 저장된 값 ${boardHdgRows.toLocaleString()}줄 / ${s.nav.length.toLocaleString()}줄${heading.isFusionFormula(hdrH.hdgFormula) ? ` · 품질 주의 ${headingCautionRows.toLocaleString()}줄` : ""}</div>`;
   } else {
     let ys = hdg;
     let suffix = hdgCfg ? " · 머리글 설정으로 재계산" : "";
@@ -3871,7 +3872,6 @@ if (import.meta.env.DEV) {
 if (import.meta.env.DEV) {
   void lib.load().then((l) => { if (!l.lastOpen) void loadSample(); });
 }
-
 
 
 

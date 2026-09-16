@@ -39,6 +39,12 @@ c++ -std=c++17 -Wall -Wextra -O2 -I"$ROOT/firmware-rak/include" \
 "$BUILD/fw_logic_test" > "$BUILD/fw_logic_test.log"
 ok "펌웨어 순수 로직 회귀 시험 통과 ($(grep -c '\[ OK \]' "$BUILD/fw_logic_test.log")개)"
 
+# 3축 hard/soft-iron 타원체 보정: 중심·행렬 복원, 한쪽/평면 표본 거절.
+c++ -std=c++17 -Wall -Wextra -Werror -O2 -I"$ROOT/firmware-idf/main" \
+    "$ROOT/firmware-idf/tests/mag_calibration_test.cpp" "$ROOT/firmware-idf/main/mag_calibration.cpp" \
+    -o "$BUILD/mag_calibration_test"
+"$BUILD/mag_calibration_test"
+
 # 방위 식 — 보드(C++ heading_tilt.h)와 데스크탑·아이패드 앱(TS heading.ts)이 같은 값을 내나 (체크리스트 05, 2026-09-15)
 c++ -std=c++17 -Wall -Wextra -O2 -I"$ROOT/firmware-rak/include" \
     -o "$BUILD/heading_vectors" "$ROOT/firmware-rak/tools/heading_vectors.cpp"
@@ -47,6 +53,15 @@ c++ -std=c++17 -Wall -Wextra -O2 -I"$ROOT/firmware-rak/include" \
     --bundle --platform=node --log-level=warning --outfile="$BUILD/heading_check.cjs"
 node "$BUILD/heading_check.cjs" "$BUILD/heading_vectors.tsv"
 ok "방위 식 보드 ↔ 앱 일치"
+
+# IDF 실물과 같은 Fusion C + wrapper: 자세·운동 가속·회전·센서 끊김.
+cc -std=c99 -Wall -Wextra -O2 -I"$ROOT/firmware-idf/components/fusion" \
+    -c "$ROOT/firmware-idf/components/fusion/FusionAhrs.c" -o "$BUILD/FusionAhrs.o"
+c++ -std=c++17 -Wall -Wextra -Werror -O2 \
+    -I"$ROOT/firmware-idf/components/fusion" -I"$ROOT/firmware-idf/main" -I"$ROOT/firmware-rak/include" \
+    "$ROOT/firmware-idf/tests/heading_test.cpp" "$ROOT/firmware-idf/main/heading_filter.cpp" \
+    "$BUILD/FusionAhrs.o" -o "$BUILD/heading_filter_test"
+"$BUILD/heading_filter_test"
 
 # ── 2. C++ ↔ Swift 교차 검증 ─────────────────────────────────────────────
 bar "2/4  펌웨어 인코더 ↔ 앱 디코더 교차 검증"

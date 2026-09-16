@@ -58,6 +58,7 @@ def parse_header(buf: bytes) -> dict:
 
     want = struct.unpack_from("<H", buf, 126)[0]
     got = crc16(buf[:126])
+    s = tuple(v / 4096.0 for v in struct.unpack_from("<6h", buf, 106))
     h = {
         "ver": f"{buf[4]}.{buf[5]}",
         "header_size": struct.unpack_from("<H", buf, 6)[0],
@@ -88,6 +89,8 @@ def parse_header(buf: bytes) -> dict:
         "hdg_off_deg": struct.unpack_from("<f", buf, 86)[0],
         "hdg_decl_deg": struct.unpack_from("<f", buf, 90)[0],
         "mag_hard_iron_ut": struct.unpack_from("<3f", buf, 94),
+        "mag_soft_iron": (s[0], s[1], s[2], s[1], s[3], s[4], s[2], s[4], s[5]),
+        "mag_cal_version": buf[118],
         "crc_ok": want == got,
         "crc_want": want,
         "crc_got": got,
@@ -249,6 +252,9 @@ def main() -> int:
             print(f"  보드 방위     {rng}   없음 {miss:,}/{len(navs):,} ({100.0 * miss / len(navs):.1f}%)")
         else:
             print("  보드 방위     이 판(v1.1 이하)에는 칸이 없습니다")
+        if h["hdg_formula"] in (4, 5):
+            caution = sum(bool(r["event"] & 0x08) for r in navs)
+            print(f"  방위 품질 주의 {caution:,}/{len(navs):,}줄 (Fusion 식 {h['hdg_formula']}, event bit 3)")
         marks = [r for r in navs if r["event"] & 0x01]
         print(f"  마킹          {len(marks)}회" +
               (f"  (local_ms {', '.join(str(m['local_ms']) for m in marks[:5])})" if marks else ""))

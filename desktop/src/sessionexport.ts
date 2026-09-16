@@ -209,7 +209,7 @@ ${trkpts.join("\n")}
   sog_kn_pos5s        계산값 — 5초 창 위치 차분 속도 (앱 SOG cal 과 같음)
   cog_deg_pos5s       계산값 — 5초 창 위치 차분 방향, 움직인 거리 3 m 넘을 때만 (앱 COG cal)
   num_sv fix hacc_m batt_v event   원본
-  mag_*_uT            HLG 에 적힌 자력 (보드가 하드아이언을 뺀 값, 자력계 축)
+  mag_*_uT            HLG 에 적힌 자력 (식 5는 센서 원본, 이전 식은 당시 보드가 기록한 값)
   hdg_board_hlg_deg   보드가 그 줄을 만들 때 화면·BLE·TXT 에 보여준 방위 (HLG 1.2 부터, 옛 파일은 빈칸)
   hdg_board_txt_deg   붙인 TXT 의 보드 방위를 TXT 끝 NAV 줄 번호로 붙인 것 (10초마다, 정수)
   hdg_recomputed_deg  계산값 — ${hdgRecompName || "없음"}

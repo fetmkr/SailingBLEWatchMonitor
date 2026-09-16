@@ -61,6 +61,7 @@
 #include <cstdint>
 
 #include "driver/i2c_master.h"
+#include "mag_calibration.h"
 
 namespace imu {
 
@@ -80,6 +81,8 @@ bool saveGyrOffsets();            // gyr_x/y/z (float blob) · gyr_u = 2
 void setGyrOffsets(float x, float y, float z);
 void gyrOffsets(float* x, float* y, float* z);
 void setMagOffset(float ox, float oy, float oz, float radius, float resid);   // magcal 이 부른다 (저장은 부르는 쪽)
+bool setMagCalibration(const magcal2::Calibration& calibration);             // hard + soft iron
+const magcal2::Calibration& magCalibration();
 const float* magOffset();
 float magRadius();
 float magResid();
@@ -107,6 +110,7 @@ float readTempC();
 bool ok();
 bool magOk();
 bool magFresh();
+uint32_t magLastOkMs();           // 마지막 정상 자력 읽기(New 또는 Repeat)
 uint32_t magLastChangeMs();       // 자력 값이 마지막으로 바뀐 때 (0 = 없음). hdg 명령이 찍는다
 bool fifoOn();
 const Vec& acc();
@@ -122,6 +126,7 @@ uint32_t magCount(int check);
 uint32_t fifoOverrun();
 uint32_t fifoSets();
 uint32_t tickMs();
+uint32_t headingRevision();      // reconnect/calibration invalidates heading filter state
 uint32_t i2cErrors();
 
 bool diagBegin();                 // doImu 머리. false 면 붙이기 실패 (이미 줄을 닫았다)

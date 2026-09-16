@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/unistd.h>
 #include <time.h>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -603,6 +604,16 @@ bool start(const Header& h) {
     memcpy(hdr + kOffHdgOff,  &h.hdgOff,  4);
     memcpy(hdr + kOffHdgDecl, &h.hdgDecl, 4);
     memcpy(hdr + kOffMagHi,   h.magHi,   12);
+    const uint8_t magSiIndex[6] = {0, 1, 2, 4, 5, 8};
+    for (int i = 0; i < 6; ++i) {
+        long q = lroundf(h.magSi[magSiIndex[i]] * kMagSiScale);
+        if (q < -32768) q = -32768;
+        if (q >  32767) q =  32767;
+        const uint16_t bits = (uint16_t)(int16_t)q;
+        hdr[kOffMagSi + i * 2] = (uint8_t)bits;
+        hdr[kOffMagSi + i * 2 + 1] = (uint8_t)(bits >> 8);
+    }
+    hdr[kOffMagCalVer] = h.magCalVersion;
     const uint16_t hcrc = crc16(hdr, 126);
     hdr[126] = (uint8_t)hcrc; hdr[127] = (uint8_t)(hcrc >> 8);
     // ★ 머리글이 다 들어갔는지 본다. 안 들어간 파일은 나중에 못 읽는다.

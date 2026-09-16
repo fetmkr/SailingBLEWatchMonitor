@@ -46,6 +46,7 @@ export function parseTxt(text: string): BoardTxt {
   const sess = text.match(/^#.*세션\s+(\d+)/m);
   // 2026-09-15 펌웨어부터 TXT 머리에 "# 방위(화면·BLE·TXT): 기울기 보정…" 줄을 쓴다 (main.cpp buildHeadingNote).
   // 그 전 펌웨어는 화면·BLE·TXT 모두 평평 식이었다 (main.cpp boatHeadingDeg 주석 "2026-09-15 까지 … 평평 식").
+  const fusion = text.match(/^# 방위\(화면·BLE·TXT\): .*Fusion.*식([45])/m);
   const tilt = /^# 방위\(화면·BLE·TXT\): 기울기 보정/m.test(text);
   const rows: TxtRow[] = [];
   for (const line of text.split("\n")) {
@@ -59,8 +60,9 @@ export function parseTxt(text: string): BoardTxt {
   }
   return {
     session: sess ? +sess[1] : null,
-    formula: tilt ? heading.FORMULA_TILT : heading.FORMULA_FLAT,
-    formulaWhy: tilt
+    formula: fusion ? (fusion[1] === "5" ? heading.FORMULA_FUSION_MAG3D : heading.FORMULA_FUSION)
+                    : tilt ? heading.FORMULA_TILT : heading.FORMULA_FLAT,
+    formulaWhy: fusion ? "TXT 머리에 적힌 식: 센서 융합 (단일 표본 재계산 불가)" : tilt
       ? "TXT 머리에 적힌 식: 기울기 보정"
       : "TXT 머리에 방위 식 줄이 없음 → 2026-09-15 전 펌웨어 → 평평 식 atan2 (편각 없음)",
     rows,

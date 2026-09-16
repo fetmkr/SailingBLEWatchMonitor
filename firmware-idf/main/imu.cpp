@@ -145,14 +145,13 @@ Vec      sAcc, sGyr, sMag, sMagRaw;
 float    sTempC = 0.0f;
 float    sGyrOff[3] = {0.0f, 0.0f, 0.0f};
 bool     sGyrNeedSave = false;
-float    sMagOff[3] = {0.0f, 0.0f, 0.0f};
-float    sMagRadius = 0.0f;
-float    sMagResid  = 0.0f;
+magcal2::Calibration sMagCalibration;
 float    sAsa[3]    = {1.0f, 1.0f, 1.0f};
 uint8_t  sAsaRaw[3] = {0, 0, 0};
 
 bool     sFifoOn      = false;
 uint32_t sImuTickMs   = 0;
+uint32_t sHeadingRevision = 0;
 uint32_t sFifoOverrun = 0;
 uint32_t sFifoSets    = 0;
 int      sPending     = 0;
@@ -160,6 +159,13 @@ uint32_t sDropped     = 0;
 
 uint32_t sLostAt     = 0;   // 0 이면 붙어 있다
 uint32_t sPauseUntil = 0;   // test imu
+
+void updateCorrectedMag() {
+    const float raw[3] = {sMagRaw.x, sMagRaw.y, sMagRaw.z};
+    float corrected[3];
+    magcal2::apply(sMagCalibration, raw, corrected);
+    sMag = {corrected[0], corrected[1], corrected[2]};
+}
 
 // ── MPU6500_WE / MPU9250_WE 함수 ─────────────────────────────────────────
 
@@ -452,16 +458,27 @@ i2c_master_bus_handle_t bus() { return sBus; }
 
 int loadSettings() {
     sGyrOff[0] = sGyrOff[1] = sGyrOff[2] = 0.0f;
-    sMagOff[0] = sMagOff[1] = sMagOff[2] = 0.0f;
-    sMagRadius = sMagResid = 0.0f;
+    sMagCalibration = magcal2::identity();
     uint8_t gyrUnit = 0;
     nvs_handle_t h = 0;
     if (nvs_open("sail", NVS_READONLY, &h) == ESP_OK) {
-        sMagOff[0] = getF(h, "mag_ox", 0.0f);
-        sMagOff[1] = getF(h, "mag_oy", 0.0f);
-        sMagOff[2] = getF(h, "mag_oz", 0.0f);
-        sMagRadius = getF(h, "mag_r",  0.0f);
-        sMagResid  = getF(h, "mag_res", 0.0f);
+        sMagCalibration.bias[0] = getF(h, "mag_ox", 0.0f);
+        sMagCalibration.bias[1] = getF(h, "mag_oy", 0.0f);
+        sMagCalibration.bias[2] = getF(h, "mag_oz", 0.0f);
+        sMagCalibration.fieldUt = getF(h, "mag_r",  0.0f);
+        sMagCalibration.rmsUt   = getF(h, "mag_res", 0.0f);
+        uint8_t magVersion = 0;
+        size_t matrixBytes = sizeof sMagCalibration.matrix;
+        if (nvs_get_u8(h, "mag_ver", &magVersion) == ESP_OK && magVersion == 2 &&
+            nvs_get_blob(h, "mag_mtx", sMagCalibration.matrix, &matrixBytes) == ESP_OK &&
+            matrixBytes == sizeof sMagCalibration.matrix) {
+            sMagCalibration.version = 2;
+            sMagCalibration.condition = getF(h, "mag_cond", 1.0f);
+            sMagCalibration.coverage  = getF(h, "mag_cov", 0.0f);
+        } else if (sMagCalibration.bias[0] != 0.0f || sMagCalibration.bias[1] != 0.0f ||
+                   sMagCalibration.bias[2] != 0.0f || sMagCalibration.fieldUt != 0.0f) {
+            sMagCalibration.version = 1;
+        }
         sGyrOff[0] = getF(h, "gyr_x", 0.0f);
         sGyrOff[1] = getF(h, "gyr_y", 0.0f);
         sGyrOff[2] = getF(h, "gyr_z", 0.0f);
@@ -476,10 +493,20 @@ int loadSettings() {
     // 범위 검사 (firmware-rak 430-442 의 IMU 줄)
     int fixed = 0;
     bool magBad = false;
-    for (int i = 0; i < 3; ++i) magBad |= hdg::sanitizeFloat(&sMagOff[i], -500.0f, 500.0f, 0.0f);
-    if (magBad) { sMagOff[0] = sMagOff[1] = sMagOff[2] = 0.0f; sMagRadius = sMagResid = 0.0f; ++fixed; }
-    fixed += hdg::sanitizeFloat(&sMagRadius, 0.0f, 500.0f, 0.0f);
-    fixed += hdg::sanitizeFloat(&sMagResid,  0.0f, 500.0f, 0.0f);
+    for (int i = 0; i < 3; ++i) magBad |= hdg::sanitizeFloat(&sMagCalibration.bias[i], -500.0f, 500.0f, 0.0f);
+    fixed += hdg::sanitizeFloat(&sMagCalibration.fieldUt, 0.0f, 500.0f, 0.0f);
+    fixed += hdg::sanitizeFloat(&sMagCalibration.rmsUt,   0.0f, 500.0f, 0.0f);
+    if (magBad) { sMagCalibration = magcal2::identity(); ++fixed; }
+    else if (sMagCalibration.version == 2 && !magcal2::usable(sMagCalibration)) {
+        // 행렬만 망가졌으면 검증된 옛 하드아이언은 살린다.
+        const float bias[3] = {sMagCalibration.bias[0], sMagCalibration.bias[1], sMagCalibration.bias[2]};
+        const float field = sMagCalibration.fieldUt, residual = sMagCalibration.rmsUt;
+        sMagCalibration = magcal2::identity();
+        for (int i = 0; i < 3; ++i) sMagCalibration.bias[i] = bias[i];
+        sMagCalibration.fieldUt = field; sMagCalibration.rmsUt = residual;
+        sMagCalibration.version = 1;
+        ++fixed;
+    }
     for (int i = 0; i < 3; ++i) fixed += hdg::sanitizeFloat(&sGyrOff[i], -32768.0f, 32768.0f, 0.0f);
     return fixed;
 }
@@ -500,6 +527,7 @@ bool saveGyrOffsets() {
 }
 
 void setGyrOffsets(float x, float y, float z) {
+    ++sHeadingRevision;
     sGyrOff[0] = x; sGyrOff[1] = y; sGyrOff[2] = z;
     applyGyrOffsets();
 }
@@ -509,15 +537,28 @@ void gyrOffsets(float* x, float* y, float* z) {
     if (z) *z = sGyrOff[2];
 }
 void setMagOffset(float ox, float oy, float oz, float radius, float resid) {
-    sMagOff[0] = ox; sMagOff[1] = oy; sMagOff[2] = oz;
-    sMagRadius = radius; sMagResid = resid;
+    sMagCalibration = magcal2::identity();
+    sMagCalibration.bias[0] = ox; sMagCalibration.bias[1] = oy; sMagCalibration.bias[2] = oz;
+    sMagCalibration.fieldUt = radius; sMagCalibration.rmsUt = resid;
+    if (ox != 0.0f || oy != 0.0f || oz != 0.0f || radius != 0.0f) sMagCalibration.version = 1;
+    updateCorrectedMag();
+    ++sHeadingRevision;
 }
-const float* magOffset() { return sMagOff; }
-float magRadius() { return sMagRadius; }
-float magResid() { return sMagResid; }
+bool setMagCalibration(const magcal2::Calibration& calibration) {
+    if (!magcal2::usable(calibration)) return false;
+    sMagCalibration = calibration;
+    updateCorrectedMag();
+    ++sHeadingRevision;
+    return true;
+}
+const magcal2::Calibration& magCalibration() { return sMagCalibration; }
+const float* magOffset() { return sMagCalibration.bias; }
+float magRadius() { return sMagCalibration.fieldUt; }
+float magResid() { return sMagCalibration.rmsUt; }
 
 // ★ 옛 재연결은 imuBegin() 만 불러서 FIFO 가 꺼진 채 imuOk 만 참이었다. 전부 여기를 탄다.
 bool attach(const char* why) {
+    ++sHeadingRevision;
     sFifoOn = false;
     if (!imuBegin()) return false;
     applyGyrOffsets();
@@ -542,6 +583,7 @@ bool attach(const char* why) {
 //   persist = false  부팅. 램에만. 저장값과 1 °/s 넘게 다르면 안 쓴다 (돌고 있었을 수 있음)
 bool calibrateGyro(bool persist) {
     if (!sImuOk) return false;
+    ++sHeadingRevision;
 
     sLibGyrOff[0] = sLibGyrOff[1] = sLibGyrOff[2] = 0.0f;   // 보정을 지우고 날값을 본다
 
@@ -699,10 +741,8 @@ bool update() {
             sMagRaw.x = mag::toMicroTesla(mag::le16(b),     sAsa[0]);
             sMagRaw.y = mag::toMicroTesla(mag::le16(b + 2), sAsa[1]);
             sMagRaw.z = mag::toMicroTesla(mag::le16(b + 4), sAsa[2]);
-            // 치우침을 여기서 뺀다. 아래로 가는 모든 것(방위·화면·기록)이 뺀 값을 쓴다.
-            sMag.x = sMagRaw.x - sMagOff[0];
-            sMag.y = sMagRaw.y - sMagOff[1];
-            sMag.z = sMagRaw.z - sMagOff[2];
+            // 하드아이언을 빼고 3축 soft-iron 타원체를 공으로 되돌린다.
+            updateCorrectedMag();
             fresh = true;
         }
     }
@@ -759,6 +799,7 @@ float readTempC() {
 bool ok() { return sImuOk; }
 bool magOk() { return sMagOk; }
 bool magFresh() { return sMagOk && sMagFreshness.usable(millis32()); }
+uint32_t magLastOkMs() { return sMagFreshness.lastOkMs; }
 uint32_t magLastChangeMs() { return sMagFreshness.lastChangeMs; }
 bool fifoOn() { return sFifoOn; }
 const Vec& acc() { return sAcc; }
@@ -785,6 +826,7 @@ uint32_t magCount(int check) { return (check >= 0 && check < 5) ? sMagCount[chec
 uint32_t fifoOverrun() { return sFifoOverrun; }
 uint32_t fifoSets() { return sFifoSets; }
 uint32_t tickMs() { return sImuTickMs; }
+uint32_t headingRevision() { return sHeadingRevision; }
 uint32_t i2cErrors() { return sI2cErr; }
 
 bool diagBegin() {

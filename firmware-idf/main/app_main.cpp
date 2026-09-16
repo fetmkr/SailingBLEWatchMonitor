@@ -47,9 +47,10 @@
 
 #include "board_rak.h"     // firmware-rak/include — 같이 쓴다
 #include "heading_math.h"  // sanitizeFloat · sanitizeAxes · wrap180 · eulerYawRate
-#include "heading_tilt.h"  // 방위 식 하나 (앱 heading.ts 와 같음)
+#include "heading_tilt.h"
+#include "heading_filter.h"  // OLED·BLE·기록의 상태를 가진 방위 추정기
 #include "hlog.h"
-#include "magcal.h"        // 자력 공 맞추기 판정 (firmware-rak/include — 맥에서 시험하는 식 한 곳)
+#include "mag_calibration.h" // 3축 hard/soft-iron 타원체 보정
 #include "rec_control.h"
 #include "sdcard.h"
 
@@ -321,7 +322,10 @@ static float headingTiltDeg() {
 }
 
 // 배의 방위 — 화면·BLE·TXT·NAV 가 읽는 단 하나. 못 구하면 -1 (평평 식으로 몰래 채우지 않는다)
-static float boatHeadingDeg() { return headingTiltDeg(); }
+static heading::Filter gHeading;
+static float boatHeadingDeg() {
+    return imu::ok() ? gHeading.latest(nowMs()).degrees : -1.0f;
+}
 
 // 뱃머리 방위 변화율 (°/s). ZYX 오일러 ψ̇ = (q·sinφ + r·cosφ) / cosθ
 static float yawRateNow() {
@@ -361,6 +365,13 @@ static void imuDrain() {
     if (imu::fifoBegin() > 0) {
         uint32_t tick;
         while (imu::fifoNext(&tick)) {
+            const auto& a = imu::acc(); const auto& g = imu::gyr(); const auto& m = imu::mag();
+            const float av[3] = {a.x, a.y, a.z}, gv[3] = {g.x, g.y, g.z}, mv[3] = {m.x, m.y, m.z};
+            const uint32_t received = nowMs();
+            // 같은 원시값이 연속으로 들어와도 정상 8 Hz 측정이다. 마지막 값 변화가 아니라
+            // 마지막 정상 읽기 시각으로 표본 나이를 계산한다. 5초 동결 검사는 magFresh가 맡는다.
+            const uint32_t magAge = imu::magFresh() ? received - imu::magLastOkMs() : UINT32_MAX;
+            gHeading.update(tick, received, imu::headingRevision(), hdgCfgNow(), av, gv, mv, magAge);
             gYawIntDeg += yawRateNow() * 0.010f;
             if (hlog::recording()) logWriteImu(tick);
         }
@@ -408,9 +419,9 @@ static hlog::NavSample buildNav(uint32_t ms) {
         a.hAcc = (uint16_t)(cm > 65534 ? 65534 : (cm < 0 ? 0 : cm));
     }
     a.battMv = (uint16_t)lroundf(gBattVolts * 1000.0f);
-    // 자력 0.1 µT/LSB — 하드아이언을 뺀 값. 새 표본이 없으면 0.
+    // 자력 0.1 µT/LSB — 센서 원본. 보정값과 표시 HDG는 머리글/hdg 칸에 따로 남긴다.
     if (imu::magFresh()) {
-        const imu::Vec& m = imu::mag();
+        const imu::Vec& m = imu::magRaw();
         a.mag[0] = (int16_t)lroundf(m.x * 10.0f);
         a.mag[1] = (int16_t)lroundf(m.y * 10.0f);
         a.mag[2] = (int16_t)lroundf(m.z * 10.0f);
@@ -420,6 +431,7 @@ static hlog::NavSample buildNav(uint32_t ms) {
         long cd = lroundf(h * 100.0f);
         if (cd >= 36000) cd = 0;
         a.hdg = (uint16_t)cd;
+        if (gHeading.latest(nowMs()).caution) a.event |= heading::kLogCaution;
     }
     return a;
 }
@@ -484,18 +496,22 @@ static void settleImuGap(uint32_t untilMs) {
     if (from && hlog::recording()) hlog::noteDropped(recctl::imuGapRows(from, hlog::recStartedMs(), untilMs));
 }
 
-// firmware-rak buildHeadingNote 와 같은 글자 (TXT 머리)
+// TXT에는 실제 표시 식을 적는다. 앱이 옛 평면/기울기 식으로 추측하면 안 된다.
 static void buildHeadingNote(char* out, size_t n) {
     static const char* kAx = "XYZ";
     char a[8], b[8];
     snprintf(a, sizeof a, "%c%c", gHdgSignA < 0 ? '-' : '+', kAx[gHdgAxisA < 3 ? gHdgAxisA : 0]);
     snprintf(b, sizeof b, "%c%c", gHdgSignB < 0 ? '-' : '+', kAx[gHdgAxisB < 3 ? gHdgAxisB : 0]);
-    const float* mo = imu::magOffset();
+    const magcal2::Calibration& mc = imu::magCalibration();
     snprintf(out, n,
-             "# 방위(화면·BLE·TXT): 기울기 보정(INSLIB ahrs_mag_detilt, 식3) — 축 atan2(자력 %s, 자력 %s) 기준, 중력은 그때 가속도. 운동 가속에도 계산·저장, |a| 가 1 g ±0.15 밖이면 OLED에 ?. + 장착 오프셋 %+.2f° + 자기 편각 %+.2f°\n"
-             "# 자력: HLG 의 mag 는 하드아이언을 뺀 값 — 뺀 오프셋 %.2f %.2f %.2f uT (반지름 %.1f, 잔차 %.2f)\n"
+             "# 방위(화면·BLE·TXT): 3D자력보정+Fusion v1.3.3 (식5), NED 100Hz gain=0.5 reject=10/10deg recovery=5s, 원형 IIR 반감기 1s. 축 atan2(%s,%s), off=%+.2f deg decl=%+.2f deg. ?=초기화·자력거절/공백/복구. COG 미사용.\n"
+             "# 자력: HLG mag 는 원본. 보정 v%u 중심 %.2f %.2f %.2f uT, 자기장 %.1f 잔차 %.2f 왜곡 %.2fx 분포 %.2f\n"
+             "# 보정행렬: %.5f %.5f %.5f / %.5f %.5f %.5f / %.5f %.5f %.5f\n"
              "# 가속→자력 축: 자력 X=가속 Y, Y=가속 X, Z=−가속 Z\n",
-             a, b, gHdgOffsetDeg, gHdgDeclDeg, mo[0], mo[1], mo[2], imu::magRadius(), imu::magResid());
+             a, b, gHdgOffsetDeg, gHdgDeclDeg, mc.version, mc.bias[0], mc.bias[1], mc.bias[2],
+             mc.fieldUt, mc.rmsUt, mc.condition, mc.coverage,
+             mc.matrix[0], mc.matrix[1], mc.matrix[2], mc.matrix[3], mc.matrix[4], mc.matrix[5],
+             mc.matrix[6], mc.matrix[7], mc.matrix[8]);
 }
 
 static bool logStartNow(uint32_t prevSession) {
@@ -525,12 +541,15 @@ static bool logStartNow(uint32_t prevSession) {
     h.heelAxis  = gHeelAxis;   h.heelSign  = gHeelSign < 0 ? 1 : 0;
     h.pitchAxis = gPitchAxis;  h.pitchSign = gPitchSign < 0 ? 1 : 0;
     h.heelOff   = gHeelOffsetDeg;  h.pitchOff = gPitchOffsetDeg;
-    h.hdgFormula = hlog::kHdgFormulaTiltVisible;
+    h.hdgFormula = heading::kFormula;
     h.hdgAxisA = gHdgAxisA;  h.hdgAxisB = gHdgAxisB;
     h.hdgSignA = gHdgSignA < 0 ? 1 : 0;  h.hdgSignB = gHdgSignB < 0 ? 1 : 0;
     h.hdgOff   = gHdgOffsetDeg;  h.hdgDecl = gHdgDeclDeg;
     const float* mo = imu::magOffset();
     for (int i = 0; i < 3; ++i) h.magHi[i] = mo[i];
+    const magcal2::Calibration& mc = imu::magCalibration();
+    for (int i = 0; i < 9; ++i) h.magSi[i] = mc.matrix[i];
+    h.magCalVersion = mc.version;
     h.gnssDyn = gps::state().dyModel;     // 모듈에서 실제로 읽은 값만. 못 읽었으면 255
     buildHeadingNote(gSessNote, sizeof gSessNote);
     hlog::setSessionNote(gSessNote);
@@ -770,8 +789,8 @@ static bool settingsLockedWhileRecording(const char* what) {
     return true;
 }
 
-// ── 자력계 치우침 빼기 — magcal (firmware-rak 2101-2125, 2783-2914) ─────────
-// 잰 값 = 지구 자기장 + 보드 쇠붙이가 만드는 상수. 점들이 공 껍질에 놓이고 밀린 중심이 그 상수다.
+// ── 자력계 3축 보정 — magcal ───────────────────────────────────────────────
+// hard-iron 중심을 빼고, soft-iron 타원체를 3x3 행렬로 공에 되돌린다.
 // 서로 6 µT 이상 떨어진 점만 128개까지 — 가만히 있으면 안 쌓이고, 골고루 돌려야 찬다.
 static constexpr int   kMagCalMax    = 128;
 static constexpr float kMagCalMinGap = 6.0f;   // µT
@@ -801,11 +820,14 @@ static void imuUpdateCollect() {
 }
 
 static bool magCalSave() {
-    const float* o = imu::magOffset();
-    const float r = imu::magRadius(), res = imu::magResid();
+    const magcal2::Calibration& c = imu::magCalibration();
     return nv::writeWith([&](nvs_handle_t h) {
-        return nvPutFloat(h, "mag_ox", o[0]) && nvPutFloat(h, "mag_oy", o[1]) && nvPutFloat(h, "mag_oz", o[2]) &&
-               nvPutFloat(h, "mag_r", r) && nvPutFloat(h, "mag_res", res);
+        return nvPutFloat(h, "mag_ox", c.bias[0]) && nvPutFloat(h, "mag_oy", c.bias[1]) &&
+               nvPutFloat(h, "mag_oz", c.bias[2]) && nvPutFloat(h, "mag_r", c.fieldUt) &&
+               nvPutFloat(h, "mag_res", c.rmsUt) && nvPutFloat(h, "mag_cond", c.condition) &&
+               nvPutFloat(h, "mag_cov", c.coverage) &&
+               nvs_set_blob(h, "mag_mtx", c.matrix, sizeof c.matrix) == ESP_OK &&
+               nvs_set_u8(h, "mag_ver", c.version) == ESP_OK;
     });
 }
 
@@ -821,12 +843,16 @@ static void magCalSpread(float out[3]) {
 }
 
 static void magCalStatus(char* out, size_t n) {
-    const float* o = imu::magOffset();
+    const magcal2::Calibration& c = imu::magCalibration();
+    const float* o = c.bias;
     if (gMagCalOn) {
         float sp[3]; magCalSpread(sp);
         snprintf(out, n, "magcal on %d/%d  퍼짐 %.0f/%.0f/%.0f uT", gMagCalN, kMagCalMax, sp[0], sp[1], sp[2]);
+    } else if (c.version == 2) {
+        snprintf(out, n, "magcal off v2  중심 %.1f %.1f %.1f uT  자기장 %.1f  잔차 %.2f  왜곡 %.2fx",
+                 o[0], o[1], o[2], c.fieldUt, c.rmsUt, c.condition);
     } else if (o[0] != 0.0f || o[1] != 0.0f || o[2] != 0.0f) {
-        snprintf(out, n, "magcal off  치우침 %.1f %.1f %.1f uT  반지름 %.1f  남은흔들림 %.2f",
+        snprintf(out, n, "magcal off v1  치우침 %.1f %.1f %.1f uT  반지름 %.1f  남은흔들림 %.2f",
                  o[0], o[1], o[2], imu::magRadius(), imu::magResid());
     } else {
         snprintf(out, n, "magcal off  아직 안 잼 (magcal on 으로 시작)");
@@ -869,26 +895,29 @@ static void magCalCmd(const char* arg, char* out, size_t n) {
         }
         if (!gMagCalOn) { snprintf(out, n, "magcal 모으는 중이 아닙니다 — magcal on 부터 누르세요"); return; }
         // 너무 적으면 끄지 않는다. 꺼버리면 다시 처음부터 모아야 한다.
-        if (gMagCalN < 20) {
-            snprintf(out, n, "magcal 아직 %d점뿐 — 스무 개 넘게 필요합니다. 계속 돌리세요", gMagCalN);
+        if (gMagCalN < magcal2::kMinPoints) {
+            snprintf(out, n, "magcal 아직 %d점뿐 — 3축 보정은 %d점부터 검사합니다. 계속 돌리세요",
+                     gMagCalN, magcal2::kMinPoints);
             return;
         }
-        // ★ 후보를 따로 풀고 조건을 모두 통과해야만 쓴다 (magcal.h)
-        magcal::Fit fit;
-        const magcal::Verdict v = magcal::fitAndJudge((const int16_t (*)[3])gMagCalPts, gMagCalN, &fit);
-        if (v != magcal::Verdict::Ok) {
-            snprintf(out, n, "magcal 안 씀 — %s | 후보 반지름 %.1f 잔차 %.2f 두께 %.1f uT | 점 %d | 기존 보정 그대로%s",
-                     magcal::verdictText(v), fit.r, fit.resid, fit.thickness, gMagCalN,
+        // 후보를 따로 풀고 수량·3차원 분포·자기장·왜곡·잔차를 모두 통과해야만 쓴다.
+        magcal2::Calibration fit;
+        const magcal2::Verdict v = magcal2::fitAndJudge((const int16_t (*)[3])gMagCalPts, gMagCalN, &fit);
+        if (v != magcal2::Verdict::Ok) {
+            snprintf(out, n, "magcal 안 씀 — %s | 자기장 %.1f 잔차 %.2f 왜곡 %.2fx 분포 %.2f | 점 %d | 기존 보정 그대로%s",
+                     magcal2::verdictText(v), fit.fieldUt, fit.rmsUt, fit.condition, fit.coverage, gMagCalN,
                      gMagCalN >= kMagCalMax ? " — magcal reset 뒤 사방으로 다시" : " — 계속 돌리세요");
             return;
         }
+        if (!imu::setMagCalibration(fit)) {
+            snprintf(out, n, "magcal 안 씀 — 계산 결과 내부 검사 실패 | 기존 보정 그대로");
+            return;
+        }
         gMagCalOn = false;
-        imu::setMagOffset(fit.c[0], fit.c[1], fit.c[2], fit.r, fit.resid);
         const bool saved = magCalSave();
-        const float* o = imu::magOffset();
-        snprintf(out, n, "magcal %s — 치우침 %.1f %.1f %.1f uT | 반지름 %.1f±%.2f uT | 두께 %.1f | 점 %d",
-                 saved ? "저장" : "적용(보드에 못 적음)", o[0], o[1], o[2], imu::magRadius(), imu::magResid(),
-                 fit.thickness, gMagCalN);
+        snprintf(out, n, "magcal %s v2 — 중심 %.1f %.1f %.1f uT | 자기장 %.1f±%.2f | 왜곡 %.2fx | 분포 %.2f | 점 %d",
+                 saved ? "저장" : "적용(보드에 못 적음)", fit.bias[0], fit.bias[1], fit.bias[2],
+                 fit.fieldUt, fit.rmsUt, fit.condition, fit.coverage, gMagCalN);
         return;
     }
     magCalStatus(out, n);
@@ -1354,6 +1383,9 @@ static bool blockingDiagOk(const char* what) {
 // ── 진단: imu (firmware-rak doImu · printImuLine) ──────────────────────────
 static void printImuLine() {
     if (!imu::printRaw()) return;
+    const auto estimate = gHeading.latest(nowMs());
+    if (estimate.degrees >= 0) printf(" | 표시 HDG %.1f%s", estimate.degrees, estimate.caution ? " ?" : "");
+    else printf(" | 표시 HDG ---");
     const AxisName hAx(gHeelAxis, gHeelSign), pAx(gPitchAxis, gPitchSign);
     printf(" | 힐 %+6.1f° (가속 %s)  피치 %+6.1f° (가속 %s)\n",
            currentHeelDeg(), hAx.text, currentPitchDeg(), pAx.text);
@@ -1362,7 +1394,7 @@ static void printImuLine() {
         if (tilt >= 0.0f)
             printf("   방위 비교  평평 %5.1f°  |  기울기보정 %5.1f°  |  차이 %+5.1f°\n", flat, tilt, wrap180(tilt - flat));
         else
-            printf("   방위 비교  평평 %5.1f°  |  기울기보정 ---  (가속이 1 g 에서 벗어남)\n", flat);
+            printf("   방위 비교  평평 %5.1f°  |  기울기보정 ---  (유효한 센서 입력 없음)\n", flat);
     } else if (imu::magOk()) {
         printf("   방위 비교  --- (자력 새 표본 없음)\n");
     }
@@ -1569,6 +1601,7 @@ static void cmdHdg(const char* rest) {
         if (settingsLockedWhileRecording(isDecl ? "hdg decl" : "hdg off")) return;
         if (!isDecl) deg = hdg::wrap180(deg);
         (isDecl ? gHdgDeclDeg : gHdgOffsetDeg) = deg;
+        gHeading.reset();
         const bool ok = nv::writeWith([&](nvs_handle_t h) { return nvPutFloat(h, isDecl ? "hdg_decl" : "hdg_off", deg); });
         printf("[IMU] %s %+.2f°%s\n", isDecl ? "자기 편각" : "장착 오프셋", deg, ok ? "" : " — ★ 보드에 못 적었습니다");
     } else if (!strncmp(arg, "ref", 3)) {
@@ -1586,10 +1619,13 @@ static void cmdHdg(const char* rest) {
         printf("──────────────────────────────────────────\n");
         if (flat >= 0.0f) printf("  기준 %.1f°   평평 %.1f° (오차 %+.1f°)\n", ref, flat, wrap180(flat - ref));
         else              printf("  기준 %.1f°   평평 --- (자력 새 표본 없음)\n", ref);
-        if (tilt >= 0.0f) printf("               보정 %.1f° (오차 %+.1f°)  ← 화면·BLE·기록에 쓰는 값\n", tilt, wrap180(tilt - ref));
-        else              printf("               보정 --- (자력 없음 또는 가속이 1 g 에서 벗어남)\n");
+        if (tilt >= 0.0f) printf("               순간 기울기 보정 %.1f° (오차 %+.1f°) · 진단용\n", tilt, wrap180(tilt - ref));
+        else              printf("               보정 --- (유효한 센서 입력 없음)\n");
+        const float fused = boatHeadingDeg();
+        if (fused >= 0.0f) printf("               센서 융합 %.1f° (오차 %+.1f°)%s ← 화면·BLE·기록\n", fused, wrap180(fused-ref), gHeading.latest(nowMs()).caution ? " ?" : "");
+        else printf("               센서 융합 --- (유효한 센서 입력 없음)\n");
         printf("  수평으로 두고 0°·90°·180°·270° 네 방향에서 해 보세요.\n");
-        printf("    오차가 네 방향 모두 비슷하다   → 상수다. hdg off / hdg decl 로 뺀다\n");
+        printf("    오차가 네 방향 모두 비슷하다   → 장착 기준·자북/진북 기준부터 확인한다\n");
         printf("    방향마다 다르다 (특히 부호가 바뀐다) → 축·부호·자력 치우침 문제다\n");
         printf("──────────────────────────────────────────\n");
         return;
@@ -1612,6 +1648,7 @@ static void cmdHdg(const char* rest) {
         if (a == b) { printf("  두 축이 같으면 방위가 안 나옵니다. 서로 다른 축이어야 합니다.\n"); return; }
         if (settingsLockedWhileRecording("hdg 축")) return;
         gHdgAxisA = a; gHdgAxisB = b; gHdgSignA = sa; gHdgSignB = sb;
+        gHeading.reset();
         const bool ok = nv::writeWith([&](nvs_handle_t h) {
             return nvs_set_u8(h, "hdg_a", a) == ESP_OK && nvs_set_u8(h, "hdg_b", b) == ESP_OK &&
                    nvs_set_i8(h, "hdg_sa", sa < 0 ? -1 : 1) == ESP_OK && nvs_set_i8(h, "hdg_sb", sb < 0 ? -1 : 1) == ESP_OK;
@@ -1620,19 +1657,24 @@ static void cmdHdg(const char* rest) {
     }
 
     imuUpdateCollect();
+    imuDrain();  // 설정 변경 뒤 진단도 새 추정 상태를 읽는다
     const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
     const imu::Vec& m = imu::mag();
     printf("──────────────────────────────────────────\n");
     printf("  지금 자력  %+.1f %+.1f %+.1f µT\n", m.x, m.y, m.z);
     const float hNow = flatHeadingDeg(), hBoat = boatHeadingDeg();
+    const auto estimate = gHeading.latest(nowMs());
+    printf("  방위 식 5 3D자력보정+Fusion 1.3.3 · 가속 거절 %d (%.1f°) · 자력 거절 %d (%.1f°) · 복구 %d\n",
+           estimate.accelIgnored, estimate.accelError,
+           estimate.magIgnored, estimate.magError, estimate.recovering);
     if (hNow >= 0.0f)
         printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  %.1f°  (진단용)\n",
                aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg, hNow);
     else
         printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  --- (자력 새 표본 없음)\n",
                aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg);
-    if (hBoat >= 0.0f) printf("  방위  기울기 보정 (화면·BLE·기록)  →  %.1f°\n", hBoat);
-    else               printf("  방위  기울기 보정 (화면·BLE·기록)  →  --- (자력 없음 또는 가속이 1 g 에서 벗어남)\n");
+    if (hBoat >= 0.0f) printf("  방위  센서 융합 (화면·BLE·기록)  →  %.1f°\n", hBoat);
+    else               printf("  방위  센서 융합 (화면·BLE·기록)  →  --- (유효한 센서 입력 없음)\n");
     char ago[40];
     const uint32_t lc = imu::magLastChangeMs();
     if (lc) snprintf(ago, sizeof ago, "%lu ms 전 바뀜", (unsigned long)(nowMs() - lc));
@@ -2426,11 +2468,7 @@ extern "C" void app_main(void) {
                 ds.sogValid     = lt.sogValid;
                 ds.cogValid     = lt.cogValid;
                 ds.sogCaution   = lt.sogValid && !gs.sogShownOk;
-                const imu::Vec& ha = imu::acc();
-                const float headingAcc[3] = {ha.x, ha.y, ha.z};
-                float roll, pitch;
-                ds.headingCaution = ds.headingDeg >= 0.0f &&
-                    !hdg::gravityRollPitch(headingAcc, hdgCfgNow(), &roll, &pitch);
+                ds.headingCaution = ds.headingDeg >= 0.0f && gHeading.latest(nowMs()).caution;
                 ds.heelValid    = lt.heelValid;
                 ds.gpsFix       = gs.fix;
                 ds.satellites   = p.satellites.isValid() ? (int)p.satellites.value() : 0;

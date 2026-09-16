@@ -9,7 +9,7 @@
 export const HEADER_SIZE = 128;
 export const TYPE_NAV = 0xa1;
 // v1.0·v1.1 은 38바이트. v1.2(2026-09-15)부터 40바이트 — 36~37 에 보드가 그 순간 보여준 방위(u16, 0.01°).
-// 원본 mag 는 그대로 있다. 보드 표시값을 나란히 남겨서 설정을 몰라도 그때 값을 볼 수 있게 한 것이다.
+// 식 5부터 mag 는 센서 원본이다. 보드 표시값을 나란히 남겨서 설정을 몰라도 그때 값을 볼 수 있게 한 것이다.
 export const NAV_SIZE_V1 = 38;
 export const NAV_SIZE_V2 = 40;
 export const TYPE_IMU = 0xb1;
@@ -73,14 +73,16 @@ export interface Header {
   heelOff: number;     // 기준각 (도)
   pitchOff: number;
   // 방위를 보드와 같은 식으로 다시 구할 설정 (hlog.h kOffHdgFormula, 81~105). 0 이면 옛 파일 — 안 적힘
-  hdgFormula: number;  // 0 없음 · 1 평평 · 2 기울기 보정(운동 가속 거절) · 3 운동 가속에도 계산
+  hdgFormula: number;  // 0 없음 · 1~3 단일 표본 · 4 Fusion · 5 3D자력보정+Fusion
   hdgAxisA: number;    // 0=X 1=Y 2=Z (자력계 좌표)
   hdgAxisB: number;
   hdgSignA: number;    // +1 / -1
   hdgSignB: number;
   hdgOffDeg: number;
   hdgDeclDeg: number;
-  magHardIron: [number, number, number];   // 기록된 mag 에서 이미 뺀 값 (µT). 원본 = 기록값 + 이 값
+  magHardIron: [number, number, number];
+  magSoftIron: [number, number, number, number, number, number, number, number, number];
+  magCalibrationVersion: number;
   crcOk: boolean;
 }
 
@@ -171,6 +173,8 @@ export function parseHeader(buf: Uint8Array): Header {
     throw new Error("HHLG 로 시작하지 않습니다 — 우리 파일이 아닙니다");
   }
   const hex = (n: number) => buf[n].toString(16).toUpperCase().padStart(2, "0");
+  const q = (offset: number) => d.getInt16(offset, true) / 4096;
+  const m00 = q(106), m01 = q(108), m02 = q(110), m11 = q(112), m12 = q(114), m22 = q(116);
   return {
     verMajor: buf[4],
     verMinor: buf[5],
@@ -214,6 +218,8 @@ export function parseHeader(buf: Uint8Array): Header {
     hdgOffDeg: d.getFloat32(86, true),
     hdgDeclDeg: d.getFloat32(90, true),
     magHardIron: [d.getFloat32(94, true), d.getFloat32(98, true), d.getFloat32(102, true)],
+    magSoftIron: [m00, m01, m02, m01, m11, m12, m02, m12, m22],
+    magCalibrationVersion: buf[118],
     crcOk: d.getUint16(126, true) === crc16(buf, 0, 126),
   };
 }

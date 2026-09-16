@@ -164,10 +164,13 @@ constexpr size_t kOffPrevSession = 77;  // U4  이어받은 앞 세션 번호. 0
 //   hdg_formula  0 = 안 적힘(옛 파일)  1 = 평평 atan2  2 = 기울기 보정(INSLIB ahrs_mag_detilt,
 //                중력은 그때 가속도에서, |a| 가 1 g ±0.15 를 벗어나면 방위 없음)
 //                3 = 같은 기울기 보정, 운동 가속에도 계산·저장 (OLED에는 ?로 품질 표시)
+//                4 = Fusion v1.3.3 + hard-iron, 기록 mag 는 보정값 (옛 IDF 시험판)
+//                5 = 3D hard/soft-iron + Fusion v1.3.3, 기록 mag 는 원본
 //   축 A·B·부호  방위 = atan2(A·sA, B·sB) 의 두 축 (0=X 1=Y 2=Z, 부호 0=+ 1=-). 자력계 좌표
 //                앞 = B·sB, 오른쪽 = −A·sA, 아래 = 오른손 법칙
 //   가속→자력 축은 고정: 자력 X = 가속 Y, 자력 Y = 가속 X, 자력 Z = −가속 Z
-//   mag_hi       기록된 mag 에서 이미 뺀 하드아이언 오프셋 (µT). 원본 = 기록값 + 이 값
+//   mag_hi       보정의 hard-iron 중심 (µT). 식 1~4: 원본 = 기록값 + 이 값. 식 5: 기록값 자체가 원본
+//   mag_si       식 5의 대칭 3×3 soft-iron 보정행렬 6개, Q12 int16. 보정=행렬×(mag-mag_hi)
 //   세션 도중 설정이 바뀌면 TXT 에 사건 줄로 남는다 (머리글은 시작 때 값)
 constexpr size_t kOffHdgFormula = 81;  // U1
 constexpr size_t kOffHdgAxisA   = 82;  // U1
@@ -177,6 +180,9 @@ constexpr size_t kOffHdgSignB   = 85;  // U1
 constexpr size_t kOffHdgOff     = 86;  // R4  장착 오프셋 (도)
 constexpr size_t kOffHdgDecl    = 90;  // R4  자기 편각 (도, 동편 +)
 constexpr size_t kOffMagHi      = 94;  // R4×3  뺀 하드아이언 (µT) 94·98·102
+constexpr size_t kOffMagSi      = 106; // S2×6 Q12: m00,m01,m02,m11,m12,m22
+constexpr size_t kOffMagCalVer  = 118; // U1  0 없음, 1 hard-iron, 2 hard+soft-iron
+constexpr float  kMagSiScale    = 4096.0f;
 constexpr uint8_t kHdgFormulaFlat = 1;
 constexpr uint8_t kHdgFormulaTilt = 2;
 // 같은 기울기 보정식. 운동 가속(1g ±0.15 밖)도 계산·저장하고 OLED에는 ?로 표시한다.
@@ -245,6 +251,10 @@ struct Header {
     float    hdgOff     = 0.0f;
     float    hdgDecl    = 0.0f;
     float    magHi[3]   = {0.0f, 0.0f, 0.0f};
+    float    magSi[9]   = {1.0f, 0.0f, 0.0f,
+                           0.0f, 1.0f, 0.0f,
+                           0.0f, 0.0f, 1.0f};
+    uint8_t  magCalVersion = 0;
 };
 
 // 한 시점을 눈으로 볼 값 (10초에 한 줄 나가는 텍스트용).

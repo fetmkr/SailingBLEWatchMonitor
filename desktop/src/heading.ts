@@ -26,6 +26,16 @@ export const FORMULA_NONE = 0;
 export const FORMULA_FLAT = 1;
 export const FORMULA_TILT = 2;
 export const FORMULA_TILT_VISIBLE = 3;
+export const FORMULA_FUSION = 4;
+export const FORMULA_FUSION_MAG3D = 5;
+
+export function isFusionFormula(formula: number): boolean {
+  return formula === FORMULA_FUSION || formula === FORMULA_FUSION_MAG3D;
+}
+
+export function canRecalculate(formula: number): boolean {
+  return formula === FORMULA_FLAT || formula === FORMULA_TILT || formula === FORMULA_TILT_VISIBLE;
+}
 
 function wrap360(deg: number): number {
   if (!Number.isFinite(deg)) return NaN;
@@ -85,19 +95,26 @@ export function flatHeadingDeg(mag: readonly number[], c: HeadingCfg): number {
 /** 사람이 읽는 식 설명. 화면에 그대로 보여준다 — 무엇으로 계산했는지 숨기지 않는다. */
 export function describe(h: {
   hdgFormula: number; hdgAxisA: number; hdgAxisB: number; hdgSignA: number; hdgSignB: number;
-  hdgOffDeg: number; hdgDeclDeg: number; magHardIron: [number, number, number];
+  hdgOffDeg: number; hdgDeclDeg: number; magHardIron: [number, number, number]; magCalibrationVersion: number;
 }): string {
   if (h.hdgFormula === FORMULA_NONE) {
     return "방위: 이 파일에는 보드의 방위 설정이 없습니다 (2026-09-15 전 펌웨어). 설정을 짐작해서 그리지 않습니다 — 같은 세션 TXT 를 붙이면 보드 기록 HDG 와 추정 설정으로 재계산을 봅니다.";
   }
   const ax = (a: number, s: number) => `${s < 0 ? "−" : "+"}${"XYZ"[a] ?? "?"}`;
   const sgn = (v: number) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}`;
-  const kind = h.hdgFormula === FORMULA_TILT_VISIBLE
+  const kind = h.hdgFormula === FORMULA_FUSION_MAG3D
+    ? "3D 자력 보정 + 센서 융합 (Fusion 1.3.3 · 보드에 저장된 HDG 사용 · COG 미사용)"
+    : h.hdgFormula === FORMULA_FUSION
+    ? "센서 융합 (Fusion 1.3.3 · 보드에 저장된 HDG 사용 · 초기 상태가 없어 단일 표본 재계산 불가)"
+    : h.hdgFormula === FORMULA_TILT_VISIBLE
     ? "기울기 보정 (INSLIB ahrs_mag_detilt · 운동 가속에도 계산 · 1 g ±0.15 밖이면 보드 OLED에 ?)"
     : h.hdgFormula === FORMULA_TILT
     ? "기울기 보정 (INSLIB ahrs_mag_detilt · 중력은 그때 가속도 · 1 g ±0.15 밖이면 없음)"
     : h.hdgFormula === FORMULA_FLAT ? "평평 atan2 (기울기 보정 없음)" : `알 수 없는 식 번호 ${h.hdgFormula}`;
   const hi = h.magHardIron.map((v) => v.toFixed(1)).join(", ");
+  const mag = h.hdgFormula === FORMULA_FUSION_MAG3D
+    ? `기록 자력은 센서 원본 · 보정 v${h.magCalibrationVersion} 중심 (${hi}) µT`
+    : `기록된 자력은 하드아이언 (${hi}) µT 를 뺀 값`;
   return `방위: 보드와 같은 식 — ${kind} · 축 atan2(${ax(h.hdgAxisA, h.hdgSignA)}, ${ax(h.hdgAxisB, h.hdgSignB)}) · ` +
-         `장착 오프셋 ${sgn(h.hdgOffDeg)}° · 편각 ${sgn(h.hdgDeclDeg)}° · 기록된 자력은 하드아이언 (${hi}) µT 를 뺀 값`;
+         `장착 오프셋 ${sgn(h.hdgOffDeg)}° · 편각 ${sgn(h.hdgDeclDeg)}° · ${mag}`;
 }
