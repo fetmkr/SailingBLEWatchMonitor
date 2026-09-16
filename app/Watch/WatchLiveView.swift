@@ -408,16 +408,16 @@ private struct SettingsPage: View {
 
     @ViewBuilder
     private var boardSection: some View {
-        if let pin = ble.pinnedModule {
+        if ble.pinnedModule != nil {
             HStack(spacing: 7) {
                 Circle()
                     .fill(ble.isLive ? Color.green : Color.orange)
                     .frame(width: 10, height: 10)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(pin.displayName)
+                    Text(ble.isLive ? "보드 연결됨" : "보드 연결 대기")
                         .font(.headline)
                         .lineLimit(1)
-                    Text(ble.isLive ? "보드 통신 중" : ble.state.displayText)
+                    Text(ble.isLive ? "데이터 수신 중" : ble.state.displayText)
                         .font(.system(size: 9))
                         .foregroundStyle(ble.isLive ? Color.secondary : Color.orange)
                 }
@@ -526,9 +526,9 @@ private struct SettingsPage: View {
     private var sessionSection: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Image(systemName: session.isRunning ? "figure.sailing" : "moon.zzz")
+                Image(systemName: session.isRunning ? "display" : "moon.zzz")
                     .foregroundStyle(session.isRunning ? .green : .secondary)
-                Text(session.isRunning ? "항해 중  \(session.elapsedText)" : "항해 화면 유지 꺼짐")
+                Text(session.isRunning ? "화면 유지 중  \(session.elapsedText)" : "화면 유지 꺼짐")
                     .font(.caption.weight(.semibold))
                 Spacer()
             }
@@ -544,32 +544,19 @@ private struct SettingsPage: View {
                     .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 5) {
-                Button {
-                    page = 0
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 500_000_000)
-                        session.enableWaterLock()
-                    }
-                } label: {
-                    Label("물 잠금", systemImage: "drop.fill")
-                        .font(.caption2)
-                        .frame(maxWidth: .infinity, minHeight: 34)
+            Button {
+                page = 0
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    session.enableWaterLock()
                 }
-                .buttonStyle(.bordered)
-                .disabled(!session.isRunning)
-
-                if session.isRunning {
-                    Button(role: .destructive) {
-                        session.stop()
-                    } label: {
-                        Text("세션 종료")
-                            .font(.caption2)
-                            .frame(maxWidth: .infinity, minHeight: 34)
-                    }
-                    .buttonStyle(.bordered)
-                }
+            } label: {
+                Label("물 잠금", systemImage: "drop.fill")
+                    .font(.caption2)
+                    .frame(maxWidth: .infinity, minHeight: 34)
             }
+            .buttonStyle(.bordered)
+            .disabled(!session.isRunning)
         }
     }
 
