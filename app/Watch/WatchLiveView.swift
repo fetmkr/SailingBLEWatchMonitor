@@ -9,8 +9,8 @@
 //    좌우로 두면 크라운이 페이지 안 스크롤에 쓰인다.
 //    1페이지 — 항해 중 보는 화면. 속도 · HDG · 힐 세 개만, 최대한 크게.
 //               요트 계기처럼 뱃머리 방향을 크게 둔다. COG 는 2페이지.
-//    2페이지 — 센서 상세: SOG·HDG / COG·DIF / HEEL·PITCH · 9축
-//    3페이지 — 설정: 보드 / 기록 / 항해 세션 / 나침반 보정
+//    2페이지 — 항해 상세: SOG·HDG / COG·DIF / HEEL·PITCH
+//    3페이지 — 설정: 보드 / 기록 / 항해 세션 / 나침반 보정 / 센서 상태
 
 //
 //  1페이지에는 숫자 전환 애니메이션을 쓰지 않는다.
@@ -57,13 +57,9 @@ struct WatchLiveView: View {
     }
 }
 
-// MARK: - 2페이지 · 센서 상세
+// MARK: - 2페이지 · 항해 상세
 //
-// 1페이지는 속도·HDG·힐 세 개만 크게 둔다. 그 밖의 값은 여기에 모은다.
-// 스크롤 없이 한 화면에서 비교할 수 있도록 줄과 글자 크기를 고정했다.
-//
-// 위성을 못 잡으면 SAT 숫자가 빨갛게 뜬다. 그때 1페이지의 속도는 대시로
-// 나온다 — 시뮬레이터는 없앴고, 값이 없으면 숫자를 아예 안 그린다.
+// 여섯 값만 3행 2열로 크게 보여준다. 9축 원시값은 3페이지의 `상태`로 옮겼다.
 
 private struct DebugPage: View {
     @EnvironmentObject private var ble: BLEManager
@@ -89,109 +85,52 @@ private struct DebugPage: View {
     }
 
     var body: some View {
-        Group {
-            if let e = extra {
-                VStack(spacing: 4) {
-                    HStack(spacing: 8) {
-                        metric("SOG", ble.sample?.sogKnots.map { String(format: "%.2f kn", $0) } ?? "—")
-                        metric(e.headingIsTrue ? "HDG T" : "HDG M",
-                               e.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—")
-                    }
-
-                    HStack(spacing: 8) {
-                        metric("COG T", ble.sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—")
-                        metric("DIF", courseDeltaText)
-                    }
-
-                    HStack(spacing: 8) {
-                        metric("HEEL", ble.sample?.heelDegrees.map { String(format: "%+d°", $0) } ?? "—")
-                        metric("PITCH", String(format: "%+.1f°", e.pitchDegrees))
-                    }
-
-                    Divider().opacity(0.35)
-
-                    if e.imuOK {
-                        axisHeader
-                        axisRow("ACC", e.accel, "%+.2f")
-                        axisRow("GYR", e.gyro, "%+.1f")
-                        if e.magOK {
-                            axisRow("MAG", e.mag, "%+.0f")
-                        } else {
-                            note("자력계 데이터 없음")
-                        }
-                    } else {
-                        note("IMU 데이터 없음")
-                    }
-                }
-            } else if ble.sample != nil {
-                note("9축 데이터 없음")
-            } else {
-                note("보드 데이터 없음")
-            }
+        VStack(spacing: 0) {
+            metricRow(
+                "SOG", ble.sample?.sogKnots.map { String(format: "%.2f kn", $0) } ?? "—",
+                extra?.headingIsTrue == true ? "HDG T" : "HDG M",
+                extra?.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—"
+            )
+            Divider().opacity(0.35)
+            metricRow(
+                "COG T", ble.sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—",
+                "DIF", courseDeltaText
+            )
+            Divider().opacity(0.35)
+            metricRow(
+                "HEEL", ble.sample?.heelDegrees.map { String(format: "%+d°", $0) } ?? "—",
+                "PITCH", extra.map { String(format: "%+.1f°", $0.pitchDegrees) } ?? "—"
+            )
         }
-        .padding(.horizontal, 4)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func metric(_ label: String, _ value: String, warn: Bool = false) -> some View {
+    private func metricRow(_ leftLabel: String, _ leftValue: String,
+                           _ rightLabel: String, _ rightValue: String) -> some View {
+        HStack(spacing: 6) {
+            metric(leftLabel, leftValue)
+            Divider().frame(height: 30).opacity(0.35)
+            metric(rightLabel, rightValue)
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private func metric(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text(label)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 1)
             Text(value)
-                .font(.system(size: 17, weight: .semibold, design: .rounded))
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .minimumScaleFactor(0.65)
+                .minimumScaleFactor(0.55)
                 .lineLimit(1)
-                .foregroundStyle(warn ? Color.sailWarn : Color.primary)
         }
         .frame(maxWidth: .infinity)
-    }
-
-    private var axisHeader: some View {
-        HStack(spacing: 2) {
-            Color.clear.frame(width: 28, height: 1)
-            axisName("X")
-            axisName("Y")
-            axisName("Z")
-        }
-    }
-
-    private func axisName(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 8, weight: .medium))
-            .foregroundStyle(.tertiary)
-            .frame(maxWidth: .infinity)
-    }
-
-    private func axisRow(_ label: String, _ value: Vector3, _ format: String) -> some View {
-        HStack(spacing: 2) {
-            Text(label)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 28, alignment: .leading)
-            axisValue(value.x, format)
-            axisValue(value.y, format)
-            axisValue(value.z, format)
-        }
-    }
-
-    private func axisValue(_ value: Double, _ format: String) -> some View {
-        Text(String(format: format, value))
-            .font(.system(size: 15, weight: .medium, design: .rounded))
-            .monospacedDigit()
-            .minimumScaleFactor(0.45)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity)
-    }
-
-    private func note(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(Color.sailWarn)
-            .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 
@@ -371,6 +310,7 @@ private struct SettingsPage: View {
     @EnvironmentObject private var session: SessionManager
     @State private var showUnpinConfirm = false
     @State private var showCalibration = false
+    @State private var showStatus = false
 
     var body: some View {
         ScrollView {
@@ -399,6 +339,31 @@ private struct SettingsPage: View {
 
                         if showCalibration {
                             magcalControls.padding(.top, 6)
+                        }
+                    }
+                }
+                card {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showStatus.toggle()
+                            }
+                        } label: {
+                            HStack {
+                                Label("상태", systemImage: "waveform.path.ecg")
+                                    .font(.caption.weight(.semibold))
+                                Spacer()
+                                Image(systemName: showStatus ? "chevron.up" : "chevron.down")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if showStatus {
+                            IMUStatusView(extra: ble.sample?.extra)
+                                .padding(.top, 7)
                         }
                     }
                 }
@@ -625,5 +590,71 @@ private struct SettingsPage: View {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(Color.white.opacity(0.07))
             )
+    }
+}
+
+/// 항해 화면에는 필요 없는 9축 원시값. 설정의 `상태`를 열었을 때만 보인다.
+private struct IMUStatusView: View {
+    let extra: TelemetryExtra?
+
+    var body: some View {
+        if let extra, extra.imuOK {
+            VStack(spacing: 4) {
+                axisHeader
+                axisRow("ACC", extra.accel, "%+.2f")
+                axisRow("GYR", extra.gyro, "%+.1f")
+                if extra.magOK {
+                    axisRow("MAG", extra.mag, "%+.0f")
+                } else {
+                    note("자력계 데이터 없음")
+                }
+            }
+        } else {
+            note(extra == nil ? "보드 데이터 없음" : "IMU 데이터 없음")
+        }
+    }
+
+    private var axisHeader: some View {
+        HStack(spacing: 2) {
+            Color.clear.frame(width: 28, height: 1)
+            axisName("X")
+            axisName("Y")
+            axisName("Z")
+        }
+    }
+
+    private func axisName(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity)
+    }
+
+    private func axisRow(_ label: String, _ value: Vector3, _ format: String) -> some View {
+        HStack(spacing: 2) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, alignment: .leading)
+            axisValue(value.x, format)
+            axisValue(value.y, format)
+            axisValue(value.z, format)
+        }
+    }
+
+    private func axisValue(_ value: Double, _ format: String) -> some View {
+        Text(String(format: format, value))
+            .font(.system(size: 14, weight: .medium, design: .rounded))
+            .monospacedDigit()
+            .minimumScaleFactor(0.45)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.sailWarn)
+            .frame(maxWidth: .infinity, alignment: .center)
     }
 }
