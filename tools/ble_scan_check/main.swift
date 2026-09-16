@@ -31,6 +31,8 @@ final class ScanProbe: NSObject, CBCentralManagerDelegate {
         var uniqueSeq = 0        // seq 가 바뀐 횟수 = 실제로 받은 광고 패킷
         var lost = 0             // seq 점프로 추정한 유실
         var lastSeq: UInt8?
+        var lastRecording: Bool?
+        var lastRecordingFailed: Bool?
         var firstSeen = Date()
         var lastSeen = Date()
         var rssiSum = 0
@@ -83,7 +85,7 @@ final class ScanProbe: NSObject, CBCentralManagerDelegate {
                 ?? peripheral.name ?? "?"
 
         guard let mfg = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
-              let s = SailProtocol.decodeManufacturerDataSample(mfg) else {
+              let s = TelemetrySample.decodeManufacturerData(mfg) else {
             // 광고는 왔는데 scan response(manufacturer data)를 못 받은 경우.
             // 텔레메트리가 scan response 에 실려 있으므로 이게 많으면
             // SCAN_REQ/RSP 왕복이 실패하고 있다는 뜻이다.
@@ -112,6 +114,8 @@ final class ScanProbe: NSObject, CBCentralManagerDelegate {
             e.uniqueSeq = 1
         }
         e.lastSeq = s.sequence
+        e.lastRecording = s.recording
+        e.lastRecordingFailed = s.recordingFailed
         stats[s.moduleID] = e
     }
 
@@ -131,6 +135,8 @@ final class ScanProbe: NSObject, CBCentralManagerDelegate {
             let span = max(e.lastSeen.timeIntervalSince(e.firstSeen), 0.001)
             let total = e.uniqueSeq + e.lost
             let rate = total > 0 ? Double(e.uniqueSeq) / Double(total) * 100 : 0
+            let rec = e.lastRecording.map { $0 ? "기록 중" : "꺼짐" } ?? "상태 없음(옛 펌웨어)"
+            let recFailure = e.lastRecordingFailed == true ? " · 기록 오류" : ""
             print("""
 
               모듈 \(e.name) (module_id \(id))
@@ -139,6 +145,7 @@ final class ScanProbe: NSObject, CBCentralManagerDelegate {
                 유실 추정     \(e.lost)개
                 수신율        \(String(format: "%.1f", rate))%
                 RSSI          평균 \(e.rssiCount > 0 ? e.rssiSum/e.rssiCount : 0) / 범위 \(e.rssiMin)…\(e.rssiMax) dBm
+                REC 상태      \(rec)\(recFailure)
             """)
         }
 
