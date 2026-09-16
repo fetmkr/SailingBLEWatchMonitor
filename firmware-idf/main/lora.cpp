@@ -25,6 +25,7 @@
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "esp_mac.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -225,15 +226,68 @@ Rx       gRing[kRingLen];
 volatile size_t   gHead = 0, gTail = 0;
 volatile uint32_t gDropped = 0, gReceived = 0, gCrcErrors = 0;
 
+// ── 실시간 함대 송신 ────────────────────────────────────────────────────
+// 메인 루프는 최신 값의 사본만 바꾼다. 별도 일꾼이 GPS PPS 뒤 자기 차례에서
+// 송신하므로 14~22ms 걸리는 RadioLib::transmit가 GPS·IMU·BLE 루프를 막지 않는다.
+portMUX_TYPE gLiveMux = portMUX_INITIALIZER_UNLOCKED;
+Live gLive;
+uint16_t gTie = 0;
+volatile uint32_t gBoatChangedAt = 0;
+
+portMUX_TYPE gPpsMux = portMUX_INITIALIZER_UNLOCKED;
+volatile uint32_t gPpsAtUs = 0;
+volatile uint32_t gPpsCount = 0;
+volatile bool gPpsEver = false;
+TaskHandle_t gTxTask = nullptr;
+volatile bool gTransmitting = false;
+volatile bool gLiveEnabled = false; // 위치 방송은 `lora live on` 뒤에만. 재부팅하면 꺼진다.
+volatile uint32_t gTxOk = 0, gTxFailed = 0, gTxLate = 0;
+
+struct PeerSlot {
+    bool seen = false;
+    Decoded packet;
+    uint32_t atMs = 0;
+    int16_t rssi = 0;
+    int8_t snr = 0;
+};
+PeerSlot gPeers[32];
+portMUX_TYPE gPeerMux = portMUX_INITIALIZER_UNLOCKED;
+volatile uint32_t gBadPayload = 0, gDuplicateBoat = 0;
+volatile uint32_t gTestPayload = 0;
+
+uint32_t heardMask(uint32_t now) {
+    uint32_t mask = 0;
+    portENTER_CRITICAL(&gPeerMux);
+    for (size_t i = 0; i < 32; ++i) {
+        if (gPeers[i].seen && now - gPeers[i].atMs <= kHeardFreshMs) mask |= 1u << i;
+    }
+    portEXIT_CRITICAL(&gPeerMux);
+    return mask;
+}
+
 // 짐이 하나 들어왔다고 칩이 DIO1 을 흔들 때 불린다.
 //
 // ★ 여기서 하는 일은 **깨우는 것 하나뿐이다.** SPI 로 짐을 꺼내지 않는다.
 //   IRAM_ATTR 은 이 함수를 램에 두라는 표시다. 플래시를 읽는 중에도
 //   인터럽트가 들어올 수 있는데, 그때 플래시에 있는 코드는 못 부른다.
 void IRAM_ATTR onDio1() {
+    if (gTransmitting) return; // 송신 완료 DIO1은 RX 일꾼을 깨울 사건이 아니다
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(gRxSem, &woken);
     if (woken) portYIELD_FROM_ISR();
+}
+
+// GPS 1PPS ISR. 전파를 보내거나 데이터를 만들지 않고 시각 표식만 바꾼다.
+void IRAM_ATTR onPps(void*) {
+    const uint32_t at = micros32();
+    portENTER_CRITICAL_ISR(&gPpsMux);
+    // 전원·배선 잡음으로 한 펄스가 여러 에지처럼 보이면 0.5초 안의 것은 버린다.
+    if (!gPpsEver || at - gPpsAtUs >= 500000u) {
+        gPpsAtUs = at;
+        gPpsCount = gPpsCount + 1;
+        gPpsEver = true;
+    }
+    portEXIT_CRITICAL_ISR(&gPpsMux);
 }
 
 // 받기 일꾼. **코어 0 에서 혼자 돈다.** 깨워 주면 짐을 꺼내 링버퍼에 옮긴다.
@@ -278,6 +332,71 @@ void rxWorker(void*) {
     }
 }
 
+void txWorker(void*) {
+    uint32_t lastFrameStart = UINT32_MAX;
+    for (;;) {
+        uint32_t ppsAt;
+        bool ever;
+        portENTER_CRITICAL(&gPpsMux);
+        ppsAt = gPpsAtUs; ever = gPpsEver;
+        portEXIT_CRITICAL(&gPpsMux);
+
+        Live live;
+        portENTER_CRITICAL(&gLiveMux);
+        live = gLive;
+        portEXIT_CRITICAL(&gLiveMux);
+        if (!gUp || !gLiveEnabled || !ever || live.boat < 1 || live.boat > 32) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        const uint32_t nowUs = micros32();
+        const uint32_t ageUs = nowUs - ppsAt;
+        if (ageUs > kPpsHoldoverMs * 1000u) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        const uint32_t after = ageUs / kFrameUs;
+        const uint32_t frameStart = ppsAt + after * kFrameUs;
+        if (frameStart == lastFrameStart) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
+
+        const uint32_t target = frameStart + slotOffsetUs(live.boat);
+        int32_t until = (int32_t)(target - nowUs);
+        if (until < -5000) { // 제 차례를 5ms 넘게 놓쳤으면 다음 초까지 기다린다
+            lastFrameStart = frameStart;
+            gTxLate = gTxLate + 1;
+            continue;
+        }
+        if (until > 2000) {
+            vTaskDelay(pdMS_TO_TICKS((uint32_t)(until - 1000) / 1000u));
+            continue;
+        }
+        if (until > 0) esp_rom_delay_us((uint32_t)until);
+
+        // 기다리는 동안 갱신된 가장 최신 항해값을 쓴다.
+        portENTER_CRITICAL(&gLiveMux);
+        live = gLive;
+        portEXIT_CRITICAL(&gLiveMux);
+        if (live.boat < 1 || live.boat > 32) { lastFrameStart = frameStart; continue; }
+        live.timeValid = true;
+        live.boatChanged = gBoatChangedAt && millis32() - gBoatChangedAt < 30000u;
+        live.heard = heardMask(millis32());
+        live.tie = gTie;
+        uint8_t pkt[kPayloadLen];
+        encode(live, pkt);
+
+        lastFrameStart = frameStart; // 실패해도 같은 차례에 두 번 쏘지 않는다
+        RadioLock lk(5);
+        if (!lk.ok) { gTxLate = gTxLate + 1; continue; }
+        gTransmitting = true;
+        const int16_t st = gRadio.transmit(pkt, kPayloadLen);
+        gRadio.startReceive();
+        gTransmitting = false;
+        if (st == RADIOLIB_ERR_NONE) gTxOk = gTxOk + 1;
+        else                         gTxFailed = gTxFailed + 1;
+    }
+}
+
 } // namespace
 
 bool begin() {
@@ -311,6 +430,22 @@ bool begin() {
     gRadio.setPacketReceivedAction(onDio1);
     gRadio.startReceive();
 
+    // GPS PPS는 슬롯 A의 GPIO21. 무전기 DIO1과 같은 ISR 서비스를 나눠 쓴다.
+    gpio_config_t pps = {};
+    pps.pin_bit_mask = 1ULL << rak::kGpsPpsSlotA;
+    pps.mode = GPIO_MODE_INPUT;
+    pps.pull_up_en = GPIO_PULLUP_DISABLE;
+    pps.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    pps.intr_type = GPIO_INTR_POSEDGE;
+    if (gpio_config(&pps) != ESP_OK ||
+        gpio_isr_handler_add((gpio_num_t)rak::kGpsPpsSlotA, onPps, nullptr) != ESP_OK) {
+        printf("[LORA] ★ GPS PPS(GPIO%d) 인터럽트를 못 붙였습니다 — 받기만 합니다\n", rak::kGpsPpsSlotA);
+    }
+
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    gTie = (uint16_t)mac[4] | ((uint16_t)mac[5] << 8);
+
     // ★ 코어 0 에 붙인다. 메인 루프는 코어 1 에서 돈다.
     //   우선순위를 루프(1)보다 높게 둬야 SD 가 쓰는 중에도 바로 깬다.
     if (!gRxTask) {
@@ -320,9 +455,16 @@ bool begin() {
     }
 
     gUp = true;
+    if (!gTxTask) {
+        const BaseType_t ok = xTaskCreatePinnedToCore(
+            txWorker, "lora_tx", 4096, nullptr, /*priority=*/4, &gTxTask, /*core=*/0);
+        if (ok != pdPASS) { gTxTask = nullptr; printf("[LORA] 송신 일꾼을 못 띄웠습니다 — 받기만 합니다\n"); }
+    }
     printf("[LORA] %.2f ㎒ SF%u BW%.0f㎑ CR4:%u  송신 %d dBm (EIRP 10 dBm)\n",
            kFreqMHz, kSf, kBwKHz, kCr, kTxDbm);
-    printf("[LORA] 받기 일꾼 코어 0.  전파시간 %lu ms (짐 %u바이트)\n",
+    printf("[LORA] 송수신 일꾼 코어 0 · GPS PPS GPIO%d · 실시간 송신 기본 꺼짐\n",
+           rak::kGpsPpsSlotA);
+    printf("[LORA] 전파시간 %lu ms (짐 %u바이트) · 보내려면 `lora live on`\n",
            (unsigned long)gRadio.getTimeOnAir(kPayloadLen) / 1000,
            (unsigned)kPayloadLen);
     return true;
@@ -364,6 +506,29 @@ void report() {
            (unsigned long)gRadio.getTimeOnAir(kPayloadLen));
     printf("  받음       %u개,  CRC 깨짐 %u개,  버림 %u개\n",
            (unsigned)gReceived, (unsigned)gCrcErrors, (unsigned)gDropped);
+    uint32_t ppsAt, ppsCount;
+    bool ppsEver;
+    portENTER_CRITICAL(&gPpsMux);
+    ppsAt = gPpsAtUs; ppsCount = gPpsCount; ppsEver = gPpsEver;
+    portEXIT_CRITICAL(&gPpsMux);
+    Live live;
+    portENTER_CRITICAL(&gLiveMux);
+    live = gLive;
+    portEXIT_CRITICAL(&gLiveMux);
+    printf("  실시간     %s · 배 %u · 송신 %u 성공 / %u 실패 / %u 차례 놓침\n",
+           gLiveEnabled ? "켬" : "끔", live.boat,
+           (unsigned)gTxOk, (unsigned)gTxFailed, (unsigned)gTxLate);
+    if (ppsEver) {
+        const uint32_t ageMs = (micros32() - ppsAt) / 1000u;
+        printf("  GPS PPS    %u회 · %u ms 전 · %s\n", (unsigned)ppsCount, (unsigned)ageMs,
+               ageMs <= kPpsHoldoverMs ? "송신 시각 사용 가능" : "20분 지나 송신 중지");
+    } else {
+        printf("  GPS PPS    아직 없음 — 실시간 송신 안 함\n");
+    }
+    printf("  페이로드   함대 %u · 시험 %u · 거절 %u · 같은 배 번호 충돌 %u\n",
+           (unsigned)gReceived - (unsigned)gBadPayload - (unsigned)gTestPayload,
+           (unsigned)gTestPayload, (unsigned)gBadPayload,
+           (unsigned)gDuplicateBoat);
     if (gDropped) printf("  ★ 버린 게 있습니다 — loop 가 링버퍼를 안 꺼내 가고 있습니다\n");
     printf("──────────────────────────────────────────\n");
 }
@@ -378,11 +543,13 @@ void txTest() {
 
     const uint8_t before = gRadio.peek(RADIOLIB_SX126X_REG_SENSITIVITY_CONFIG);
     const uint32_t t0 = micros32();
+    gTransmitting = true;
     const int16_t st = gRadio.transmit(pkt, kPayloadLen);
     const uint32_t us = micros32() - t0;
     const uint8_t after = gRadio.peek(RADIOLIB_SX126X_REG_SENSITIVITY_CONFIG);
 
     gRadio.startReceive(); // 다시 듣는 자리로 돌려놓는다
+    gTransmitting = false;
 
     printf("──────────────────────────────────────────\n");
     if (st == RADIOLIB_ERR_NONE) printf("  보냈다.  실제로 걸린 시간 %lu us\n", (unsigned long)us);
@@ -431,11 +598,93 @@ void watchToggle() {
 void pump() {
     Rx r;
     while (pop(r)) {
+        if (r.data[0] == 0xAA) {
+            gTestPayload = gTestPayload + 1;
+            if (gWatch) printf("[LORA] 시험 패킷 RSSI %d SNR %d\n", r.rssi, r.snr);
+            continue;
+        }
+        Decoded d;
+        if (!decode(r.data, &d)) {
+            gBadPayload = gBadPayload + 1;
+            if (gWatch) {
+                printf("[LORA] 형식 거절 RSSI %d SNR %d 짐:", r.rssi, r.snr);
+                for (size_t i = 0; i < kPayloadLen; ++i) printf(" %02X", r.data[i]);
+                printf("\n");
+            }
+            continue;
+        }
+        const size_t i = d.boat - 1;
+        portENTER_CRITICAL(&gPeerMux);
+        if (gPeers[i].seen && r.atMs - gPeers[i].atMs <= kHeardFreshMs &&
+            gPeers[i].packet.tie != d.tie) gDuplicateBoat = gDuplicateBoat + 1;
+        gPeers[i].seen = true;
+        gPeers[i].packet = d;
+        gPeers[i].atMs = r.atMs;
+        gPeers[i].rssi = r.rssi;
+        gPeers[i].snr = r.snr;
+        portEXIT_CRITICAL(&gPeerMux);
+
         if (!gWatch) continue;
-        printf("[LORA] 받음  RSSI %d dBm  SNR %d dB  %ums  짐:", r.rssi, r.snr, (unsigned)r.atMs);
-        for (size_t i = 0; i < kPayloadLen; ++i) printf(" %02X", r.data[i]);
+        printf("[LORA] B%02u RSSI %d SNR %d  SOG ", d.boat, r.rssi, r.snr);
+        if (d.sog == kSogInvalid) printf("---"); else printf("%.2f", d.sog / 100.0f);
+        printf("  COG ");
+        if (d.cog == kCogInvalid) printf("---"); else printf("%.1f", d.cog / 10.0f);
+        printf("  fix %u rec %u tie %04X\n", !!(d.flags & kFlagGpsFix),
+               !!(d.flags & kFlagRecording), d.tie);
+    }
+}
+
+void updateLive(const Live& live) {
+    portENTER_CRITICAL(&gLiveMux);
+    gLive = live;
+    portEXIT_CRITICAL(&gLiveMux);
+}
+
+void noteBoatChanged() { gBoatChangedAt = millis32(); }
+
+void setLiveEnabled(bool enabled) {
+    if (enabled && !gUp) {
+        printf("[LORA] 무전기가 올라오지 않아 실시간 송신을 못 켭니다\n");
+        return;
+    }
+    if (enabled) {
+        Live live;
+        portENTER_CRITICAL(&gLiveMux);
+        live = gLive;
+        portEXIT_CRITICAL(&gLiveMux);
+        if (live.boat < 1 || live.boat > 32) {
+            printf("[LORA] 배 번호가 0입니다 — 먼저 `boat 1~32`를 정하세요. 수신은 계속합니다\n");
+            return;
+        }
+    }
+    gLiveEnabled = enabled;
+    printf("[LORA] 실시간 함대 송신 %s%s\n", enabled ? "켬" : "끔",
+           enabled ? " — GPS PPS 뒤 자기 차례에만 보냅니다" : "");
+}
+
+bool liveEnabled() { return gLiveEnabled; }
+
+void reportPeers() {
+    const uint32_t now = millis32();
+    PeerSlot copy[32];
+    portENTER_CRITICAL(&gPeerMux);
+    memcpy(copy, gPeers, sizeof copy);
+    portEXIT_CRITICAL(&gPeerMux);
+    printf("──────────────────────────────────────────\n");
+    printf("  최근 3초에 들은 배\n");
+    uint32_t n = 0;
+    for (size_t i = 0; i < 32; ++i) {
+        if (!copy[i].seen || now - copy[i].atMs > kHeardFreshMs) continue;
+        const PeerSlot& p = copy[i];
+        ++n;
+        printf("  B%02u  %4ums 전  RSSI %4d  SNR %3d  tie %04X",
+               p.packet.boat, (unsigned)(now - p.atMs), p.rssi, p.snr, p.packet.tie);
+        if (p.packet.sog != kSogInvalid) printf("  SOG %.2f", p.packet.sog / 100.0f);
+        if (p.packet.cog != kCogInvalid) printf("  COG %.1f", p.packet.cog / 10.0f);
         printf("\n");
     }
+    if (!n) printf("  없음\n");
+    printf("──────────────────────────────────────────\n");
 }
 
 // `lora regs` — 데이터시트 15장의 칩 버그 세 개가 실제로 걸렸는지 되읽는다.

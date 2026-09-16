@@ -24,10 +24,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
-namespace lora {
+#include "lora_packet.h"
 
-/// 짐 길이. implicit 헤더라 양쪽이 같은 값을 알고 있어야 한다 (§10.4).
-static constexpr size_t kPayloadLen = 22;
+namespace lora {
 
 /// 받은 짐 하나. 일꾼이 채우고 loop 가 꺼내 간다.
 struct Rx {
@@ -85,5 +84,20 @@ void watchToggle();
 
 /// loop 에서 부른다. 링버퍼를 비우고, watch 가 켜져 있으면 뱉는다.
 void pump();
+
+/// 메인 루프가 최신 항해값을 넘긴다. 송신 일꾼은 PPS에 맞춘 자기 차례에서
+/// 이 사본을 22바이트로 만들어 보낸다. boat=0이면 듣기만 한다.
+void updateLive(const Live& live);
+
+/// 배 번호를 실제로 바꾼 직후 부른다. 그 뒤 30초 동안 패킷 flags bit3을 세운다.
+void noteBoatChanged();
+
+/// 최근 3초 안에 받은 배를 사람이 읽게 보여준다.
+void reportPeers();
+
+/// 실시간 위치 송신을 명시적으로 켜고 끈다. 안전을 위해 부팅 기본값은 꺼짐이며
+/// 수신은 계속한다. 설정은 재부팅 뒤 유지하지 않는다.
+void setLiveEnabled(bool enabled);
+bool liveEnabled();
 
 } // namespace lora

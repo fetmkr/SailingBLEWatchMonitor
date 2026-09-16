@@ -119,16 +119,16 @@ int32_t nvsI32(const char* key, int32_t def) {
 // 정리하느라 가끔 오래 대답을 안 한다. 우리 카드로 실측한 최악이 1.9초였다
 // (SDLOG.md §0). 그걸 메인 루프에서 기다리면 BLE 10 Hz 가 끊긴다.
 //
-// 크기를 64 KB 로 잡은 근거:
-//   초당 만드는 양 3.1 KB  ×  버티고 싶은 시간
-//   4 KB  → 1.3초   ← 실측 최악 1.9초를 못 견딘다
-//   64 KB → 21초    ← 열 배 여유
-constexpr size_t kBufSize  = 65536;
+// RAK3112의 8 MB PSRAM 중 1 MB를 기록 완충에 쓴다. 초당 보수값 3.1 KB로
+// 약 5분 40초다. PSRAM 여유가 부족하면 512→256→64 KB로 낮추고,
+// 내부 RAM 대체는 BLE/WiFi를 굶기지 않게 64 KB만 허용한다.
+constexpr size_t kBufChoices[] = {1024 * 1024, 512 * 1024, 256 * 1024, 64 * 1024};
 constexpr size_t kChunk    = 4096;  // 카드에 한 번에 내보내는 단위 (4KB 정렬)
 constexpr uint32_t kFlushMs = 5000; // 못 박는 주기. 전원이 끊기면 이 뒤가 날아간다
 constexpr uint64_t kMinFreeBytes = 90ULL * 1024 * 1024;  // 기록 시작에 필요한 남은 자리 — 8시간 분량 (TRANSFER.md §1)
 
 char*  gBuf = nullptr;
+size_t gBufSize = 0;
 volatile size_t gHead = 0;
 volatile size_t gTail = 0;
 
@@ -139,9 +139,9 @@ volatile size_t gTail = 0;
 // 정했다. 그래서 꽉 채우면 빈 것과 구분이 안 된다. 한 칸을 늘 비워 둔다.
 size_t bufUsed() {
     const size_t h = gHead, t = gTail;
-    return (h >= t) ? (h - t) : (kBufSize - t + h);
+    return (h >= t) ? (h - t) : (gBufSize - t + h);
 }
-size_t bufFree() { return kBufSize - bufUsed() - 1; }
+size_t bufFree() { return gBufSize - bufUsed() - 1; }
 
 // ── 텍스트 사본 ──────────────────────────────────────────────────────────
 //
@@ -198,6 +198,7 @@ const char* gLastFailLine = nullptr;  // 다음 세션 TXT 머리에 적는다
 const char* gSessionNote  = nullptr;  // 방위 설정 등
 volatile uint8_t gTestFailN = 0;      // 시험용 가짜 실패 남은 횟수
 uint32_t gWriteRetries = 0;           // 다시 써서 살린 횟수
+uint32_t gSessionWriteRetries = 0;    // 현재 세션 TXT 마무리에 남길 횟수
 constexpr uint8_t kWriteRetries = 3;
 
 // 카드가 꽂혀 있나. RAK15002 가 IO 슬롯 38번으로 알려준다 (GPIO39, 꽂히면 LOW).
@@ -220,12 +221,12 @@ bool push(const uint8_t* p, size_t n) {
         if (bufFree() < n) { ++gDropped; return false; } // 카드가 죽은 경우
     }
     size_t h = gHead;
-    const size_t first = (h + n <= kBufSize) ? n : (kBufSize - h);
+    const size_t first = (h + n <= gBufSize) ? n : (gBufSize - h);
     memcpy(gBuf + h, p, first);
     if (first < n) memcpy(gBuf, p + first, n - first);
-    gHead = (h + n) % kBufSize;
+    gHead = (h + n) % gBufSize;
 
-    const size_t fill = bufUsed() * 100 / kBufSize;
+    const size_t fill = bufUsed() * 100 / gBufSize;
     if (fill > gMaxFill) gMaxFill = (uint32_t)fill;
     return true;
 }
@@ -268,7 +269,7 @@ bool writeFromRing(size_t maxBytes, WriteReport* r) {
         const size_t t = gTail;
         size_t n = used;
         if (n > maxBytes - r->wrote) n = maxBytes - r->wrote;
-        if (t + n > kBufSize) n = kBufSize - t;
+        if (t + n > gBufSize) n = gBufSize - t;
         r->asked += n;
         uint8_t tries = 0;
         const size_t done = writeAll(
@@ -280,7 +281,7 @@ bool writeFromRing(size_t maxBytes, WriteReport* r) {
                 if (got != len && errno) r->err = errno;
                 return got;
             },
-            [&](size_t k) { gTail = (gTail + k) % kBufSize; gBytes += k; },
+            [&](size_t k) { gTail = (gTail + k) % gBufSize; gBytes += k; },
             [&](uint8_t k) { vTaskDelay(pdMS_TO_TICKS(50 * k)); },
             kWriteRetries, &tries);
         r->tries += tries;
@@ -339,7 +340,14 @@ void writerTask(void*) {
                     finishSession(false);       // 닫고 머리글(closed=0)·이름까지 고쳐 본다
                     continue;
                 }
-                if (r.tries) ++gWriteRetries;
+                if (r.tries) {
+                    ++gWriteRetries;
+                    gSessionWriteRetries += r.tries;
+                    char event[96];
+                    snprintf(event, sizeof event, "SD 쓰기 %u번 다시 시도해 복구 (%u/%u바이트)",
+                             (unsigned)r.tries, (unsigned)r.wrote, (unsigned)r.asked);
+                    noteEvent(event);
+                }
             }
             writerFlushText(false);
             if (millis() - lastFlush >= kFlushMs) {
@@ -438,8 +446,14 @@ void begin() {
            (unsigned)(pinfo.total_free_bytes + pinfo.total_allocated_bytes),
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    gBuf = (char*)heap_caps_malloc(kBufSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);   // PSRAM 먼저
-    if (!gBuf) gBuf = (char*)malloc(kBufSize);
+    for (size_t sz : kBufChoices) {
+        gBuf = (char*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (gBuf) { gBufSize = sz; break; }
+    }
+    if (!gBuf) {
+        gBufSize = 64 * 1024;
+        gBuf = (char*)malloc(gBufSize);
+    }
     if (!gBuf) {
         printf("[LOG] 버퍼를 못 잡았습니다 — 기록 기능이 꺼집니다\n");
         return;
@@ -452,7 +466,7 @@ void begin() {
         return;
     }
     printf("[LOG] 쓰기 작업 코어 0 (버퍼 %u KB = 초당 3.1KB 기준 %.0f초치)\n",
-           (unsigned)(kBufSize / 1024), kBufSize / 3080.0f);
+           (unsigned)(gBufSize / 1024), gBufSize / 3080.0f);
 }
 
 /**
@@ -655,7 +669,7 @@ bool start(const Header& h) {
 
     gNavRows = gImuRows = 0;
     gBytes = kHeaderSize;
-    gDropped = gWaited = gMaxStall = gMaxFill = 0;
+    gDropped = gWaited = gMaxStall = gMaxFill = gSessionWriteRetries = 0;
     gLastError = nullptr;
     gLastErrorShort = nullptr;
     gLostBytes = 0;
@@ -769,10 +783,10 @@ bool requestStop() {
     char foot[256];
     int n = snprintf(foot, sizeof(foot),
                      "#\n# 끝 — %u분 %u초,  NAV %u줄  IMU %u줄\n"
-                     "# 버린 줄 %u  기다린 횟수 %u  최대 멈춤 %ums  버퍼 최고 %u%%\n%s",
+                     "# 버린 줄 %u  버퍼 기다림 %u  SD 다시쓰기 %u  최대 멈춤 %ums  버퍼 최고 %u%%\n%s",
                      (unsigned)(durS / 60), (unsigned)(durS % 60),
                      (unsigned)gNavRows, (unsigned)gImuRows,
-                     (unsigned)gDropped, (unsigned)gWaited,
+                     (unsigned)gDropped, (unsigned)gWaited, (unsigned)gSessionWriteRetries,
                      (unsigned)gMaxStall, (unsigned)gMaxFill,
                      gDropped ? "# ★ 버린 줄이 있습니다. 이 세션은 구멍이 있습니다.\n" : "");
     if (n < 0) n = 0;
@@ -1368,7 +1382,7 @@ void noteEvent(const char* text) {
     if (!isRec() || !text) return;
     const uint32_t sec = (millis() - gStartedMs) / 1000;
     char line[256];
-    int n = snprintf(line, sizeof(line), "# %02u:%02u:%02u 설정 바뀜 — %s\n",
+    int n = snprintf(line, sizeof(line), "# %02u:%02u:%02u 사건 — %s\n",
                      (unsigned)(sec / 3600), (unsigned)(sec / 60 % 60), (unsigned)(sec % 60), text);
     if (n <= 0) return;
     if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;

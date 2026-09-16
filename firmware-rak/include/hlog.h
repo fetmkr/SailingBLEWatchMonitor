@@ -360,7 +360,7 @@ void noteLastFail(const char* line);
 // TXT 머리에 그대로 적을 여러 줄 (방위 알고리즘·축·오프셋·자력 보정값). 시작 전에 부른다.
 // HLG 형식은 안 바꾼다 — 재현에 필요한 설정을 사람이 읽는 사본에 남긴다.
 void setSessionNote(const char* text);
-// 기록 중 설정이 바뀌면 TXT 에 "# 시각 설정 바뀜 — ..." 한 줄을 넣는다. 기록 중이 아니면 무시.
+// 기록 중 내부 사건을 TXT 에 "# 시각 사건 — ..." 한 줄로 넣는다. 기록 중이 아니면 무시.
 void noteEvent(const char* line);
 // 시험용. 다음 n 번의 카드 쓰기를 "0 바이트 씀, EIO" 로 흉내 낸다.
 void testFailWrites(uint8_t n);

@@ -33,6 +33,7 @@
 #include "magcal.h"
 #include "sog_policy.h"
 #include "heading_tilt.h"
+#include "lora_packet.h"
 
 static int g_fail = 0;
 static void check(bool ok, const char* what) {
@@ -135,6 +136,44 @@ static void testSdWrites() {
           !hlog::canStart(hlog::RecState::Draining), "닫혀 있을 때만 시작한다");
     check(hlog::sdBusy(hlog::RecState::Recording) && hlog::sdBusy(hlog::RecState::Draining) &&
           !hlog::sdBusy(hlog::RecState::Closed), "SD 를 쥐고 있는 상태는 Recording·Draining 뿐");
+}
+
+static void testLoraPacket() {
+    std::printf("\n[2a] LoRa 함대 패킷과 차례\n");
+    lora::Live v;
+    v.boat = 7;
+    v.lat = 375512345;
+    v.lon = 1269887654;
+    v.gpsFix = true;
+    v.recording = true;
+    v.timeValid = true;
+    v.boatChanged = true;
+    v.sogValid = true; v.sogKn = 1.23f;
+    v.cogValid = true; v.cogDeg = 359.96f;
+    v.attitudeValid = true; v.heelDeg = -12.4f; v.pitchDeg = 8.6f;
+    v.battPct = 80;
+    v.heard = 0x80000005u;
+    v.tie = 0xA3F2;
+    uint8_t b[lora::kPayloadLen];
+    lora::encode(v, b);
+    lora::Decoded d;
+    check(lora::decode(b, &d), "22바이트 정상 패킷을 다시 읽는다");
+    check(d.boat == 7 && d.lat == v.lat && d.lon == v.lon, "배 번호와 위·경도는 리틀엔디안으로 보존");
+    check(d.sog == 123 && d.cog == 0, "SOG 1.23 kn, COG 359.96°는 0.01 kn·0.1° 단위와 360° wrap");
+    check(d.heel == -12 && d.pitch == 9, "힐·피치는 1도 단위");
+    check((d.flags & 0x0F) == 0x0F && (d.flags >> 4) == 12, "fix·REC·PPS·번호변경과 배터리 4비트");
+    check(d.heard == 0x80000005u && d.tie == 0xA3F2, "들은 배 비트와 MAC tie 보존");
+
+    v.gpsFix = false; v.sogValid = false; v.cogValid = false; v.attitudeValid = false;
+    lora::encode(v, b);
+    check(lora::decode(b, &d) && d.lat == lora::kLatLonInvalid && d.lon == lora::kLatLonInvalid &&
+          d.sog == lora::kSogInvalid && d.cog == lora::kCogInvalid &&
+          d.heel == lora::kAttitudeInvalid && d.pitch == lora::kAttitudeInvalid,
+          "fix·센서값이 없으면 0 대신 값 없음 표식");
+    b[0] = 0;
+    check(!lora::decode(b, &d), "배 번호 0인 수신 패킷은 거절");
+    check(lora::slotOffsetUs(1) == 0 && lora::slotOffsetUs(7) == 187500 &&
+          lora::slotOffsetUs(32) == 968750, "1초를 32개 31.25ms 차례로 나눈다");
 }
 
 // ── 2b 기록 제어 — 원하는 상태와 실제 상태 (rec_control.h) ────────────────
@@ -774,6 +813,7 @@ static void testMagcal() {
 
 int main() {
     testSdWrites();
+    testLoraPacket();
     testRecControl();
     testSogPolicy();
     testHeadingTilt();

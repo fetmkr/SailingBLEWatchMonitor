@@ -572,6 +572,11 @@ static bool recStartFrom(const char* who, uint32_t prev = 0) {
         hlog::Status st; hlog::getStatus(&st);
         printf("[REC] 시작 (%s) — %s  %lums\n", who, st.path, (unsigned long)(nowMs() - t0));
         recSaveOpen(st.session);
+        if (prev) {
+            char event[112];
+            snprintf(event, sizeof event, "앞 세션 %u 저장 중단 뒤 새 파일로 자동 복구", (unsigned)prev);
+            hlog::noteEvent(event);
+        }
         gRecLastSaveBad = false;
     } else {
         printf("[REC] ★ 시작 못 함 (%s) — %s\n", who, gRecStartErr ? gRecStartErr : "알 수 없음");
@@ -783,6 +788,34 @@ static sail::Telemetry buildTelemetry(uint32_t ms) {
     if (imu::ok()) t.heelDeg = currentHeelDeg();
     t.battPct = gBattPct;
     return t;
+}
+
+static void updateLoraLive(uint32_t now) {
+    const gps::State& gs = gps::state();
+    TinyGPSPlus& p = gps::parser();
+    const sail::Telemetry t = buildTelemetry(now);
+    lora::Live v;
+    v.boat = gBoatId;
+    v.gpsFix = gs.fix;
+    if (gs.fix && p.location.isValid() && p.location.age() < gps::kStaleMs) {
+        v.lat = (int32_t)lround(p.location.lat() * 1e7);
+        v.lon = (int32_t)lround(p.location.lng() * 1e7);
+    }
+    v.sogValid = t.sogValid;
+    v.cogValid = t.cogValid;
+    v.sogKn = t.sogKn;
+    v.cogDeg = t.cogDeg;
+    v.attitudeValid = imu::ok();
+    if (v.attitudeValid) {
+        v.heelDeg = currentHeelDeg();
+        v.pitchDeg = currentPitchDeg();
+    }
+    v.recording = hlog::recording();
+    float pct = gBattPct;
+    if (pct < 0.0f) pct = 0.0f;
+    if (pct > 100.0f) pct = 100.0f;
+    v.battPct = (uint8_t)lroundf(pct);
+    lora::updateLive(v);
 }
 
 // ── NVS float (아두이노 Preferences putFloat = 4바이트 blob) ───────────────
@@ -1141,6 +1174,8 @@ static void printHelp() {
     printf("  lora rssi     이 주파수의 바닥 잡음. 보드 한 대로 하는 확인\n");
     printf("  lora tx       시험 삼아 하나 보내기\n");
     printf("  lora watch    받을 때마다 한 줄씩 뱉기 (두 대로 시험할 때)\n");
+    printf("  lora peers    최근 3초에 받은 배 목록\n");
+    printf("  lora live on|off  GPS PPS 차례에 실시간 위치 송신 (부팅 기본 off)\n");
     printf("  info          현재 설정 출력\n");
     printf("\n");
     printf("  ── 보드 진단 ──\n");
@@ -2198,6 +2233,13 @@ static void handleLine(char* line) {
     if (!strcmp(line, "lora tx"))    { lora::txTest();      return; }
     if (!strcmp(line, "lora rssi"))  { lora::reportNoise(); return; }
     if (!strcmp(line, "lora watch")) { lora::watchToggle(); return; }
+    if (!strcmp(line, "lora peers")) { lora::reportPeers(); return; }
+    if (!strcmp(line, "lora live")) {
+        printf("[LORA] 실시간 함대 송신 %s\n", lora::liveEnabled() ? "켬" : "끔");
+        return;
+    }
+    if (!strcmp(line, "lora live on"))  { lora::setLiveEnabled(true);  return; }
+    if (!strcmp(line, "lora live off")) { lora::setLiveEnabled(false); return; }
     if (!strcmp(line, "lora on"))    { lora::begin();       return; }
     // 로라 배 번호. PROTOCOL.md §10.11
     if (!strcmp(line, "boat") || !strncmp(line, "boat ", 5)) {
@@ -2207,7 +2249,10 @@ static void handleLine(char* line) {
             return;
         }
         // ★ 달리는 중에는 안 바꾼다. 번호가 바뀌면 말할 차례가 옮겨 가 남의 차례에 떨어질 수 있다.
-        if (hlog::recording()) { printf("[BOAT] 기록 중에는 못 바꿉니다. 먼저 stop 하세요\n"); return; }
+        if (hlog::recording() || lora::liveEnabled()) {
+            printf("[BOAT] 기록 또는 LoRa 실시간 송신 중에는 못 바꿉니다. 먼저 rec off / lora live off 하세요\n");
+            return;
+        }
         char* arg = line + 5;
         while (*arg == ' ') ++arg;
         char* end = nullptr;
@@ -2217,11 +2262,13 @@ static void handleLine(char* line) {
             printf("[BOAT] 0~%u 로 입력하세요. 0 은 번호 없음. 예) boat 7\n", kBoatIdMax);
             return;
         }
+        const uint8_t oldBoatId = gBoatId;
         gBoatId = (uint8_t)n;
         if (!nv::writeWith([](nvs_handle_t h) { return nvs_set_u8(h, "boat", gBoatId) == ESP_OK; }))
             printf("[BOAT] ★ 보드에 못 적었습니다 — 껐다 켜면 옛 번호로 돌아갑니다\n");
         if (gBoatId == 0) printf("[BOAT] 번호 없음 — 로라로 안 보낸다\n");
         else printf("[BOAT] %u번 (차례 %u). 뱃머리 번호표와 같은지 보세요\n", gBoatId, gBoatId - 1);
+        if (gBoatId != oldBoatId) lora::noteBoatChanged();
         return;
     }
     if (!strcmp(line, "oledw")) { diag::oledWidths(); return; }
@@ -2460,6 +2507,7 @@ extern "C" void app_main(void) {
             lastNav += navMs;
             if (now - lastNav >= navMs * 5) lastNav = now;
             gps::updateFix();
+            updateLoraLive(now);
             if (hlog::recording()) logWriteNav(now);
         }
 
