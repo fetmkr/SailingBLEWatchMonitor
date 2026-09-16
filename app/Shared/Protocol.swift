@@ -38,6 +38,8 @@ enum SailProtocol {
     /// 배터리 전압까지 붙은 길이. 뒤에 덧붙인 필드라 옛 펌웨어는 37만 보낸다.
     /// 그래서 "37 이상이면 9축, 39 이상이면 전압까지" 로 읽는다.
     static let telemetryExtVoltsLength = 39
+    /// 자기편각까지 붙은 현재 길이. HDG는 기본 자북이고 이 값은 진북 비교 때만 쓴다.
+    static let telemetryExtDeclinationLength = 41
     /// 옛 광고의 길이. 새 디코더도 이 길이부터 받아 이전 펌웨어와 호환한다.
     static let manufacturerBasePayloadLength = 9
     /// Manufacturer Data 중 Company ID(2바이트)를 제외한 현재 페이로드 길이.
@@ -134,6 +136,8 @@ struct TelemetryExtra: Equatable {
     var imuOK: Bool
     /// 자력계가 살아 있나
     var magOK: Bool
+    /// `headingDegrees`의 북 기준. false=자북(M), true=진북(T).
+    var headingIsTrue: Bool = false
     /// 보드가 지금 SD 에 기록 중인가 (flags bit4)
     var recording: Bool = false
     /// 기록이 **저절로** 멈췄다 (flags bit5). 사람이 멈춘 건 안 선다.
@@ -165,6 +169,8 @@ struct TelemetryExtra: Equatable {
     /// 방전 곡선이 거의 평평해서, 전압이 조금만 떨어져도 퍼센트가 크게
     /// 내려앉는다. 그래서 둘을 나란히 보여준다.
     var batteryVolts: Double?
+    /// 자기편각(동편 +, 서편 -). HDG 표시값에는 섞지 않고 COG와 비교할 때만 쓴다.
+    var magneticDeclinationDegrees: Double? = nil
 }
 
 // MARK: - 텔레메트리 샘플
@@ -257,10 +263,16 @@ extension TelemetrySample {
                 if mv > 0 { volts = Double(mv) / 1000.0 }
             }
 
+            var declination: Double? = nil
+            if data.count >= SailProtocol.telemetryExtDeclinationLength {
+                declination = Double(r.i16()) / 100.0
+            }
+
             extra = TelemetryExtra(
                 gpsFix:         flags & 0x01 != 0,
                 imuOK:          flags & 0x02 != 0,
                 magOK:          flags & 0x04 != 0,
+                headingIsTrue:  flags & 0x08 != 0,
                 recording:      flags & 0x10 != 0,
                 recordingFailed: flags & 0x20 != 0,
                 satellites:     Int(sats),
@@ -268,7 +280,8 @@ extension TelemetrySample {
                 headingDegrees: hdgRaw == 0xFFFF ? nil : Double(hdgRaw) / 10.0,
                 pitchDegrees:   Double(pitchRaw) / 10.0,
                 accel: accel, gyro: gyro, mag: mag,
-                batteryVolts: volts
+                batteryVolts: volts,
+                magneticDeclinationDegrees: declination
             )
         }
 
@@ -352,6 +365,8 @@ extension TelemetrySample {
     /// 자력계가 주는 **뱃머리 방향**. 확장 패킷(RAK3112)에만 있다.
     var headingDegrees: Double? { extra?.headingDegrees }
     var headingText: String { headingDegrees.map { String(format: "%.0f°", $0) } ?? "—" }
+    var headingReference: String { extra?.headingIsTrue == true ? "T" : "M" }
+    var headingLabel: String { "HDG \(headingReference)" }
 
     /// GPS 값이 있는가. 화면에서 숫자를 그릴지 말지 판단할 때 쓴다.
     var hasGpsFix: Bool { sogKnots != nil }

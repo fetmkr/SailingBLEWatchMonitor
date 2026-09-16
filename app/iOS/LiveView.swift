@@ -71,7 +71,7 @@ struct LiveView: View {
                     // 이 자리는 항상 HDG 다. 값이 없으면 대시를 보여주지,
                     // 다른 값으로 바꿔 채우지 않는다. COG 는 상세 화면에 있다.
                     HStack(alignment: .top, spacing: 0) {
-                        smallerValue("HDG",
+                        smallerValue(ble.sample?.headingLabel ?? "HDG",
                                      ble.sample?.headingText ?? "—",
                                      sub: ble.sample?.headingDegrees.map { compassPoint($0) } ?? " ",
                                      warn: false)

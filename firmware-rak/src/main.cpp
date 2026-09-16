@@ -2169,7 +2169,8 @@ static hdg::HeadingCfg hdgCfgNow() {
     hdg::HeadingCfg c;
     c.axisA = gHdgAxisA; c.axisB = gHdgAxisB;
     c.signA = gHdgSignA; c.signB = gHdgSignB;
-    c.offDeg = gHdgOffsetDeg; c.declDeg = gHdgDeclDeg;
+    // 화면·BLE·HLG의 기본 HDG는 자북(M). 편각은 COG(T) 비교에만 쓴다.
+    c.offDeg = gHdgOffsetDeg; c.declDeg = 0.0f;
     return c;
 }
 
@@ -2180,7 +2181,7 @@ static float magAxis(uint8_t axis) {
 static float flatHeadingDeg() {
     if (!magFresh()) return -1.0f;           // 새 표본이 없으면 방위도 없다
     const float m[3] = { gMag.x, gMag.y, gMag.z };
-    return hdg::flatHeadingDeg(m, hdgCfgNow());   // atan2(A·sA, B·sB) + 장착 오프셋 + 편각
+    return hdg::flatHeadingDeg(m, hdgCfgNow());   // atan2(A·sA, B·sB) + 장착 오프셋 = 자북(M)
 }
 
 // ── 기울기를 보정한 방위 (INSLIB 에서 가져온 식) ─────────────────────────
@@ -2765,7 +2766,7 @@ static char gSessNote[420];
 static void buildHeadingNote(char* out, size_t n) {
     const AxisName aAx(gHdgAxisA, gHdgSignA), bAx(gHdgAxisB, gHdgSignB);
     snprintf(out, n,
-             "# 방위(화면·BLE·TXT): 기울기 보정(INSLIB ahrs_mag_detilt) — 축 atan2(자력 %s, 자력 %s) 기준, 중력은 그때 가속도, |a| 가 1 g ±0.15 밖이면 방위 없음. + 장착 오프셋 %+.2f° + 자기 편각 %+.2f°\n"
+             "# 방위(화면·BLE·TXT): 자북(M), 기울기 보정(INSLIB ahrs_mag_detilt) — 축 atan2(자력 %s, 자력 %s) 기준, 중력은 그때 가속도, |a| 가 1 g ±0.15 밖이면 방위 없음. + 장착 오프셋 %+.2f°. 진북 비교용 자기 편각 %+.2f°\n"
              "# 자력: HLG 의 mag 는 하드아이언을 뺀 값 — 뺀 오프셋 %.2f %.2f %.2f uT (반지름 %.1f, 잔차 %.2f)\n"
              "# 가속→자력 축: 자력 X=가속 Y, Y=가속 X, Z=−가속 Z\n",
              aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg,
@@ -3836,6 +3837,8 @@ static sail::TelemetryExtra buildExtra() {
     e.gpsFix       = gGpsFix;
     e.imuOk        = gImuOk;
     e.magOk        = magFresh();   // 붙어 있고 새 표본이 온다
+    e.headingTrue  = false;
+    e.magneticDeclinationDeg = gHdgDeclDeg;
     e.recording    = hlog::recording();
     e.recFailed    = recctl::showFailed(gWantRec, hlog::phase(), gRecGaveUp, gRecLastSaveBad);
     e.satellites   = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
@@ -4318,7 +4321,7 @@ static void printHelp() {
     Serial.println("  level         ★ 지금 자세를 힐·피치 0° 로 삼기 (배가 평형일 때)");
     Serial.println("  heel [x|y|z]  힐을 어느 가속도 축에서 볼지 (앞에 - 로 뒤집기)");
     Serial.println("  hdg <A> <B>   방위를 만들 자력계 두 축. 예) hdg -z x");
-    Serial.println("  hdg off <도>  방위 0점 보정 (자기 편각 + 보드 어긋남)");
+    Serial.println("  hdg off <도>  장착 방향 보정");
     Serial.println("  pitch [x|y|z] 피치를 어느 가속도 축에서 볼지");
     Serial.println("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)");
     Serial.println("  status        한 줄 상태 / loopstat  루프가 어디에 시간을 쓰나");
@@ -4895,12 +4898,12 @@ static void handleCommand(String line) {
         Serial.printf("  지금 자력  %+.1f %+.1f %+.1f µT\n", gMag.x, gMag.y, gMag.z);
         const float hNow = flatHeadingDeg(), hBoat = boatHeadingDeg();
         if (hNow >= 0.0f)
-            Serial.printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  %.1f°  (진단용)\n",
-                          aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg, hNow);
+            Serial.printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f°  →  %.1f°M  (진단용)\n",
+                          aAx.text, bAx.text, gHdgOffsetDeg, hNow);
         else
-            Serial.printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  --- (자력 새 표본 없음)\n",
-                          aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg);
-        if (hBoat >= 0.0f) Serial.printf("  방위  기울기 보정 (화면·BLE·기록)  →  %.1f°\n", hBoat);
+            Serial.printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f°  →  --- (자력 새 표본 없음)\n",
+                          aAx.text, bAx.text, gHdgOffsetDeg);
+        if (hBoat >= 0.0f) Serial.printf("  방위  기울기 보정 (화면·BLE·기록)  →  %.1f°M · DIF 계산용 편각 %+.2f°\n", hBoat, gHdgDeclDeg);
         else               Serial.println("  방위  기울기 보정 (화면·BLE·기록)  →  --- (자력 없음 또는 가속이 1 g 에서 벗어남)");
         Serial.printf("  자력 표본  새 %lu · 반복 %lu · 짧음 %lu · 넘침 %lu · 0벡터 %lu · 마지막 새 표본 %s\n",
                       (unsigned long)gMagCount[0], (unsigned long)gMagCount[1], (unsigned long)gMagCount[2],
@@ -5885,6 +5888,7 @@ void loop() {
             gGpsDyModel == 4 ? 'b' : '?';
         ds.cogDeg     = gLatest.cogDeg;
         ds.headingDeg = boatHeadingDeg();
+        ds.headingTrue = false;
         ds.heelDeg    = gLatest.heelDeg;
         ds.pitchDeg   = currentPitchDeg();
 
@@ -5892,6 +5896,12 @@ void loop() {
         ds.magOk = gMagOk;
 
         ds.sogValid   = gLatest.sogValid;
+        ds.cogValid   = gLatest.cogValid;
+        ds.courseDeltaValid = ds.cogValid && ds.headingDeg >= 0.0f;
+        if (ds.courseDeltaValid) {
+            const float headingTrueDeg = hdg::wrap360(ds.headingDeg + gHdgDeclDeg);
+            ds.courseDeltaDeg = wrap180(ds.cogDeg - headingTrueDeg);
+        }
         ds.heelValid  = gLatest.heelValid;
         ds.gpsFix     = gGpsFix;
         ds.satellites = gGps.satellites.isValid() ? (int)gGps.satellites.value() : 0;

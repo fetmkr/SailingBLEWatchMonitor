@@ -9,7 +9,7 @@
 //    좌우로 두면 크라운이 페이지 안 스크롤에 쓰인다.
 //    1페이지 — 항해 중 보는 화면. 속도 · HDG · 힐 세 개만, 최대한 크게.
 //               요트 계기처럼 뱃머리 방향을 크게 둔다. COG 는 2페이지.
-//    2페이지 — 센서 상세: HDG · COG · 위성 · PITCH · 9축
+//    2페이지 — 센서 상세: SOG·HDG / COG·DIF / HEEL·PITCH · 9축
 //    3페이지 — 설정: 보드 / 기록 / 항해 세션 / 나침반 보정
 
 //
@@ -70,18 +70,40 @@ private struct DebugPage: View {
 
     private var extra: TelemetryExtra? { ble.sample?.extra }
 
+    /// HDG는 기본 자북(M) 그대로 보여주고, DIF를 구하는 이 순간에만 진북으로 바꾼다.
+    /// 조류가 섞인 값이라 실제 leeway로 확정하지 않고 DIF라고 표시한다.
+    private var courseDeltaText: String {
+        guard let e = extra,
+              let heading = e.headingDegrees,
+              let course = ble.sample?.cogDegrees else { return "—" }
+        let headingTrue: Double
+        if e.headingIsTrue {
+            headingTrue = heading // 이전 펌웨어와 호환
+        } else if let declination = e.magneticDeclinationDegrees {
+            headingTrue = (heading + declination + 360.0).truncatingRemainder(dividingBy: 360.0)
+        } else {
+            return "—"
+        }
+        let delta = (course - headingTrue + 540.0).truncatingRemainder(dividingBy: 360.0) - 180.0
+        return String(format: "%+.0f°", delta)
+    }
+
     var body: some View {
         Group {
             if let e = extra {
-                VStack(spacing: 3) {
+                VStack(spacing: 2) {
                     HStack(spacing: 0) {
-                        direction(e.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—", "HDG")
-                        direction(ble.sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—", "COG")
+                        metric(ble.sample?.sogKnots.map { String(format: "%.2f", $0) } ?? "—", "SOG kn")
+                        metric(e.headingDegrees.map { String(format: "%.0f°", $0) } ?? "—", e.headingIsTrue ? "HDG T" : "HDG M")
                     }
 
                     HStack(spacing: 0) {
-                        metric("\(e.satellites)", "SAT", warn: !e.gpsFix)
-                        metric(e.hdop.map { String(format: "%.1f", $0) } ?? "—", "HDOP")
+                        metric(ble.sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—", "COG T")
+                        metric(courseDeltaText, "DIF")
+                    }
+
+                    HStack(spacing: 0) {
+                        metric(ble.sample?.heelDegrees.map { String(format: "%+d°", $0) } ?? "—", "HEEL")
                         metric(String(format: "%+.1f°", e.pitchDegrees), "PITCH")
                     }
 
@@ -108,20 +130,6 @@ private struct DebugPage: View {
         }
         .padding(.horizontal, 4)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-    }
-
-    private func direction(_ value: String, _ label: String) -> some View {
-        VStack(spacing: -2) {
-            Text(value)
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .minimumScaleFactor(0.5)
-                .lineLimit(1)
-            Text(label)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
     }
 
     private func metric(_ value: String, _ label: String, warn: Bool = false) -> some View {
@@ -253,7 +261,7 @@ private struct MainPage: View {
                         // 이 자리는 항상 HDG 다. 값이 없으면 대시를 보여주지,
                         // 다른 값으로 바꿔 채우지 않는다. COG 는 2페이지에 있다.
                         HStack(spacing: 0) {
-                            bigPair(ble.sample?.headingText ?? "—", "HDG")
+                            bigPair(ble.sample?.headingText ?? "—", ble.sample?.headingLabel ?? "HDG")
                             bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL")
                         }
                         Spacer(minLength: 0)

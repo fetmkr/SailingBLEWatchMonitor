@@ -300,7 +300,9 @@ static hdg::HeadingCfg hdgCfgNow() {
     hdg::HeadingCfg c;
     c.axisA = gHdgAxisA; c.axisB = gHdgAxisB;
     c.signA = gHdgSignA; c.signB = gHdgSignB;
-    c.offDeg = gHdgOffsetDeg; c.declDeg = gHdgDeclDeg;
+    // 화면·BLE·HLG의 기본 HDG는 선수들이 쓰는 자북(M)이다.
+    // 자기편각은 COG(T)와 비교하는 순간에만 별도로 더한다.
+    c.offDeg = gHdgOffsetDeg; c.declDeg = 0.0f;
     return c;
 }
 
@@ -504,7 +506,7 @@ static void buildHeadingNote(char* out, size_t n) {
     snprintf(b, sizeof b, "%c%c", gHdgSignB < 0 ? '-' : '+', kAx[gHdgAxisB < 3 ? gHdgAxisB : 0]);
     const magcal2::Calibration& mc = imu::magCalibration();
     snprintf(out, n,
-             "# 방위(화면·BLE·TXT): 3D자력보정+Fusion v1.3.3 (식5), NED 100Hz gain=0.5 reject=10/10deg recovery=5s, 원형 IIR 반감기 1s. 축 atan2(%s,%s), off=%+.2f deg decl=%+.2f deg. ?=초기화·자력거절/공백/복구. COG 미사용.\n"
+             "# 방위(화면·BLE·TXT): 자북(M), 3D자력보정+Fusion v1.3.3 (식5), NED 100Hz gain=0.5 reject=10/10deg recovery=5s, 원형 IIR 반감기 1s. 축 atan2(%s,%s), off=%+.2f deg. 진북 비교용 decl=%+.2f deg. ?=초기화·자력거절/공백/복구. COG 미사용.\n"
              "# 자력: HLG mag 는 원본. 보정 v%u 중심 %.2f %.2f %.2f uT, 자기장 %.1f 잔차 %.2f 왜곡 %.2fx 분포 %.2f\n"
              "# 보정행렬: %.5f %.5f %.5f / %.5f %.5f %.5f / %.5f %.5f %.5f\n"
              "# 가속→자력 축: 자력 X=가속 Y, Y=가속 X, Z=−가속 Z\n",
@@ -740,6 +742,8 @@ static sail::TelemetryExtra buildExtra() {
     e.gpsFix     = gs.fix;
     e.imuOk      = imu::ok();
     e.magOk      = imu::magFresh();
+    e.headingTrue = false;
+    e.magneticDeclinationDeg = gHdgDeclDeg;
     e.recording  = hlog::recording();
     e.recFailed  = recctl::showFailed(gWantRec, hlog::phase(), gRecGaveUp, gRecLastSaveBad);
     e.satellites = p.satellites.isValid() ? (uint8_t)p.satellites.value() : 0;
@@ -1178,7 +1182,7 @@ static void printHelp() {
     printf("  level         ★ 지금 자세를 힐·피치 0° 로 삼기 (배가 평형일 때)\n");
     printf("  heel [x|y|z]  힐을 어느 가속도 축에서 볼지 (앞에 - 로 뒤집기)\n");
     printf("  hdg <A> <B>   방위를 만들 자력계 두 축. 예) hdg -z x\n");
-    printf("  hdg off <도>  방위 0점 보정 (자기 편각 + 보드 어긋남)\n");
+    printf("  hdg off <도>  장착 방향 보정\n");
     printf("  pitch [x|y|z] 피치를 어느 가속도 축에서 볼지\n");
     printf("  calib         자이로 0점 다시 잡기 (기울어 있어도 OK)\n");
     printf("  status        한 줄 상태 / loopstat  루프가 어디에 시간을 쓰나\n");
@@ -1632,12 +1636,12 @@ static void cmdHdg(const char* rest) {
         const bool ok = nv::writeWith([&](nvs_handle_t h) { return nvPutFloat(h, isDecl ? "hdg_decl" : "hdg_off", deg); });
         printf("[IMU] %s %+.2f°%s\n", isDecl ? "자기 편각" : "장착 오프셋", deg, ok ? "" : " — ★ 보드에 못 적었습니다");
     } else if (!strncmp(arg, "ref", 3)) {
-        // 아는 방위(참 방위)에 대고 두 방위의 오차를 본다. 네 방향에서 해야 뜻이 있다.
+        // 아는 자북 방위에 대고 두 방위의 오차를 본다. 네 방향에서 해야 뜻이 있다.
         char v[32];
         restTrim(arg, 3, v, sizeof v);
         float ref = 0.0f;
         if (!hdg::parseNumber(v, &ref) || ref < 0.0f || ref >= 360.0f) {
-            printf("  hdg ref <참 방위 0~359>   예) 부두 방향이 045° 면 hdg ref 45\n");
+            printf("  hdg ref <자북 방위 0~359>   예) Iris 50이 045°면 hdg ref 45\n");
             return;
         }
         imuDrain();
@@ -1695,12 +1699,12 @@ static void cmdHdg(const char* rest) {
            estimate.accelIgnored, estimate.accelError,
            estimate.magIgnored, estimate.magError, estimate.recovering);
     if (hNow >= 0.0f)
-        printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  %.1f°  (진단용)\n",
-               aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg, hNow);
+        printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f°  →  %.1f°M  (진단용)\n",
+               aAx.text, bAx.text, gHdgOffsetDeg, hNow);
     else
-        printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f° + 편각 %+.1f°  →  --- (자력 새 표본 없음)\n",
-               aAx.text, bAx.text, gHdgOffsetDeg, gHdgDeclDeg);
-    if (hBoat >= 0.0f) printf("  방위  센서 융합 (화면·BLE·기록)  →  %.1f°\n", hBoat);
+        printf("  평평  atan2(자력 %s, 자력 %s) + 오프셋 %+.1f°  →  --- (자력 새 표본 없음)\n",
+               aAx.text, bAx.text, gHdgOffsetDeg);
+    if (hBoat >= 0.0f) printf("  방위  센서 융합 (화면·BLE·기록)  →  %.1f°M · DIF 계산용 편각 %+.2f°\n", hBoat, gHdgDeclDeg);
     else               printf("  방위  센서 융합 (화면·BLE·기록)  →  --- (유효한 센서 입력 없음)\n");
     char ago[40];
     const uint32_t lc = imu::magLastChangeMs();
@@ -2488,12 +2492,18 @@ extern "C" void app_main(void) {
                 ds.gnssModeNow  = modeChar(gs.dyModel);
                 ds.cogDeg       = lt.cogDeg;
                 ds.headingDeg   = boatHeadingDeg();
+                ds.headingTrue  = false;
                 ds.heelDeg      = lt.heelDeg;
                 ds.pitchDeg     = currentPitchDeg();
                 ds.imuOk        = imu::ok();
                 ds.magOk        = imu::magOk();
                 ds.sogValid     = lt.sogValid;
                 ds.cogValid     = lt.cogValid;
+                ds.courseDeltaValid = ds.cogValid && ds.headingDeg >= 0.0f;
+                if (ds.courseDeltaValid) {
+                    const float headingTrueDeg = hdg::wrap360(ds.headingDeg + gHdgDeclDeg);
+                    ds.courseDeltaDeg = wrap180(ds.cogDeg - headingTrueDeg);
+                }
                 ds.sogCaution   = false;       // 품질 거절은 숫자+?가 아니라 ---
                 ds.headingCaution = ds.headingDeg >= 0.0f && gHeading.latest(nowMs()).caution;
                 ds.heelValid    = lt.heelValid;

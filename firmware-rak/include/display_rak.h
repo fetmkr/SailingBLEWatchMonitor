@@ -40,6 +40,9 @@ struct DisplayState {
     float sogFromPos = -1.0f;
     float cogDeg  = 0.0f;   // GPS 침로 — 배가 실제로 가는 방향
     float headingDeg = -1.0f; // 자력계 방위 — 뱃머리가 보는 방향. 음수면 없음
+    bool  headingTrue = false; // false=자북(M), true=진북(T)
+    float courseDeltaDeg = 0.0f; // COG(T)-HDG(T), -180..+180. 조류를 포함하므로 아직 leeway라 부르지 않는다.
+    bool  courseDeltaValid = false;
     float heelDeg  = 0.0f;
     float pitchDeg = 0.0f;
 /// GPS 움직임 종류. 속도 옆에 낱말로 그린다.

@@ -301,7 +301,7 @@ void displayUpdate(const DisplayState& s) {
 
     gOled.drawHLine(0, kLineY, kW);
 
-    // ── 2줄  속도 ────────────────────────────────────────────────────────
+    // ── 2줄  속도와 선수 방향 ────────────────────────────────────────────
     //
     // ★ 값이 없으면 숫자를 아예 안 그린다. 그럴듯한 숫자가 떠 있으면 사람은
     //   그걸 읽는다. 예전에는 시뮬레이터 값에 SIM 을 붙여 띄웠는데 결국
@@ -310,29 +310,19 @@ void displayUpdate(const DisplayState& s) {
     else            snprintf(buf, sizeof(buf), "SOG --- kn");
     drawChecked(kColL, kRow2, buf, "SOG");
 
-    // GPS 움직임 종류. **정해 둔 모드와 다를 때만** 그린다. 같으면 자리만
-    // 뺏는다. 다르면 그 자리에서 속도가 0 으로 뭉개지고 있다는 뜻이다.
-    // 한 글자로 썼더니
-    // 눈에 안 띄어서 낱말로 쓴다. fix 가 없을 때도 그린다 — 실내에서 설정을
-    // 바꿔 놓고 화면으로 확인해야 하고, 이건 잰 값이 아니라 우리가 건 설정이라
-    // 언제나 확실하다.
-    if (s.gnssMode) {
-        const char* mw =
-            s.gnssMode == 'h' ? "port" : s.gnssMode == 's' ? "stat" :
-            s.gnssMode == 'p' ? "ped"  : s.gnssMode == 'c' ? "car"  :
-            s.gnssMode == 'b' ? "boat" : "?";
-        gOled.drawStr(kColR + 12, kRow2, mw);
-    }
+    const char headingRef = s.headingTrue ? 'T' : 'M';
+    if (s.headingDeg >= 0.0f) snprintf(buf, sizeof(buf), "HDG %03d%c", (int)(s.headingDeg + 0.5f) % 360, headingRef);
+    else                      snprintf(buf, sizeof(buf), "HDG ---%c", headingRef);
+    atRight(kRow2, buf);
 
-    // ── 3줄  침로와 방위 ─────────────────────────────────────────────────
-    // COG 는 GPS 가 준 "가는 방향", HDG 는 자력계가 준 "뱃머리 방향".
-    if (s.sogValid) snprintf(buf, sizeof(buf), "COG %03d", (int)(s.cogDeg + 0.5f) % 360);
-    else            snprintf(buf, sizeof(buf), "COG ---");
+    // ── 3줄  이동 침로와 침로-선수 차이 ──────────────────────────────────
+    if (s.cogValid) snprintf(buf, sizeof(buf), "COG %03dT", (int)(s.cogDeg + 0.5f) % 360);
+    else            snprintf(buf, sizeof(buf), "COG ---T");
     drawChecked(kColL, kRow3, buf, "COG");
 
-    if (s.headingDeg >= 0.0f) snprintf(buf, sizeof(buf), "HDG %03d", (int)(s.headingDeg + 0.5f) % 360);
-    else                      snprintf(buf, sizeof(buf), "HDG ---");
-    drawChecked(kColR, kRow3, buf, "HDG");
+    if (s.courseDeltaValid) snprintf(buf, sizeof(buf), "DIF %+.0f", s.courseDeltaDeg);
+    else                    snprintf(buf, sizeof(buf), "DIF ---");
+    atRight(kRow3, buf);
 
     // ── 4줄  힐과 피치 ───────────────────────────────────────────────────
     // 우현으로 누우면 힐 양수, 뱃머리가 들리면 피치 양수 (PROTOCOL.md §3.1).

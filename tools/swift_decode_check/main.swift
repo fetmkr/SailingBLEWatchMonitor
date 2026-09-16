@@ -209,6 +209,18 @@ do {
     if let s = TelemetrySample.decodeTelemetryPacket(noVolt), s.batteryVolts != nil {
         failures.append("  0 mV 가 값으로 읽힘: \(s.batteryVolts!)")
     }
+
+    // HDG 자체는 M으로 유지하고, 진북 비교에만 쓰는 편각을 뒤에 붙인다.
+    var withDeclination = ext
+    withDeclination.append(contentsOf: [0x7A, 0xFC]) // -902 i16 LE → -9.02°
+    if let s = TelemetrySample.decodeTelemetryPacket(withDeclination) {
+        if s.extra?.magneticDeclinationDegrees != -9.02 {
+            failures.append("  편각 \(String(describing: s.extra?.magneticDeclinationDegrees)) ≠ -9.02")
+        }
+        print("  [ OK ] 41바이트 확장 패킷 → HDG와 분리된 편각 -9.02°")
+    } else {
+        failures.append("  41바이트 확장 패킷 디코딩이 nil")
+    }
 }
 
 expectNil("짧은 gatt(11바이트)", TelemetrySample.decodeTelemetryPacket(Data(repeating: 1, count: 11)))

@@ -262,28 +262,26 @@ void displayUpdate(const DisplayState& s) {
 
     u8g2_DrawHLine(&gOled, 0, kLineY, kW);
 
-    // ── 2줄  속도 — 값이 없으면 숫자를 안 그린다 ─────────────────────────
+    // ── 2줄  속도와 선수 방향 ────────────────────────────────────────────
     if (s.sogValid) snprintf(buf, sizeof(buf), "SOG %.2f kn%s", s.sogKn, s.sogCaution ? "?" : "");
     else            snprintf(buf, sizeof(buf), "SOG --- kn");
     drawChecked(kColL, kRow2, buf, "SOG");
 
-    if (s.gnssMode) {
-        const char* mw =
-            s.gnssMode == 'h' ? "port" : s.gnssMode == 's' ? "stat" :
-            s.gnssMode == 'p' ? "ped"  : s.gnssMode == 'c' ? "car"  :
-            s.gnssMode == 'b' ? "boat" : "?";
-        u8g2_DrawStr(&gOled, kColR + 12, kRow2, mw);
-    }
+    const char headingRef = s.headingTrue ? 'T' : 'M';
+    if (s.headingDeg >= 0.0f) snprintf(buf, sizeof(buf), "HDG %03d%c%s", (int)(s.headingDeg + 0.5f) % 360,
+                                    headingRef, s.headingCaution ? "?" : "");
+    else                      snprintf(buf, sizeof(buf), "HDG ---%c", headingRef);
+    atRight(kRow2, buf);
 
-    // ── 3줄  침로와 방위 ─────────────────────────────────────────────────
-    if (s.cogValid) snprintf(buf, sizeof(buf), "COG %03d", (int)(s.cogDeg + 0.5f) % 360);
-    else            snprintf(buf, sizeof(buf), "COG ---");
+    // ── 3줄  이동 침로와 침로-선수 차이 ──────────────────────────────────
+    if (s.cogValid) snprintf(buf, sizeof(buf), "COG %03dT", (int)(s.cogDeg + 0.5f) % 360);
+    else            snprintf(buf, sizeof(buf), "COG ---T");
     drawChecked(kColL, kRow3, buf, "COG");
 
-    if (s.headingDeg >= 0.0f) snprintf(buf, sizeof(buf), "HDG %03d%s", (int)(s.headingDeg + 0.5f) % 360,
-                                    s.headingCaution ? "?" : "");
-    else                      snprintf(buf, sizeof(buf), "HDG ---");
-    drawChecked(kColR, kRow3, buf, "HDG");
+    // 자북 HDG와 진북 COG를 직접 빼지 않는다. 둘 다 진북일 때만 차이를 보인다.
+    if (s.courseDeltaValid) snprintf(buf, sizeof(buf), "DIF %+.0f", s.courseDeltaDeg);
+    else                    snprintf(buf, sizeof(buf), "DIF ---");
+    atRight(kRow3, buf);
 
     // ── 4줄  힐과 피치 ───────────────────────────────────────────────────
     if (s.heelValid) snprintf(buf, sizeof(buf), "HEEL %.1f", s.heelDeg);

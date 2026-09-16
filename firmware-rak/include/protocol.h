@@ -166,7 +166,7 @@ inline void encodeTelemetryPacket(const Telemetry& t, uint8_t out[kTelemetryLen]
 //  ------  ----  -------  ---------  --------------------------------------
 //  [0..11]  12            (기존)     PROTOCOL.md §3 그대로
 //  [12]      1   u8       flags      bit0 GPS fix / bit1 IMU / bit2 자력계
-//                                    bit3 예약 (항상 0)
+//                                    bit3 HDG 기준 (0 자북 M / 1 진북 T)
 //  [13]      1   u8       sats       위성 수
 //  [14]      1   u8       hdop       HDOP × 10.  255 = 모름
 //  [15..16]  2   u16le    hdg        자력계 방위 deg × 10 (0…3599)
@@ -176,19 +176,22 @@ inline void encodeTelemetryPacket(const Telemetry& t, uint8_t out[kTelemetryLen]
 //  [25..30]  6   i16le×3  gyr XYZ    °/s × 10
 //  [31..36]  6   i16le×3  mag XYZ    µT × 10
 //  [37..38]  2   u16le    batt mV    배터리 전압 (mV). 0 = 아직 못 잼
+//  [39..40]  2   i16le    decl       자기편각 deg × 100 (동편 +, 서편 -)
 //  ------  ----  -------  ---------  --------------------------------------
-//  total    39
+//  total    41
 //
 // ※ [37..38] 은 나중에 덧붙였다. 앞 37바이트는 한 글자도 안 바뀌었으므로
 //   옛 앱은 그대로 돈다 (PROTOCOL.md §7 "길면 앞부분만 파싱").
 //   그래서 앱 쪽은 "37 이상이면 9축, 39 이상이면 전압까지" 로 읽는다.
 static constexpr size_t kTelemetryExtBaseLen = 37; // 9축까지
-static constexpr size_t kTelemetryExtLen     = 39; // + 배터리 전압
+static constexpr size_t kTelemetryExtVoltsLen = 39; // + 배터리 전압
+static constexpr size_t kTelemetryExtLen      = 41; // + 진북 계산용 자기편각
 
 struct TelemetryExtra {
     bool    gpsFix       = false;
     bool    imuOk        = false;
     bool    magOk        = false;
+    bool    headingTrue  = false; // flags bit3: false=자북(M), true=진북(T)
     bool    recording    = false; // SD 에 기록 중 (flags bit4)
     bool    recFailed    = false; // 기록이 저절로 멈췄다 (flags bit5). 사람이 멈추면 안 선다
     uint8_t satellites   = 0;
@@ -205,6 +208,7 @@ struct TelemetryExtra {
     /// 곡선이 거의 평평해서, 전압이 0.05 V 떨어지면 퍼센트가 20 씩 내려간다.
     /// 그래서 둘을 나란히 보여준다.
     float   battVolts = 0.0f;
+    float   magneticDeclinationDeg = 0.0f; // HDG는 M으로 보내고, 수신 측이 T 비교할 때만 더한다.
 };
 
 // 실수를 int16 칸에 넣는다. 범위를 벗어나면 자른다.
@@ -225,8 +229,7 @@ inline void encodeTelemetryExt(const Telemetry& t, const TelemetryExtra& e,
     if (e.gpsFix) flags |= 0x01;
     if (e.imuOk) flags |= 0x02;
     if (e.magOk) flags |= 0x04;
-    // bit3 은 예약이다. 예전에 "시뮬레이터 값" 을 뜻했지만 시뮬레이터를
-    // 걷어냈다. 규격(PROTOCOL.md §3.1)이 항상 0 이라고 못 박고 있다.
+    if (e.headingTrue) flags |= 0x08;
     if (e.recording) flags |= 0x10;
     if (e.recFailed) flags |= 0x20;   // 앱이 배경을 빨갛게 칠한다
     out[12] = flags;
@@ -266,6 +269,7 @@ inline void encodeTelemetryExt(const Telemetry& t, const TelemetryExtra& e,
     if (mv < 0) mv = 0;
     if (mv > 65535) mv = 65535;
     putU16LE(&out[37], (uint16_t)mv);
+    putI16LE(&out[39], clampToI16(e.magneticDeclinationDeg * 100.0f));
 }
 
 // Manufacturer Specific Data. Company ID(2) + 페이로드(10) = 12바이트. PROTOCOL.md §4.3

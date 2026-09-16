@@ -132,7 +132,7 @@ static void testManufacturerEncoding() {
 // 앞 12바이트가 한 글자도 안 달라야 한다. 옛 수신 측이 앞부분만 읽고 그대로
 // 돌 수 있는 근거가 이것이다 (PROTOCOL.md §7).
 static void testExtendedEncoding() {
-    std::printf("\n── 4. 확장 페이로드 37바이트 ──\n");
+    std::printf("\n── 4. 확장 페이로드 41바이트 ──\n");
 
     Telemetry t;
     t.moduleID = 9;
@@ -146,6 +146,7 @@ static void testExtendedEncoding() {
     e.gpsFix     = true;
     e.imuOk      = true;
     e.magOk      = true;
+    e.headingTrue = true;
     e.satellites = 11;
     e.hdop       = 1.4f;
     e.headingDeg = 344.5f;
@@ -154,6 +155,7 @@ static void testExtendedEncoding() {
     e.gyrX = 12.3f;   e.gyrY = -45.6f;  e.gyrZ = 0.0f;
     e.magX = -31.8f;  e.magY = 6.1f;    e.magZ = -23.8f;
     e.battVolts = 3.888f;
+    e.magneticDeclinationDeg = -9.02f;
 
     uint8_t base[sail::kTelemetryLen];
     sail::encodeTelemetryPacket(t, base);
@@ -166,7 +168,7 @@ static void testExtendedEncoding() {
     check((p[12] & 0x01) != 0,        "flags bit0 GPS fix");
     check((p[12] & 0x02) != 0,        "flags bit1 IMU");
     check((p[12] & 0x04) != 0,        "flags bit2 자력계");
-    check((p[12] & 0x08) == 0,        "flags bit3 예약 — 항상 0");
+    check((p[12] & 0x08) != 0,        "flags bit3 HDG 진북(T)");
     check(p[13] == 11,                "위성 수");
     check(p[14] == 14,                "HDOP 1.4 → 14");
     check(u16At(&p[15]) == 3445,      "방위 344.5° → 3445");
@@ -175,6 +177,9 @@ static void testExtendedEncoding() {
     check(i16At(&p[25]) == 123,       "자이로 X 12.3 °/s → 123");
     check(i16At(&p[31]) == -318,      "자력 X -31.8 µT → -318");
     check(u16At(&p[37]) == 3888,      "배터리 3.888 V → 3888 mV");
+    check(i16At(&p[39]) == -902,      "자기편각 -9.02° → -902");
+    check(sail::kTelemetryExtLen == 41,
+          "현재 확장 패킷은 편각까지 41바이트");
     check(sail::kTelemetryExtBaseLen == 37,
           "9축까지는 37바이트 — 옛 앱이 읽던 자리는 그대로");
 
@@ -184,6 +189,10 @@ static void testExtendedEncoding() {
     check(u16At(&p[37]) == 0,         "전압 못 잼 → 0");
     e.battVolts = 3.888f;
     sail::encodeTelemetryExt(t, e, p);
+
+    e.headingTrue = false;
+    sail::encodeTelemetryExt(t, e, p);
+    check((p[12] & 0x08) == 0,        "flags bit3 HDG 자북(M)");
 
     // 자력계가 없으면 방위는 무효 표식이어야 한다.
     e.magOk = false;

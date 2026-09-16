@@ -76,10 +76,10 @@ struct SensorDetailView: View {
     private var navRow: some View {
         HStack(spacing: 8) {
             card("SOG", sample?.sogText ?? "—", sub: "kn")
-            card("COG", sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—",
+            card("COG T", sample?.cogDegrees.map { String(format: "%.0f°", $0) } ?? "—",
                  sub: sample?.cogDegrees.map { compassPoint($0) } ?? " ")
             // COG 는 가는 방향(GPS), HDG 는 뱃머리 방향(자력계). 서로 다른 값이다.
-            card("HDG", headingText, sub: "뱃머리")
+            card(sample?.headingLabel ?? "HDG", headingText, sub: "뱃머리")
         }
     }
 
