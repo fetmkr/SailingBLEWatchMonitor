@@ -24,10 +24,10 @@ static constexpr size_t kControlLineMax = 180;
 //   예) SAIL-hojun
 static constexpr const char* kNamePrefix = "SAIL-";
 
-// Scan response 예산: 31 = Manufacturer Data(13) + [len][type] + 이름
-//   → 접두사 포함 전체 이름 최대 16바이트
-static constexpr size_t kMaxFullNameLen = 16;
-static constexpr size_t kMaxUserNameLen = kMaxFullNameLen - 5; // "SAIL-" 제외 → 11
+// Scan response 예산: 31 = Manufacturer Data(14) + [len][type] + 이름
+//   → 접두사 포함 전체 이름 최대 15바이트
+static constexpr size_t kMaxFullNameLen = 15;
+static constexpr size_t kMaxUserNameLen = kMaxFullNameLen - 5; // "SAIL-" 제외 → 10
 
 static constexpr uint16_t kCompanyID = 0xFFFF;  // 미할당(테스트용) Company ID
 static constexpr uint8_t  kVersion   = 0x01;
@@ -42,7 +42,9 @@ static constexpr uint16_t kAdvIntervalUnits = (uint16_t)(kAdvIntervalMs / 0.625f
 
 // ── 페이로드 크기 ────────────────────────────────────────────────────────
 static constexpr size_t kTelemetryLen = 12; // GATT characteristic
-static constexpr size_t kMfgLen       = 9;  // Company ID 를 제외한 manufacturer 페이로드
+// 광고의 앞 9바이트는 옛 앱과 그대로 호환된다. 마지막 status 바이트만 덧붙였다.
+static constexpr size_t kMfgBaseLen   = 9;
+static constexpr size_t kMfgLen       = 10; // Company ID 를 제외한 manufacturer 페이로드
 
 // ── module_id ────────────────────────────────────────────────────────────
 //
@@ -266,8 +268,21 @@ inline void encodeTelemetryExt(const Telemetry& t, const TelemetryExtra& e,
     putU16LE(&out[37], (uint16_t)mv);
 }
 
-// Manufacturer Specific Data. Company ID(2) + 페이로드(9) = 11바이트. PROTOCOL.md §4.3
-inline void encodeManufacturerData(const Telemetry& t, uint8_t seq, uint8_t out[2 + kMfgLen]) {
+// Manufacturer Specific Data. Company ID(2) + 페이로드(10) = 12바이트. PROTOCOL.md §4.3
+// status bit0: 기록 중, bit1: 기록이 저절로 멈춤.
+// status 는 맨 뒤에 덧붙여 옛 앱이 앞 11바이트를 그대로 읽을 수 있게 한다.
+static constexpr uint8_t kMfgRecording = 0x01;
+static constexpr uint8_t kMfgRecFailed = 0x02;
+
+inline uint8_t manufacturerStatus(bool recording, bool recFailed) {
+    uint8_t status = 0;
+    if (recording) status |= kMfgRecording;
+    if (recFailed) status |= kMfgRecFailed;
+    return status;
+}
+
+inline void encodeManufacturerData(const Telemetry& t, uint8_t seq,
+                                   uint8_t out[2 + kMfgLen], uint8_t status = 0) {
     putU16LE(&out[0], kCompanyID);
     out[2] = kVersion;
     out[3] = t.moduleID;
@@ -276,6 +291,7 @@ inline void encodeManufacturerData(const Telemetry& t, uint8_t seq, uint8_t out[
     out[8]  = (uint8_t)(t.heelValid ? encodeHeel(t.heelDeg) : kHeelInvalid);
     out[9]  = encodeBatt(t.battPct);
     out[10] = seq;
+    out[11] = status;
 }
 
 } // namespace sail

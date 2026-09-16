@@ -3891,10 +3891,13 @@ static NimBLEAdvertisementData buildAdvData() {
     return d;
 }
 
-// Scan Response: Manufacturer Data + Complete Local Name  (13 + 2+N 바이트)
-static NimBLEAdvertisementData buildScanData(const Telemetry& tm, uint8_t seq) {
+// Scan Response: Manufacturer Data + Complete Local Name  (14 + 2+N 바이트)
+static NimBLEAdvertisementData buildScanData(const Telemetry& tm,
+                                              const sail::TelemetryExtra& extra,
+                                              uint8_t seq) {
     uint8_t mfg[2 + sail::kMfgLen];
-    sail::encodeManufacturerData(tm, seq, mfg);
+    sail::encodeManufacturerData(
+        tm, seq, mfg, sail::manufacturerStatus(extra.recording, extra.recFailed));
 
     NimBLEAdvertisementData d;
     d.setManufacturerData(mfg, sizeof(mfg));
@@ -3932,7 +3935,7 @@ static void applyAdvertising() {
     adv->setMaxInterval(sail::kAdvIntervalUnits);
 
     adv->setAdvertisementData(buildAdvData());
-    adv->setScanResponseData(buildScanData(gLatest, gSeq));
+    adv->setScanResponseData(buildScanData(gLatest, buildExtra(), gSeq));
 
     if (!adv->start()) {
         Serial.println("[BLE] !! advertising start 실패");
@@ -3949,7 +3952,7 @@ static void applyAdvertising() {
 // 광고를 멈추지 않고 scan response 안의 manufacturer data 만 1 Hz 로 교체
 static void refreshAdvPayload() {
     gSeq++;
-    NimBLEDevice::getAdvertising()->setScanResponseData(buildScanData(gLatest, gSeq));
+    NimBLEDevice::getAdvertising()->setScanResponseData(buildScanData(gLatest, buildExtra(), gSeq));
 }
 
 // ── 서버 콜백 ────────────────────────────────────────────────────────────
@@ -4238,7 +4241,8 @@ static void printIdentity() {
 
 static void printHelp() {
     Serial.println("──────────────────────────────────────────");
-    Serial.println("  name <이름>   보드 이름 설정 (최대 11자, 영숫자/-/_)");
+    Serial.printf("  name <이름>   보드 이름 설정 (최대 %u자, 영숫자/-/_)\n",
+                  (unsigned)sail::kMaxUserNameLen);
     Serial.println("                예) name hojun  →  SAIL-hojun");
     Serial.println("  hz <1~100>    notify 주기 설정. 예) hz 20  (기본 10)");
     Serial.println("  boat <0~32>   로라 배 번호. 0 은 번호 없음. 예) boat 7");

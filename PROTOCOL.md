@@ -20,7 +20,7 @@
 
 | 항목 | 값 |
 |---|---|
-| Complete Local Name | `SAIL-<이름>` — 예: `SAIL-hojun` (전체 최대 16자) |
+| Complete Local Name | `SAIL-<이름>` — 예: `SAIL-hojun` (전체 최대 15자) |
 | Service UUID | `B0A70001-0000-4000-8000-000000000001` |
 | Telemetry Characteristic UUID | `B0A70002-0000-4000-8000-000000000001` |
 | Characteristic 속성 | Read + Notify |
@@ -36,7 +36,7 @@
 
 - 이름은 `SAIL-` 접두사 + 사용자 지정 문자열. 앱은 이 접두사로 우리 모듈을 골라낸다.
 - 사용 가능 문자: 영숫자, `-`, `_`
-- **전체 길이 최대 16바이트** (접두사 5 + 사용자 부분 11).
+- **전체 길이 최대 15바이트** (접두사 5 + 사용자 부분 10).
   Scan Response 예산에서 나온 값이다 → §4.2
 - 설정하지 않으면 ESP32 MAC 뒷 2바이트로 자동 생성 (`SAIL-A3F2`).
   아무 설정 없이 여러 장을 구워도 이름이 겹치지 않는다.
@@ -247,21 +247,21 @@ RAK3112 보드(`firmware-rak/`)는 위 12바이트 **뒤에** 9축과 GPS 상태
 
 | AD Type | 이름 | 길이 |
 |---|---|---|
-| `0xFF` | Manufacturer Specific Data (Company ID `0xFFFF` + 9바이트 페이로드) | 13 |
+| `0xFF` | Manufacturer Specific Data (Company ID `0xFFFF` + 10바이트 페이로드) | 14 |
 | `0x09` | Complete Local Name → `SAIL-<이름>` | 2 + N |
 
 **모듈 이름의 길이 한도(§1.1)가 여기서 나온다.**
 
 ```
-31 (한도) − 13 (Manufacturer Data) − 2 ([len][type]) = 16 바이트
+31 (한도) − 14 (Manufacturer Data) − 2 ([len][type]) = 15 바이트
 ```
 
-접두사를 포함한 전체 이름은 최대 16자.
+접두사를 포함한 전체 이름은 최대 15자.
 예) `SAIL-hojun` (10자) → scan response 25 바이트.
 
-### 4.3 Manufacturer Specific Data 페이로드 (Company ID 뒤 9 바이트)
+### 4.3 Manufacturer Specific Data 페이로드 (Company ID 뒤 10 바이트)
 
-AD 구조 전체는 `[len=0x0C][type=0xFF][FF FF][9바이트 페이로드]` = 13 바이트.
+AD 구조 전체는 `[len=0x0D][type=0xFF][FF FF][10바이트 페이로드]` = 14 바이트.
 
 ```
  offset  size  type   name        설명
@@ -273,13 +273,16 @@ AD 구조 전체는 `[len=0x0C][type=0xFF][FF FF][9바이트 페이로드]` = 13
  [6]     1     i8     heel        deg
  [7]     1     u8     batt        %
  [8]     1     u8     seq         광고 갱신마다 +1 (0…255 wrap)
+ [9]     1     u8     status      bit0 기록 중 / bit1 기록이 저절로 멈춤
  ------  ----  -----  ----------  ------------------------------------
- total   9
+ total   10
 ```
 
 > `offset` 은 **Company ID(2바이트) 를 제외한** 페이로드 기준.
 > CoreBluetooth 의 `CBAdvertisementDataManufacturerDataKey` 는 Company ID 를 **포함한**
-> 전체 바이트열(11바이트)을 준다. 따라서 앱에서는 앞 2바이트를 확인/스킵하고 파싱한다.
+> 전체 바이트열(12바이트)을 준다. 따라서 앱에서는 앞 2바이트를 확인/스킵하고 파싱한다.
+> status는 옛 9바이트 페이로드 뒤에 덧붙였다. 새 앱은 옛 11바이트 전체 광고도
+> 계속 읽고, 그 경우 REC 상태만 `모름`으로 둔다. 옛 앱은 추가 바이트를 무시한다.
 
 **`seq` 활용:** 연속 수신한 두 광고의 `seq` 차이가 1보다 크면 그 사이 패킷이 유실된 것이다.
 스캐너 탭은 이를 이용해 수신율(%)을 계산한다.

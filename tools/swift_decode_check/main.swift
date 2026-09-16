@@ -169,7 +169,7 @@ do {
 
 // 확장 패킷의 배터리 전압 — 뒤에 덧붙인 필드라 있을 수도, 없을 수도 있다.
 //
-// 골든 벡터는 12바이트와 광고 9바이트만 다룬다. 확장 패킷의 꼬리는 여기서 본다.
+// 골든 벡터는 12바이트 GATT와 광고 기본값을 다룬다. 확장 패킷의 꼬리는 여기서 본다.
 // 펌웨어 쪽 proto_test.cpp 가 "3.888 V → [37..38] 에 3888" 을 확인하므로,
 // 두 시험을 합치면 전선 위의 약속이 양쪽에서 맞는다.
 do {
@@ -220,6 +220,26 @@ expectNil("Company ID 불일치 mfg",
           TelemetrySample.decodeManufacturerData(Data([0xAB,0xCD, 0x01,0x01, 0,0, 0,0, 0, 0, 0])))
 expectNil("짧은 mfg(10바이트)", TelemetrySample.decodeManufacturerData(Data(repeating: 0xFF, count: 10)))
 
+// 옛 11바이트 광고는 계속 읽되 REC 상태는 모름으로 남긴다.
+let oldMfg = Data([0xFF,0xFF, 0x01,0x01, 0,0, 0,0, 0,50, 7])
+if let s = TelemetrySample.decodeManufacturerData(oldMfg) {
+    if s.recording != nil || s.recordingFailed != nil {
+        failures.append("  옛 mfg 광고에서 없는 REC 상태를 지어냄")
+    }
+} else {
+    failures.append("  옛 11바이트 mfg 광고를 거부함")
+}
+
+// 현재 12바이트 광고의 마지막 status: bit0 기록 중, bit1 저절로 멈춤.
+let currentMfg = Data([0xFF,0xFF, 0x01,0x01, 0,0, 0,0, 0,50, 8, 0x03])
+if let s = TelemetrySample.decodeManufacturerData(currentMfg) {
+    if s.recording != true || s.recordingFailed != true {
+        failures.append("  현재 mfg 광고의 REC status 해석 실패")
+    }
+} else {
+    failures.append("  현재 12바이트 mfg 광고를 거부함")
+}
+
 // Data 슬라이스(startIndex != 0)에서도 올바르게 읽히는지 — 흔한 함정
 let padded = Data([0xDE, 0xAD, 0xBE, 0xEF])
     + Data([0x01, 0x01, 0x40, 0xE2, 0x01, 0x00, 0x29, 0x02, 0x4E, 0x0C, 0xF4, 0x57])
@@ -246,8 +266,8 @@ print("\n── 모듈 이름 규칙 ──")
 if SailProtocol.namePrefix != "SAIL-" {
     failures.append("  namePrefix 가 \"SAIL-\" 가 아님: \(SailProtocol.namePrefix)")
 }
-if SailProtocol.maxFullNameLength != 16 {
-    failures.append("  maxFullNameLength 가 16 이 아님: \(SailProtocol.maxFullNameLength)")
+if SailProtocol.maxFullNameLength != 15 {
+    failures.append("  maxFullNameLength 가 15 가 아님: \(SailProtocol.maxFullNameLength)")
 }
 let nameCases: [(String, Bool, String)] = [
     ("SAIL-hojun", true,  "hojun"),

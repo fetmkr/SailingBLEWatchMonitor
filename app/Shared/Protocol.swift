@@ -18,7 +18,7 @@ enum SailProtocol {
     static let namePrefix = "SAIL-"
 
     /// 광고에 들어갈 수 있는 전체 이름의 최대 길이 (scan response 예산에서 나온 값)
-    static let maxFullNameLength = 16
+    static let maxFullNameLength = 15
 
     static let serviceUUID   = CBUUID(string: "B0A70001-0000-4000-8000-000000000001")
     static let telemetryUUID = CBUUID(string: "B0A70002-0000-4000-8000-000000000001")
@@ -38,8 +38,13 @@ enum SailProtocol {
     /// 배터리 전압까지 붙은 길이. 뒤에 덧붙인 필드라 옛 펌웨어는 37만 보낸다.
     /// 그래서 "37 이상이면 9축, 39 이상이면 전압까지" 로 읽는다.
     static let telemetryExtVoltsLength = 39
-    /// Manufacturer Data 중 Company ID(2바이트)를 제외한 페이로드 길이
-    static let manufacturerPayloadLength = 9
+    /// 옛 광고의 길이. 새 디코더도 이 길이부터 받아 이전 펌웨어와 호환한다.
+    static let manufacturerBasePayloadLength = 9
+    /// Manufacturer Data 중 Company ID(2바이트)를 제외한 현재 페이로드 길이.
+    /// 마지막 1바이트는 REC 상태다.
+    static let manufacturerPayloadLength = 10
+    static let manufacturerRecording: UInt8 = 0x01
+    static let manufacturerRecordingFailed: UInt8 = 0x02
 
     // ── 값 없음 표식 (PROTOCOL.md §2.1) ──────────────────────────────────
     //
@@ -179,6 +184,10 @@ struct TelemetrySample: Equatable {
     var batteryPercent: Int
     /// 광고 경로에만 존재. GATT 경로에서는 nil.
     var sequence: UInt8?
+    /// 보드가 지금 SD에 기록 중인지. 옛 광고처럼 상태를 안 보낸 경우 nil.
+    var recording: Bool? = nil
+    /// 기록이 사람의 조작 없이 멈췄는지. 옛 광고처럼 상태를 안 보낸 경우 nil.
+    var recordingFailed: Bool? = nil
     /// 앱이 이 값을 수신한 시각
     var receivedAt: Date
 
@@ -272,6 +281,8 @@ extension TelemetrySample {
             heelDegrees: heelRaw == SailProtocol.heelInvalid ? nil : Int(heelRaw),
             batteryPercent: Int(battRaw),
             sequence: nil,
+            recording: extra?.recording,
+            recordingFailed: extra?.recordingFailed,
             receivedAt: date,
             extra: extra
         )
@@ -280,10 +291,11 @@ extension TelemetrySample {
     /// Manufacturer Specific Data → 샘플.  PROTOCOL.md §4.3
     ///
     /// CoreBluetooth 가 주는 `CBAdvertisementDataManufacturerDataKey` 는
-    /// **Company ID 2바이트를 포함한** 전체 바이트열이다. 따라서 총 11바이트를 기대한다.
+    /// **Company ID 2바이트를 포함한** 전체 바이트열이다. 옛 11바이트와
+    /// REC 상태가 붙은 현재 12바이트를 모두 받는다.
     static func decodeManufacturerData(_ data: Data, at date: Date = Date()) -> TelemetrySample? {
-        let expected = 2 + SailProtocol.manufacturerPayloadLength
-        guard data.count >= expected else { return nil }
+        let minimum = 2 + SailProtocol.manufacturerBasePayloadLength
+        guard data.count >= minimum else { return nil }
 
         var r = LEReader(data)
         let company = r.u16()
@@ -298,6 +310,7 @@ extension TelemetrySample {
         let heelRaw  = r.i8()
         let battRaw  = r.u8()
         let seq      = r.u8()
+        let status: UInt8? = r.remaining > 0 ? r.u8() : nil
 
         return TelemetrySample(
             version: ver,
@@ -308,6 +321,8 @@ extension TelemetrySample {
             heelDegrees: heelRaw == SailProtocol.heelInvalid ? nil : Int(heelRaw),
             batteryPercent: Int(battRaw),
             sequence: seq,
+            recording: status.map { $0 & SailProtocol.manufacturerRecording != 0 },
+            recordingFailed: status.map { $0 & SailProtocol.manufacturerRecordingFailed != 0 },
             receivedAt: date
         )
     }

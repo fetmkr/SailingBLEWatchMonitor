@@ -10,15 +10,29 @@
 - 저장소: `/Users/hojunsong/Desktop/Desktop - hojun’s mbp/SailingBLEWatchMonitor`
 - 브랜치: `main`
 - 헤딩 기능 기준 커밋: `b34279a feat: add calibrated fused heading and display damping`
-- 이 인수인계 커밋까지 포함하면 `origin/main`(`98f9b25`)보다 로컬이 **6커밋 앞**이다. 작업 트리는 깨끗하다.
 - GitHub 원격: `git@github.com:fetmkr/SailingBLEWatchMonitor.git`
-- 푸시는 자동 승인 검토가 막았다. 이유: 원격과 전송할 payload의 명시적 승인이 필요함. 우회하지 말 것.
-  다음 세션에서 사용자가 위 원격의 `main`에 로컬 커밋을 보내라고 명시하면 `git push origin main`을 다시 실행한다.
+- 현재 동기화 여부는 이 문장의 옛 해시를 믿지 말고 `git status -sb`와 `git log -1`로 확인한다.
 - 연결 포트는 마지막 확인 때 `/dev/cu.usbmodem1101`이었다.
 - 보드에는 `b34279a`와 **소스 내용이 같은** 펌웨어를 플래시했다. 커밋하기 전에 빌드했으므로 내장 버전 문자열은
   이전 Git describe/dirty 문자열일 수 있다. 기능 코드는 최신이다. NVS와 SD 파일은 지우지 않았다.
 - USB 시리얼을 열면 보드가 `USB_UART_CHIP_RESET`으로 다시 시작할 수 있다. 부팅 직후 3초의 HDG `?`를
   반복 관측하게 만들 수 있으므로 화면 시험 중에는 불필요하게 포트를 열지 않는다.
+
+### 워치 REC 표시·제어 (2026-09-16)
+
+- 첫 페이지 상단 점은 이제 연결 상태가 아니라 **실제 SD 기록 상태**다. `REC`는 큰 녹색 점,
+  비정상 중단은 깜박이는 빨간 점과 `REC 끊김`, 자동 재시작 뒤 과거 저장 오류가 남으면 `REC 오류`다.
+  보드 데이터가 3초 이상 끊겨 현재 상태를 확인할 수 없을 때도 `REC 확인 불가`와 빨간 점이 깜박인다.
+  Always On에서는 애니메이션 대신 빨간 점을 계속 켠다.
+- 세 번째 페이지에 현재 상태와 `REC 시작`/`REC 정지` 버튼을 추가했다. 새 명령을 만들지 않고 기존
+  BLE 제어 통로의 `rec on`/`rec off`를 그대로 쓴다.
+- 광고 Manufacturer Data 끝에 status 1바이트(bit0 기록 중, bit1 비정상 중단)를 덧붙였다.
+  연결이 끊겨 GATT 대신 광고만 받아도 1초 안에 REC 표시가 갱신된다. 새 앱은 옛 11바이트 광고도
+  읽고 그때 REC만 `모름`으로 둔다. Scan Response 31바이트 한도 때문에 사용자 이름 최대 길이는 10자다.
+- 호스트 회귀검사 153개, 광고 C++→Swift 192줄, IDF 전체 빌드, Arduino 펌웨어, iOS·watchOS 빌드가 통과했다.
+- Apple Watch Ultra 3에 새 앱을 설치하고 실행했다(16:42). 보드는 USB에 연결되어 있지 않아 새 IDF
+  펌웨어는 아직 플래시하지 못했다. **보드를 연결하면 `/Users/hojunsong/esp/build-sail` 결과를 플래시한 뒤**
+  REC 시작/정지와 광고 폴백을 실물로 확인한다. 그 전까지 연결 중 GATT 표시는 되지만 옛 광고에서는 `REC —`다.
 
 ### 현재 HDG 구현 — 식 5
 

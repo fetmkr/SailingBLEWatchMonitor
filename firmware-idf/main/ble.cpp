@@ -43,6 +43,7 @@ volatile bool sSubscribed    = false;   // notify 구독 여부(로그용)
 
 uint8_t   sSeq = 0;                     // manufacturer data 시퀀스
 Telemetry sLatest;
+sail::TelemetryExtra sLatestExtra;
 
 // 설정한 이름이 없을 때의 기본값. MAC 의 **뒤쪽** 바이트 (앞 3바이트는 Espressif OUI 라 모든 보드가 같다).
 void defaultUserName(char* out, size_t cap) {
@@ -77,10 +78,12 @@ NimBLEAdvertisementData buildAdvData() {
     return d;
 }
 
-// Scan Response: Manufacturer Data + Complete Local Name  (13 + 2+N 바이트)
-NimBLEAdvertisementData buildScanData(const Telemetry& tm, uint8_t seq) {
+// Scan Response: Manufacturer Data + Complete Local Name  (14 + 2+N 바이트)
+NimBLEAdvertisementData buildScanData(const Telemetry& tm, const sail::TelemetryExtra& extra,
+                                      uint8_t seq) {
     uint8_t mfg[2 + sail::kMfgLen];
-    sail::encodeManufacturerData(tm, seq, mfg);
+    sail::encodeManufacturerData(
+        tm, seq, mfg, sail::manufacturerStatus(extra.recording, extra.recFailed));
     NimBLEAdvertisementData d;
     d.setManufacturerData(mfg, sizeof(mfg));
     d.setName(sFullName, /*isComplete=*/true);
@@ -104,7 +107,7 @@ void applyAdvertising() {
     adv->setMaxInterval(sail::kAdvIntervalUnits);
 
     adv->setAdvertisementData(buildAdvData());
-    adv->setScanResponseData(buildScanData(sLatest, sSeq));
+    adv->setScanResponseData(buildScanData(sLatest, sLatestExtra, sSeq));
 
     if (!adv->start()) {
         printf("[BLE] !! advertising start 실패\n");
@@ -210,7 +213,7 @@ void loadIdentity() {
     nvs_handle_t h;
     if (nvs_open("sail", NVS_READONLY, &h) == ESP_OK) {
         // Preferences getString 은 한도 없는 String 이었다. 여기서는 64바이트 칸 — 넘으면 nvs_get_str 이 실패하고 기본 이름이 된다.
-        //   saveIdentity 는 걸러진 11자까지만 적으므로 정상 보드에서는 안 넘는다.
+        //   saveIdentity 는 걸러진 10자까지만 적으므로 정상 보드에서는 안 넘는다.
         size_t len = sizeof saved;
         if (nvs_get_str(h, "name", saved, &len) != ESP_OK) saved[0] = '\0';
         uint32_t ms = sail::kNotifyPeriodMs;
@@ -266,6 +269,7 @@ void start(const Telemetry& t, const sail::TelemetryExtra& e) {
     if (sBleUp) return;
     sLatest = t;
     sLatest.moduleID = sModuleID;
+    sLatestExtra = e;
 
     NimBLEDevice::init(sFullName);
     // firmware-rak 과 같은 인자. setPower 는 dBm 을 받는데 esp_power_level_t 값을 넘기고 있었다 — 뜻은 아래 보고 참고.
@@ -325,12 +329,13 @@ void pump() {
 void refreshAdvPayload() {
     if (!sBleUp) return;
     sSeq++;
-    NimBLEDevice::getAdvertising()->setScanResponseData(buildScanData(sLatest, sSeq));
+    NimBLEDevice::getAdvertising()->setScanResponseData(buildScanData(sLatest, sLatestExtra, sSeq));
 }
 
 void publish(const Telemetry& t, const sail::TelemetryExtra& e) {
     sLatest = t;
     sLatest.moduleID = sModuleID;
+    sLatestExtra = e;
     if (!sBleUp) return;
     // 12바이트 뒤에 9축과 GPS 상태를 덧붙인다. 옛 앱은 앞 12바이트만 읽는다 (PROTOCOL.md §7).
     uint8_t packet[sail::kTelemetryExtLen];

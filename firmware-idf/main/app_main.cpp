@@ -1123,7 +1123,8 @@ static void doScan() {
 // ── help (firmware-rak printHelp 4239-4306 글자 그대로) ─────────────────────
 static void printHelp() {
     printf("──────────────────────────────────────────\n");
-    printf("  name <이름>   보드 이름 설정 (최대 11자, 영숫자/-/_)\n");
+    printf("  name <이름>   보드 이름 설정 (최대 %u자, 영숫자/-/_)\n",
+           (unsigned)sail::kMaxUserNameLen);
     printf("                예) name hojun  →  SAIL-hojun\n");
     printf("  hz <1~100>    notify 주기 설정. 예) hz 20  (기본 10)\n");
     printf("  boat <0~32>   로라 배 번호. 0 은 번호 없음. 예) boat 7\n");

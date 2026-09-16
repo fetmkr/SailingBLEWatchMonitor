@@ -40,7 +40,7 @@ struct WatchLiveView: View {
     /// TabView 페이지 배경은 containerBackground(_:for: .tabView) 로만 바뀐다
     /// [확인: watchOS SDK SwiftUI.swiftinterface, watchOS 10.0].
     private var pageBackground: Color {
-        ble.sample?.extra?.recordingFailed == true ? Color.red.opacity(0.6) : Color.black
+        ble.sample?.recordingFailed == true ? Color.red.opacity(0.6) : Color.black
     }
 
     var body: some View {
@@ -194,61 +194,63 @@ private struct MainPage: View {
 
             statusLine
 
-            // 잠겨 있으면 푸는 법을 적어 둔다. 워치는 물방울 아이콘만 그려 주고
-            // 화면을 눌러도 아무 안내가 안 뜬다. 눌러도 안 먹는 이유를 여기서 말해 준다.
-            if session.waterLocked {
-                HStack(spacing: 3) {
-                    Image(systemName: "drop.fill")
-                    Text("크라운 길게 눌러 풀기")
-                }
-                .font(.system(size: isDim ? 11 : 10, weight: .medium))
-                .foregroundStyle(.tint)
-                .padding(.vertical, 1)
-            }
-
-            if !ble.hasPinnedModule {
-                Spacer()
-                VStack(spacing: 6) {
-                    Image(systemName: "sailboat")
-                        .font(.title)
-                        .foregroundStyle(.orange)
-                    Text("모듈을 고르세요")
-                        .font(.headline)
-                    Text("옆으로 스와이프")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            } else {
-                Spacer(minLength: 0)
-
-                // 속도 — 화면에서 제일 큰 것.
-                // 지어낸 값이면 숫자를 빨갛게 칠한다. 단위와 라벨은 그대로 둔다.
-                Text(ble.sample?.sogText ?? "—.—")
-                    .font(.system(size: isDim ? 84 : 68, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .minimumScaleFactor(0.4)
-                    .lineLimit(1)
-                    .foregroundStyle(Color.primary)
-                Text("kn")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Spacer(minLength: 0)
-
-                // Always On 에서는 속도만 남긴다.
-                if !isDim {
-                    // 이 자리는 항상 HDG 다. 값이 없으면 대시를 보여주지,
-                    // 다른 값으로 바꿔 채우지 않는다. COG 는 2페이지에 있다.
-                    HStack(spacing: 0) {
-                        bigPair(ble.sample?.headingText ?? "—", "HDG")
-                        bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL")
+            Group {
+                // 잠겨 있으면 푸는 법을 적어 둔다. 워치는 물방울 아이콘만 그려 주고
+                // 화면을 눌러도 아무 안내가 안 뜬다. 눌러도 안 먹는 이유를 여기서 말해 준다.
+                if session.waterLocked {
+                    HStack(spacing: 3) {
+                        Image(systemName: "drop.fill")
+                        Text("크라운 길게 눌러 풀기")
                     }
+                    .font(.system(size: isDim ? 11 : 10, weight: .medium))
+                    .foregroundStyle(.tint)
+                    .padding(.vertical, 1)
+                }
+
+                if !ble.hasPinnedModule {
+                    Spacer()
+                    VStack(spacing: 6) {
+                        Image(systemName: "sailboat")
+                            .font(.title)
+                            .foregroundStyle(.orange)
+                        Text("모듈을 고르세요")
+                            .font(.headline)
+                        Text("옆으로 스와이프")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                } else {
                     Spacer(minLength: 0)
+
+                    // 속도 — 화면에서 제일 큰 것.
+                    // 지어낸 값이면 숫자를 빨갛게 칠한다. 단위와 라벨은 그대로 둔다.
+                    Text(ble.sample?.sogText ?? "—.—")
+                        .font(.system(size: isDim ? 84 : 68, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .minimumScaleFactor(0.4)
+                        .lineLimit(1)
+                        .foregroundStyle(Color.primary)
+                    Text("kn")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 0)
+
+                    // Always On 에서는 속도만 남긴다.
+                    if !isDim {
+                        // 이 자리는 항상 HDG 다. 값이 없으면 대시를 보여주지,
+                        // 다른 값으로 바꿔 채우지 않는다. COG 는 2페이지에 있다.
+                        HStack(spacing: 0) {
+                            bigPair(ble.sample?.headingText ?? "—", "HDG")
+                            bigPair(ble.sample.map { $0.heelText } ?? "—", "HEEL")
+                        }
+                        Spacer(minLength: 0)
+                    }
                 }
             }
+            .opacity(stale ? 0.45 : 1)
         }
-        .opacity(stale ? 0.45 : 1)
         .padding(.horizontal, 2)
         .onChange(of: isDim) { _, nowDim in
             if nowDim { dimCount += 1 }
@@ -273,13 +275,21 @@ private struct MainPage: View {
         .frame(maxWidth: .infinity)
     }
 
-    // 상단 한 줄 — 점 + 모듈 이름
+    // 상단 한 줄 — REC 상태를 먼저, 연결 경로는 오른쪽에 작게 둔다.
+    // 녹색 점은 "연결됨"이 아니라 실제 SD 기록 중이라는 뜻이다.
     private var statusLine: some View {
-        HStack(spacing: 4) {
-            Circle().fill(statusColor).frame(width: 6, height: 6)
+        HStack(spacing: 5) {
+            RecordingDot(recording: confirmedRecording,
+                         failed: recordingNeedsAttention,
+                         isDim: isDim)
+            Text(recordingLabel)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(recordingColor)
+                .lineLimit(1)
+            Spacer(minLength: 3)
             if !isDim {
-                Text(statusLabel)
-                    .font(.system(size: 12))
+                Text(connectionLabel)
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
@@ -287,15 +297,31 @@ private struct MainPage: View {
         }
     }
 
-    private var statusColor: Color {
-        switch ble.source {
-        case .connection:  return .green
-        case .advertising: return .orange
-        case .none:        return ble.state == .idle ? .gray : .blue
-        }
+    private var confirmedRecording: Bool? {
+        ble.isLive ? ble.sample?.recording : nil
     }
 
-    private var statusLabel: String {
+    private var recordingNeedsAttention: Bool {
+        ble.sample?.recordingFailed == true || (ble.hasPinnedModule && !ble.isLive)
+    }
+
+    private var recordingLabel: String {
+        if ble.hasPinnedModule && !ble.isLive { return "REC 확인 불가" }
+        if ble.sample?.recordingFailed == true {
+            return ble.sample?.recording == true ? "REC 오류" : "REC 끊김"
+        }
+        if ble.sample?.recording == true { return "REC" }
+        if ble.sample?.recording == false { return "REC 꺼짐" }
+        return "REC —"
+    }
+
+    private var recordingColor: Color {
+        if recordingNeedsAttention { return .red }
+        if ble.sample?.recording == true { return .green }
+        return .secondary
+    }
+
+    private var connectionLabel: String {
         switch ble.source {
         case .connection:
             return ble.pinnedModule?.displayName ?? "연결"
@@ -308,7 +334,33 @@ private struct MainPage: View {
     }
 }
 
-// MARK: - 2페이지 · 설정
+/// REC 실패는 밝은 화면에서 0.5초마다 깜박인다.
+/// Always On에서는 애니메이션이 보장되지 않으므로 빨간 점을 계속 켜 둔다.
+private struct RecordingDot: View {
+    let recording: Bool?
+    let failed: Bool
+    let isDim: Bool
+
+    var body: some View {
+        if failed && !isDim {
+            TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
+                let on = Int(timeline.date.timeIntervalSinceReferenceDate * 2) % 2 == 0
+                dot(color: .red, opacity: on ? 1.0 : 0.15)
+            }
+        } else {
+            dot(color: failed ? .red : (recording == true ? .green : .gray), opacity: 1.0)
+        }
+    }
+
+    private func dot(color: Color, opacity: Double) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: 12, height: 12)
+            .opacity(opacity)
+    }
+}
+
+// MARK: - 3페이지 · 설정
 
 private struct SettingsPage: View {
     @Binding var page: Int
@@ -373,6 +425,8 @@ private struct SettingsPage: View {
                 }
 
                 Divider()
+                recSection
+                Divider()
                 magcalSection
                 Divider()
                 sessionSection
@@ -382,6 +436,58 @@ private struct SettingsPage: View {
             .padding(.horizontal, 4)
         }
         .onAppear { ble.refreshDiscovery() }
+    }
+
+    // ── 보드 SD 기록 ────────────────────────────────────────────────────
+    // 화면의 상태와 같은 값을 보고 rec on/off만 보낸다. 연결되지 않았을 때도
+    // 버튼은 눌리며 BLEManager가 이유를 글자로 남긴다.
+    private var recSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                RecordingDot(recording: ble.isLive ? ble.sample?.recording : nil,
+                             failed: ble.sample?.recordingFailed == true ||
+                                     (ble.hasPinnedModule && !ble.isLive),
+                             isDim: false)
+                Text(recStatusText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(recStatusColor)
+                Spacer()
+            }
+
+            Button {
+                ble.sendControl(ble.sample?.recording == true ? "rec off" : "rec on")
+            } label: {
+                Text(ble.sample?.recording == true ? "REC 정지" : "REC 시작")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(ble.sample?.recording == true ? .red : .green)
+
+            if !ble.controlReady {
+                Text("보드에 연결되면 시작·정지할 수 있습니다")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private var recStatusText: String {
+        if ble.hasPinnedModule && !ble.isLive { return "보드의 REC 상태를 확인할 수 없습니다" }
+        if ble.sample?.recordingFailed == true {
+            return ble.sample?.recording == true
+                ? "SD 기록 중 · 이전 저장 오류 있음"
+                : "REC가 저절로 끊겼습니다"
+        }
+        if ble.sample?.recording == true { return "SD 기록 중" }
+        if ble.sample?.recording == false { return "SD 기록 꺼짐" }
+        return "REC 상태를 아직 못 받음"
+    }
+
+    private var recStatusColor: Color {
+        if ble.sample?.recordingFailed == true || (ble.hasPinnedModule && !ble.isLive) { return .red }
+        if ble.sample?.recording == true { return .green }
+        return .secondary
     }
 
     // ── 자력계 치우침 보정 (REQUIREMENTS B4·D3)
