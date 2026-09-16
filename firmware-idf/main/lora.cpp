@@ -245,6 +245,11 @@ volatile bool gLiveEnabled = false; // 장거리 송수신은 `lora live on` 뒤
 volatile uint32_t gTxOk = 0, gTxFailed = 0, gTxLate = 0;
 uint32_t gAirTimeUs = 0; // 설정 직후, 무전기를 재우기 전에 한 번 계산한다.
 
+// pump()와 BLE 전달은 모두 메인 루프에서 돈다. 잠금이 필요 없는 짧은 큐다.
+// 원본 수신 링과 같은 64개라 한 번의 pump에서 꺼낸 것을 그대로 모두 넘긴다.
+FleetUpdate gFleetRing[kRingLen];
+size_t gFleetHead = 0, gFleetTail = 0;
+
 struct PeerSlot {
     bool seen = false;
     Decoded packet;
@@ -329,6 +334,9 @@ void rxWorker(void*) {
 
         memcpy(gRing[gHead].data, buf, kPayloadLen);
         gRing[gHead].atMs = at;
+        portENTER_CRITICAL(&gPpsMux);
+        gRing[gHead].frame = gPpsEver ? gPpsCount : 0;
+        portEXIT_CRITICAL(&gPpsMux);
         gRing[gHead].rssi = (int16_t)gRadio.getRSSI();
         gRing[gHead].snr  = (int8_t)gRadio.getSNR();
         gHead = next;
@@ -665,6 +673,15 @@ void pump() {
         gPeers[i].snr = r.snr;
         portEXIT_CRITICAL(&gPeerMux);
 
+        const size_t next = (gFleetHead + 1) % kRingLen;
+        if (next != gFleetTail) {
+            memcpy(gFleetRing[gFleetHead].data, r.data, kPayloadLen);
+            gFleetRing[gFleetHead].frame = r.frame;
+            gFleetRing[gFleetHead].rssi = r.rssi;
+            gFleetRing[gFleetHead].snr = r.snr;
+            gFleetHead = next;
+        }
+
         if (!gWatch) continue;
         printf("[LORA] B%02u RSSI %d SNR %d  SOG ", d.boat, r.rssi, r.snr);
         if (d.sog == kSogInvalid) printf("---"); else printf("%.2f", d.sog / 100.0f);
@@ -673,6 +690,13 @@ void pump() {
         printf("  fix %u rec %u tie %04X\n", !!(d.flags & kFlagGpsFix),
                !!(d.flags & kFlagRecording), d.tie);
     }
+}
+
+bool takeFleetUpdate(FleetUpdate& out) {
+    if (gFleetTail == gFleetHead) return false;
+    out = gFleetRing[gFleetTail];
+    gFleetTail = (gFleetTail + 1) % kRingLen;
+    return true;
 }
 
 void updateLive(const Live& live) {

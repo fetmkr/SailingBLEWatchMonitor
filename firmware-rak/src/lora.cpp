@@ -124,6 +124,7 @@ void rxWorker(void*) {
 
         memcpy(gRing[gHead].data, buf, kPayloadLen);
         gRing[gHead].atMs = at;
+        gRing[gHead].frame = 0; // Arduino 옛 경로에는 PPS 프레임 송신이 없다
         gRing[gHead].rssi = (int16_t)gRadio.getRSSI();
         gRing[gHead].snr  = (int8_t)gRadio.getSNR();
         gHead = next;
@@ -309,6 +310,12 @@ void pump() {
         for (size_t i = 0; i < kPayloadLen; ++i) Serial.printf(" %02X", r.data[i]);
         Serial.println();
     }
+}
+
+// 함대 앱으로 넘기는 BLE 특성은 IDF 판에만 있다. 공용 머리글의 API를 완성해
+// Arduino 판에서 실수로 불러도 링크 오류 대신 "받을 것 없음"으로 끝낸다.
+bool takeFleetUpdate(FleetUpdate&) {
+    return false;
 }
 
 // `lora regs` — 데이터시트 15장의 칩 버그 세 개가 실제로 걸렸는지 되읽는다.

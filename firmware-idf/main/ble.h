@@ -1,4 +1,4 @@
-// firmware-idf 3단계 — BLE (광고 · 텔레메트리 39바이트 · 설정 통로 · 이름)
+// firmware-idf 3단계 — BLE (광고 · 텔레메트리 43바이트 · 설정 통로 · 이름)
 //
 // firmware-rak src/main.cpp 의 BLE 부분을 **뜻·글자·바이트 그대로** 옮겼다. 라이브러리는 NimBLE-Arduino 2.5.1 대신
 // h2zero/esp-nimble-cpp 2.5.0 (main/idf_component.yml). 쓰는 함수의 모양은 두 판이 같다
@@ -62,6 +62,8 @@ bool up();
 void pump();                                // 연결·끊김·이름 바뀜 뒤 광고 다시 걸기
 void refreshAdvPayload();                   // 1 Hz. 광고를 안 멈추고 scan response 만 바꾼다
 void publish(const sail::Telemetry& t, const sail::TelemetryExtra& e);   // notify 주기마다
+/// LoRa에서 받은 22바이트를 수신 프레임·신호 세기와 함께 함대 앱에 알린다.
+void publishFleet(const uint8_t payload[22], uint32_t frame, int16_t rssi, int8_t snr);
 const sail::Telemetry& latest();
 
 bool    connected();

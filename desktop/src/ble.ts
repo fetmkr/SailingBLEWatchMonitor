@@ -16,11 +16,11 @@
 // 부품    @mnlphlp/plugin-blec (btleplug 을 Tauri 에 맞춰 싼 것)
 
 import {
-  startScan, stopScan, connect, disconnect, subscribeString, sendString,
+  startScan, stopScan, connect, disconnect, subscribe, subscribeString, sendString,
   getAdapterState, checkPermissions,
   type BleDevice,
 } from "@mnlphlp/plugin-blec";
-import { SERVICE_UUID, CONTROL_UUID, NAME_PREFIX } from "./protocol";
+import { SERVICE_UUID, CONTROL_UUID, FLEET_UUID, NAME_PREFIX } from "./protocol";
 
 /** 주변에서 찾은 보드 하나. */
 export interface Board {
@@ -106,6 +106,11 @@ export class Link {
   async close() {
     if (this.gone) return;
     try { await disconnect(); } catch { /* 이미 끊겼으면 그만이다 */ }
+  }
+
+  /** 수신 보드가 LoRa로 들은 배를 받을 때마다 30바이트 그대로 알린다. */
+  async onFleet(handler: (data: number[]) => void) {
+    await subscribe(FLEET_UUID, SERVICE_UUID, handler);
   }
 
   /** 한 줄 보낸다. 답은 안 기다린다. */

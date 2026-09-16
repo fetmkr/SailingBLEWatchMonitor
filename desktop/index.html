@@ -54,22 +54,27 @@
       생명이다.
     -->
     <header id="topbar">
+      <div class="seg mode-seg" id="modeSeg" aria-label="앱 모드">
+        <button data-mode="review" class="on">항해 리뷰</button>
+        <button data-mode="fleet">함대 라이브</button>
+      </div>
+      <span class="sep review-only"></span>
       <!--
         매번 하는 일만 둔다. 가끔 만지는 것은 설정 서랍(⚙)으로 보냈다 —
         시험용 데이터, 가운데 배치, 디버그 값.
         "전체 보기" 는 데이터 칸 제 손잡이로, "넓게" 는 아이콘을 한 번 더
         누르면 되니 없앴다.
       -->
-      <button id="open">데이터 열기</button>
-      <button id="openVideo">영상 열기</button>
-      <span class="sep"></span>
-      <button id="addMark" title="파란 고정선 자리에 깃발을 답니다">＋ 마킹</button>
-      <span id="range" class="dim mono"></span>
+      <button id="open" class="review-only">데이터 열기</button>
+      <button id="openVideo" class="review-only">영상 열기</button>
+      <span class="sep review-only"></span>
+      <button id="addMark" class="review-only" title="파란 고정선 자리에 깃발을 답니다">＋ 마킹</button>
+      <span id="range" class="dim mono review-only"></span>
       <span style="flex: 1"></span>
-      <span id="fileTag" class="dim"></span>
+      <span id="fileTag" class="dim review-only"></span>
     </header>
 
-    <main id="shell">
+    <main id="shell" class="review-only">
       <section id="center">
         <div id="mediaRow">
           <div id="videoPane">
@@ -198,6 +203,39 @@
       </nav>
     </main>
 
+    <main id="fleetShell" aria-label="함대 라이브">
+      <aside id="fleetListPane">
+        <div class="fleet-pane-head">
+          <div><b>함대</b><span id="fleetCount">0척 수신</span></div>
+          <button id="fleetScan">수신 보드 찾기</button>
+        </div>
+        <div class="fleet-link-row">
+          <span><i></i><b id="fleetLinkName">수신 보드 연결 안 됨</b></span>
+          <button id="fleetDisconnect" class="ghost" hidden>연결 끊기</button>
+        </div>
+        <div id="fleetReceivers"></div>
+        <div id="fleetBoats"></div>
+        <div id="fleetState" class="dim">수신 보드를 연결하세요.</div>
+      </aside>
+
+      <section id="fleetMapPane">
+        <div id="fleetMap"></div>
+        <div class="fleet-map-bar">
+          <select id="fleetBase" title="바탕 지도"></select>
+          <label class="chk"><input id="fleetSeamark" type="checkbox" /> 해도</label>
+          <button id="fleetFit">함대 맞춤</button>
+          <span class="dim">오프라인 지도는 항해 리뷰에서 받아 둔 영역을 함께 씁니다.</span>
+        </div>
+      </section>
+
+      <aside id="fleetDetailPane">
+        <div class="fleet-pane-head">
+          <div><b>상세 · 비교</b><span>최대 2척</span></div>
+        </div>
+        <div id="fleetDetailBody"></div>
+      </aside>
+    </main>
+
     <!--
       시간 막대.
 
@@ -249,7 +287,7 @@
     <input id="pickData"  type="file" accept=".HLG,.hlg" hidden />
     <input id="pickTxt"   type="file" accept=".TXT,.txt" hidden />
 
-    <div id="transport">
+    <div id="transport" class="review-only">
       <button id="play" title="재생 · 멈춤">▶</button>
       <span id="ttime" class="mono dim">0:00 / 0:00</span>
       <input id="tslider" type="range" min="0" max="1000" value="0" step="1"
@@ -273,7 +311,7 @@
       <span id="voff" class="mono dim"></span>
     </div>
 
-    <footer id="statusbar">
+    <footer id="statusbar" class="review-only">
       <span id="readout" class="mono"></span>
       <span style="flex: 1"></span>
       <span id="prog"><span id="progBar"></span><span id="progText"></span></span>

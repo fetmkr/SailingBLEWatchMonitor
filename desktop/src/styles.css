@@ -223,7 +223,10 @@ body {
   padding-right: calc(12px + env(safe-area-inset-right));
 }
 .sep { width: 1px; height: 18px; background: var(--line); }
-.sep { width: 1px; height: 18px; background: var(--line); }
+.mode-seg { flex: none; width: 238px; }
+.mode-seg button { font-weight: 650; letter-spacing: -.01em; }
+body[data-mode="fleet"] #topbar { border-bottom-color: var(--accent); }
+body[data-mode="fleet"] .review-only { display: none !important; }
 button {
   background: var(--btn); color: var(--ink); border: 1px solid var(--line);
   border-radius: var(--r-sm); padding: 0 var(--sp3); font: inherit; cursor: pointer;
@@ -315,6 +318,12 @@ input[type="checkbox"], input[type="radio"] {
 
 /* ── 뼈대 ────────────────────────────────────────────────────────── */
 #shell { flex: 1; display: flex; min-height: 0; min-width: 0; }
+#fleetShell { display: none; }
+body[data-mode="fleet"] #fleetShell {
+  flex: 1; min-height: 0; min-width: 0;
+  display: grid; grid-template-columns: minmax(220px, 260px) minmax(320px, 1fr) minmax(300px, 360px);
+  background: var(--bg);
+}
 
 .file {
   padding: 8px; border-radius: 6px; cursor: pointer;
@@ -862,6 +871,139 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
   border-radius: 0 0 6px 6px; background: var(--bg);
 }
 .detail #meta { font-size: var(--fs-xs); margin-bottom: 8px; }
+
+/* 긴 검사 설명과 열 개 입력칸을 기본 화면에 모두 펼쳐 두지 않는다. */
+.sessionFold { border-top: 1px solid var(--line); margin-top: var(--sp2); padding-top: var(--sp2); }
+.sessionFold summary {
+  min-height: var(--tap); display: flex; align-items: center; gap: var(--sp2);
+  cursor: pointer; color: var(--ink); font-weight: 600; list-style: none;
+}
+.sessionFold summary::-webkit-details-marker { display: none; }
+.sessionFold summary::before { content: "›"; color: var(--dim); font-size: 1.35em; transform: rotate(0); transition: transform .12s; }
+.sessionFold[open] summary::before { transform: rotate(90deg); }
+.sessionFoldBody { padding: var(--sp2) 0 2px; }
+
+/* ── 함대 라이브 ───────────────────────────────────────────────────── */
+#fleetListPane, #fleetDetailPane {
+  min-width: 0; min-height: 0; overflow: auto; background: var(--panel);
+  padding: var(--sp4);
+}
+#fleetListPane { border-right: 1px solid var(--line); }
+#fleetDetailPane { border-left: 1px solid var(--line); }
+.fleet-pane-head {
+  min-height: 48px; display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp2); border-bottom: 1px solid var(--line); padding-bottom: var(--sp3); margin-bottom: var(--sp3);
+}
+.fleet-pane-head > div { display: flex; flex-direction: column; }
+.fleet-pane-head b { font-size: var(--fs-lg); }
+.fleet-pane-head span { color: var(--dim); font-size: var(--fs-sm); }
+.fleet-link-row {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp2);
+  padding: var(--sp2) 0 var(--sp3); font-size: var(--fs-sm);
+}
+.fleet-link-row > span { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.fleet-link-row i { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); flex: none; }
+.fleet-link-row.connected i { background: #22c55e; box-shadow: 0 0 0 3px #22c55e24; }
+.fleet-link-row b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#fleetReceivers { display: flex; flex-direction: column; gap: 5px; margin-bottom: var(--sp3); }
+#fleetReceivers button {
+  display: flex; justify-content: space-between; align-items: center; text-align: left;
+  border-color: var(--accent); min-height: var(--tap);
+}
+#fleetReceivers small { color: var(--dim); }
+#fleetBoats { display: flex; flex-direction: column; gap: 5px; }
+.fleet-boat {
+  width: 100%; min-height: 58px; display: grid; grid-template-columns: 34px 1fr auto;
+  align-items: center; gap: var(--sp2); text-align: left; padding: 7px 8px;
+  background: transparent; border-color: transparent;
+}
+.fleet-boat:hover { background: var(--hover); border-color: var(--line); }
+.fleet-boat.pick-a { background: color-mix(in srgb, #3b82f6 18%, var(--panel)); border-color: #3b82f6; }
+.fleet-boat.pick-b { background: color-mix(in srgb, #f97316 18%, var(--panel)); border-color: #f97316; }
+.fleet-id {
+  width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
+  color: #fff; background: #53606f; font-weight: 750;
+}
+.pick-a .fleet-id { background: #2563eb; }
+.pick-b .fleet-id { background: #ea580c; }
+.fleet-main { display: flex; flex-direction: column; min-width: 0; }
+.fleet-main small { color: var(--dim); white-space: nowrap; }
+.fleet-health { display: flex; flex-direction: column; align-items: flex-end; color: var(--dim); font-size: var(--fs-xs); }
+.fleet-health i { width: 8px; height: 8px; border-radius: 50%; margin-bottom: 3px; }
+.fleet-health.live i { background: #22c55e; }
+.fleet-health.late i { background: #f59e0b; }
+.fleet-health.lost i { background: #ef4444; }
+#fleetState { position: sticky; bottom: 0; margin: var(--sp3) calc(-1 * var(--sp4)) calc(-1 * var(--sp4)); padding: var(--sp3) var(--sp4); background: var(--panel); border-top: 1px solid var(--line); }
+#fleetMapPane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+#fleetMap { flex: 1; min-height: 0; background: var(--tl-plot); }
+.fleet-map-bar {
+  display: flex; align-items: center; gap: var(--sp2); flex-wrap: wrap;
+  padding: var(--sp2) var(--sp3); border-top: 1px solid var(--line); background: var(--panel);
+}
+.fleet-map-bar select { width: 140px; }
+.fleet-map-bar > .dim { margin-left: auto; font-size: var(--fs-xs); }
+.fleet-empty { min-height: 150px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; gap: var(--sp2); color: var(--dim); padding: var(--sp5); }
+.fleet-empty.large { min-height: 280px; }
+.fleet-empty b { color: var(--ink); font-size: var(--fs-lg); }
+.fleet-card, .fleet-compare { border: 1px solid var(--line); border-radius: var(--r); padding: var(--sp3); margin-bottom: var(--sp3); background: var(--bg); }
+.fleet-card.pick-a { border-top: 4px solid #3b82f6; }
+.fleet-card.pick-b { border-top: 4px solid #f97316; }
+.fleet-card-head { display: grid; grid-template-columns: 34px 1fr; align-items: center; gap: 0 var(--sp2); margin-bottom: var(--sp3); }
+.fleet-card-head > span { grid-row: 1 / 3; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: white; background: #53606f; font-weight: 800; }
+.fleet-card.pick-a .fleet-card-head > span { background: #2563eb; }
+.fleet-card.pick-b .fleet-card-head > span { background: #ea580c; }
+.fleet-card-head small { color: var(--dim); }
+.fleet-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.fleet-metric { min-width: 0; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 7px 8px; background: var(--panel); }
+.fleet-metric > span { display: block; color: var(--dim); font-size: var(--fs-xs); }
+.fleet-metric > b { display: block; font: 650 var(--fs-lg) ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+.fleet-metric > small { display: block; color: var(--dim); }
+.fleet-compare-head { display: flex; justify-content: space-between; margin-bottom: var(--sp3); }
+.fleet-warn { color: #f59e0b; margin-top: var(--sp3); font-size: var(--fs-sm); }
+
+/* MapLibre HTML marker. 숫자는 배 번호, 화살표는 COG(T)다. */
+.fleet-marker {
+  width: 42px; height: 42px; padding: 0; border-radius: 50%; border: 3px solid #f8fafc;
+  background: #53606f; color: #fff; box-shadow: 0 2px 8px #0008; font-weight: 800;
+  display: grid; place-items: center; position: relative;
+}
+.fleet-marker::after { display: none; }
+.fleet-marker.pick-a { background: #2563eb; transform: scale(1.12); }
+.fleet-marker.pick-b { background: #ea580c; transform: scale(1.12); }
+.fleet-marker.stale { opacity: .45; }
+.fleet-arrow { position: absolute; left: 14px; top: -20px; width: 12px; transform-origin: 6px 27px; color: #111827; text-shadow: 0 0 2px white, 0 0 3px white; }
+
+@media (max-width: 1020px) {
+  body[data-mode="fleet"] #fleetShell { grid-template-columns: 210px minmax(300px, 1fr) 300px; }
+  .fleet-map-bar > .dim { display: none; }
+  .mode-seg { width: 218px; }
+}
+
+@media (max-width: 900px) {
+  /* 작은 아이패드 창에서는 보조 설명이 조작 단추를 밀지 않게 한다. 현재
+     파일과 구간은 세션 서랍과 시간 막대에서 그대로 확인할 수 있다. */
+  #topbar #range, #topbar #fileTag { display: none; }
+  .mode-seg { width: 210px; }
+
+  /* 리뷰의 오른쪽 서랍은 가운데를 100px대로 짓누르지 않고 필요할 때 위에 뜬다. */
+  #shell { position: relative; }
+  #center { flex: 1 1 auto !important; }
+  #dock:not(.shut) {
+    position: absolute; z-index: 20; top: 0; right: 56px; bottom: 0;
+    width: min(380px, calc(100% - 76px)) !important; flex: none !important;
+    box-shadow: -12px 0 28px #0008;
+  }
+
+  /* 세 칸을 억지로 나란히 두지 않는다. 목록은 왼쪽, 지도와 비교는 오른쪽 위아래다. */
+  body[data-mode="fleet"] #fleetShell {
+    grid-template-columns: clamp(205px, 30vw, 260px) minmax(280px, 1fr);
+    grid-template-rows: minmax(300px, 1fr) minmax(220px, 38%);
+  }
+  #fleetListPane { grid-column: 1; grid-row: 1 / 3; }
+  #fleetMapPane { grid-column: 2; grid-row: 1; }
+  #fleetDetailPane { grid-column: 2; grid-row: 2; border-left: none; border-top: 1px solid var(--line); }
+  .fleet-empty.large { min-height: 150px; }
+}
 
 /* 켜져 있는 위 띠 단추 (센서 원본) */
 #topbar button.on { background: var(--on-bg); color: var(--on-ink); border-color: var(--accent); }

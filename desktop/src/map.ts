@@ -26,7 +26,7 @@
 // MapLibre 6 은 기본 내보내기가 없다. 이름으로 가져온다.
 // [확인: node_modules/maplibre-gl/dist/maplibre-gl.d.ts 의 export { … } 목록]
 import {
-  Map as MlMap, NavigationControl, ScaleControl, setWorkerUrl, addProtocol,
+  Map as MlMap, Marker, NavigationControl, ScaleControl, setWorkerUrl, addProtocol,
   type LngLatBoundsLike,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -96,6 +96,16 @@ export interface TrackPoint {
   lat: number;
   lon: number;
   sogKn: number | null;
+}
+
+/** 함대 라이브에서 그릴 배 한 척. select는 A/B 또는 미선택이다. */
+export interface FleetPoint {
+  boat: number;
+  lat: number;
+  lon: number;
+  cogDeg: number | null;
+  select: "a" | "b" | null;
+  stale: boolean;
 }
 
 interface Base {
@@ -172,10 +182,13 @@ export class TrackMap {
   private dark = true;
   private ready = false;
   private pending: (() => void)[] = [];
+  private fleet: FleetPoint[] = [];
+  private fleetMarkers = new Map<number, Marker>();
 
   /** 지도 위에서 어느 시각을 가리키고 있나. 타임라인이 따라오게 하려고 알린다. */
   onHover: ((ms: number | null) => void) | null = null;
   onPick: ((ms: number) => void) | null = null;
+  onFleetPick: ((boat: number) => void) | null = null;
 
   constructor(private el: HTMLElement) {}
 
@@ -227,6 +240,7 @@ export class TrackMap {
       const ms = e.features?.[0]?.properties?.ms;
       if (typeof ms === "number") this.onPick?.(ms);
     });
+    this.paintFleet();
   }
 
   private style(): any {
@@ -447,6 +461,55 @@ export class TrackMap {
             { type: "Feature", geometry: { type: "Point", coordinates: [p.lon, p.lat] },
               properties: {} }] }
         : EMPTY_LINE);
+  }
+
+  /** 함대의 최신 위치를 번호·진행 방향과 함께 그린다. */
+  setFleet(points: FleetPoint[]) {
+    this.fleet = points;
+    this.paintFleet();
+  }
+
+  private paintFleet() {
+    if (!this.map) return;
+    const alive = new Set(this.fleet.map((p) => p.boat));
+    for (const [boat, marker] of this.fleetMarkers) {
+      if (!alive.has(boat)) { marker.remove(); this.fleetMarkers.delete(boat); }
+    }
+    for (const p of this.fleet) {
+      let marker = this.fleetMarkers.get(p.boat);
+      if (!marker) {
+        const el = document.createElement("button");
+        el.type = "button";
+        el.className = "fleet-marker";
+        el.innerHTML = `<span class="fleet-arrow">▲</span><b>${p.boat}</b>`;
+        el.title = `${p.boat}번 배 선택`;
+        el.onclick = () => this.onFleetPick?.(p.boat);
+        marker = new Marker({ element: el, anchor: "center" }).setLngLat([p.lon, p.lat]).addTo(this.map);
+        this.fleetMarkers.set(p.boat, marker);
+      }
+      marker.setLngLat([p.lon, p.lat]);
+      const el = marker.getElement();
+      el.className = `fleet-marker${p.select ? ` pick-${p.select}` : ""}${p.stale ? " stale" : ""}`;
+      const arrow = el.querySelector<HTMLElement>(".fleet-arrow");
+      if (arrow) {
+        arrow.hidden = p.cogDeg === null;
+        arrow.style.transform = `rotate(${p.cogDeg ?? 0}deg)`;
+      }
+    }
+  }
+
+  fitFleet() {
+    if (!this.map) return;
+    const pts = this.fleet.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+    if (!pts.length) return;
+    let w = pts[0].lon, e = pts[0].lon, s = pts[0].lat, n = pts[0].lat;
+    for (const p of pts) { w = Math.min(w, p.lon); e = Math.max(e, p.lon); s = Math.min(s, p.lat); n = Math.max(n, p.lat); }
+    const midLat = (s + n) / 2;
+    const minLat = 500 / 111320;
+    const minLon = 500 / (111320 * Math.cos(midLat * Math.PI / 180));
+    if (n - s < minLat) { const d = (minLat - n + s) / 2; s -= d; n += d; }
+    if (e - w < minLon) { const d = (minLon - e + w) / 2; w -= d; e += d; }
+    this.map.fitBounds([[w, s], [e, n]], { padding: 60, duration: 400 });
   }
 
   /** 그 시각에 배가 있던 자리. 사이 값은 두 점 사이를 갈라 쓴다. */

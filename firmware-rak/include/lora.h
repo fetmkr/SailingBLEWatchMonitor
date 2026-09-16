@@ -32,8 +32,17 @@ namespace lora {
 struct Rx {
     uint8_t  data[kPayloadLen];
     uint32_t atMs;    ///< 받은 시각 (millis). 어느 차례였는지 여기서 나온다
+    uint32_t frame;   ///< 받을 때의 GPS PPS 프레임 번호. PPS 전이면 0
     int16_t  rssi;    ///< dBm
     int8_t   snr;     ///< dB
+};
+
+/// 앱으로 넘길, 형식 검사를 통과한 함대 패킷 하나.
+struct FleetUpdate {
+    uint8_t  data[kPayloadLen];
+    uint32_t frame;
+    int16_t  rssi;
+    int8_t   snr;
 };
 
 /// SX1262 에 설정을 써 넣고, 코어 0 에 받기 일꾼을 띄운다.
@@ -84,6 +93,10 @@ void watchToggle();
 
 /// loop 에서 부른다. 링버퍼를 비우고, watch 가 켜져 있으면 뱉는다.
 void pump();
+
+/// pump()가 이번 루프에 받은 패킷을 꺼낸다. IDF 앱만 사용한다.
+/// LoRa 일꾼과 BLE를 직접 잇지 않고 메인 루프 한 곳에서 전달한다.
+bool takeFleetUpdate(FleetUpdate& out);
 
 /// 메인 루프가 최신 항해값을 넘긴다. 송신 일꾼은 PPS에 맞춘 자기 차례에서
 /// 이 사본을 22바이트로 만들어 보낸다. boat=0이면 듣기만 한다.

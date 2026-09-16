@@ -35,6 +35,7 @@ uint32_t sNotifyPeriodMs = sail::kNotifyPeriodMs;
 NimBLEServer*         sServer     = nullptr;
 NimBLECharacteristic* sTelemetryChr = nullptr;
 NimBLECharacteristic* sControlChr = nullptr;
+NimBLECharacteristic* sFleetChr = nullptr;
 
 volatile bool sConnected     = false;   // 중앙장치 연결 여부
 volatile bool sAdvNeedsApply = true;    // 광고 모드 재적용 필요
@@ -293,6 +294,10 @@ void start(const Telemetry& t, const sail::TelemetryExtra& e) {
     sControlChr->setCallbacks(&controlCb);
     sControlChr->setValue("ready");
 
+    // 수신 전용 보드가 LoRa로 들은 배를 아이패드·맥에 그대로 넘긴다.
+    // 앱이 이 특성을 구독하지 않으면 아무 알림도 나가지 않는다.
+    sFleetChr = svc->createCharacteristic(sail::kFleetUUID, NIMBLE_PROPERTY::NOTIFY);
+
     uint8_t initial[sail::kTelemetryExtLen];
     sail::encodeTelemetryExt(sLatest, e, initial);
     sTelemetryChr->setValue(initial, sizeof(initial));
@@ -312,6 +317,7 @@ void stop() {
     sServer       = nullptr;
     sTelemetryChr = nullptr;
     sControlChr   = nullptr;
+    sFleetChr     = nullptr;
     sConnected    = false;
     printf("[BLE] 내렸습니다 (WiFi 쓰는 동안). 남은 메모리 %lu 바이트\n", (unsigned long)freeHeap());
 }
@@ -342,6 +348,22 @@ void publish(const Telemetry& t, const sail::TelemetryExtra& e) {
     sail::encodeTelemetryExt(sLatest, e, packet);
     sTelemetryChr->setValue(packet, sizeof(packet));   // Read 용 값도 항상 최신
     if (sConnected) sTelemetryChr->notify();           // 구독자가 없으면 NimBLE 가 알아서 무시
+}
+
+void publishFleet(const uint8_t payload[22], uint32_t frame, int16_t rssi, int8_t snr) {
+    if (!sBleUp || !sFleetChr || !sConnected) return;
+    uint8_t out[sail::kFleetLen];
+    out[0] = sail::kFleetVersion;
+    memcpy(out + 1, payload, 22);
+    out[23] = (uint8_t)frame;
+    out[24] = (uint8_t)(frame >> 8);
+    out[25] = (uint8_t)(frame >> 16);
+    out[26] = (uint8_t)(frame >> 24);
+    out[27] = (uint8_t)rssi;
+    out[28] = (uint8_t)((uint16_t)rssi >> 8);
+    out[29] = (uint8_t)snr;
+    sFleetChr->setValue(out, sizeof(out));
+    sFleetChr->notify();
 }
 
 const Telemetry& latest() { return sLatest; }

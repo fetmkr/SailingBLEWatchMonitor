@@ -23,6 +23,7 @@ import * as sx from "./sessionexport";
 import * as panes from "./panes";
 import * as tl from "./timeline";
 import { TrackMap, type TrackPoint } from "./map";
+import { initFleetUI } from "./fleet";
 import "./styles.css";
 
 // ── 상태 ────────────────────────────────────────────────────────────────
@@ -813,7 +814,10 @@ function renderHeader(s: hlog.Session, name: string, parseMs: number, bytes: num
 
 function fitAll() {
   let lo = Infinity, hi = -Infinity;
-  for (const s of series) {
+  // 아래 한 줄은 순간 판단용이다. 9축 원본 열한 개까지 늘어놓으면 화면 밖으로
+  // 잘려 정작 SOG·HDG·COG를 못 본다. 원본은 그래프와 설정의 디버그 줄에 남아 있다.
+  const primary = new Set(["SOG", "HDG", "COG", "HEEL", "TRIM"]);
+  for (const s of series.filter((row) => primary.has(row.code))) {
     if (!s.xs.length) continue;
     lo = Math.min(lo, s.xs[0]);
     hi = Math.max(hi, s.xs[s.xs.length - 1]);
@@ -1099,7 +1103,10 @@ function renderReadout() {
   const parts: string[] = [
     (pinMs !== null ? "📍 " : "") + tl.formatDuration(at - originMs()),
   ];
-  for (const s of series) {
+  // 항해 중 바로 판단하는 값만 한 줄에 둔다. 센서 원본은 그래프와
+  // 설정의 "디버그 값 보기"에 남아 있으므로 이 좁은 줄을 차지하지 않는다.
+  const primary = new Set(["SOG", "HDG", "COG", "HEEL", "TRIM"]);
+  for (const s of series.filter((row) => primary.has(row.code))) {
     const i = nearest(s.xs, at);
     if (i < 0) continue;
     const v = s.ys[i];
@@ -1993,7 +2000,12 @@ function renderLibrary() {
   }).join("");
 
   box.querySelectorAll<HTMLElement>(".file").forEach((el) => {
-    el.onclick = () => openEntry(el.dataset.id!);
+    el.onclick = async () => {
+      await openEntry(el.dataset.id!);
+      // 작은 화면에서 세션을 골랐으면 서랍의 일은 끝났다. 분석 화면을
+      // 바로 넓혀 주고, 정보가 필요할 때 세션 아이콘으로 다시 연다.
+      if (matchMedia("(max-width: 900px)").matches) showTab(null);
+    };
   });
   // 연 세션의 줄 밑에 그 세션의 정보를 편다. 정보는 "지금 연 세션의 속성"
   // 이라 목록과 떼어 놓을 이유가 없다.
@@ -2073,11 +2085,19 @@ function renderDetails() {
       <button id="exportSess" title="원본 HLG·TXT · CSV · GPX · 메모를 zip 하나로">내보내기</button>
       <button id="delSess">${sessDelArm === e.id ? "한 번 더 누르면 파일까지 지웁니다" : "세션 지우기"}</button>
     </div>
-    <div id="meta">${e.id === openId ? metaHtml : ""}</div>
-    ${FIELDS.map(([k, label, ph]) => `
-      <label class="drow"><span>${label}</span>
-        <input data-k="${k}" value="${esc(String(e[k] ?? ""))}" placeholder="${ph}" />
-      </label>`).join("")}`;
+    <details class="sessionFold">
+      <summary>기록 정보</summary>
+      <div class="sessionFoldBody" id="meta">${e.id === openId ? metaHtml : ""}</div>
+    </details>
+    <details class="sessionFold">
+      <summary>훈련 정보 입력</summary>
+      <div class="sessionFoldBody">
+        ${FIELDS.map(([k, label, ph]) => `
+          <label class="drow"><span>${label}</span>
+            <input data-k="${k}" value="${esc(String(e[k] ?? ""))}" placeholder="${ph}" />
+          </label>`).join("")}
+      </div>
+    </details>`;
 
   box.querySelectorAll<HTMLInputElement>("input").forEach((inp) => {
     // 칠 때마다 저장한다. 저장 버튼을 따로 두면 잊고 닫는다.
@@ -2819,7 +2839,7 @@ function mountSplitters() {
     { el: $("center"), kind: "flex", min: 320 },
     // 280 과 190 은 글자가 12px 이던 시절 값이다. 17px 로 키우면서 서랍
     // 안쪽이 244px 인데 내용은 285px 를 원하는 상태가 됐다. 같은 비율로 넓혔다.
-    { el: $("dock"),   kind: "fixed", base: 340, min: 240 },
+    { el: $("dock"),   kind: "fixed", base: 360, min: 260 },
   ], after);
 
   // 가운데와 그 안쪽은 배치에 따라 달라진다. applyShape 가 맡는다.
@@ -3828,6 +3848,7 @@ function wire() {
 }
 
 wire();
+initFleetUI(() => sleepBoard(true));
 loadLayout();
 redraw();
 // 영상이 아직 없으므로 싱크와 어긋남 맞추기를 흐리게 해 둔다.
@@ -3872,10 +3893,6 @@ if (import.meta.env.DEV) {
 if (import.meta.env.DEV) {
   void lib.load().then((l) => { if (!l.lastOpen) void loadSample(); });
 }
-
-
-
-
 
 
 

@@ -2500,6 +2500,10 @@ extern "C" void app_main(void) {
         const uint32_t loopT0 = microsNow();
         // 코어 0 받기 일꾼이 링버퍼에 넣어 둔 것을 꺼낸다. 안 꺼내면 64개 뒤로 버린다
         lora::pump();
+        lora::FleetUpdate fleet;
+        while (lora::takeFleetUpdate(fleet)) {
+            ble::publishFleet(fleet.data, fleet.frame, fleet.rssi, fleet.snr);
+        }
         pollSerial();
         netsrv::poll();
 
