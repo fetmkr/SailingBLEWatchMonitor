@@ -167,10 +167,9 @@ float pvMeanKn(uint32_t nowMs, uint32_t winMs, uint32_t notBefore) {
 
 // 경계: 입력(poll 이 pv* 에 넣음) → 품질(sog::sampleOk) → 추정(느린 모드·성분 평균) → 표시(sogShown*).
 void sogShownUpdate(uint32_t nowMs) {
-    if (sog::pvStale(s.pvAtMs, nowMs, kSog)) {   // NAV-PV 가 끊겼으면 원래 길로
+    if (sog::pvStale(s.pvAtMs, nowMs, kSog)) {
         s.slowMode   = false;
-        s.sogShownOk = s.fix;
-        s.sogShownKn = sogOut();
+        s.sogShownOk = false;                     // 속도 오차를 못 보면 RMC 숫자를 대신 보여주지 않는다
         return;
     }
     if (s.pvAtMs == sPvSeenAt) {                 // 새 표본 없음
@@ -182,7 +181,7 @@ void sogShownUpdate(uint32_t nowMs) {
     if (!sog::sampleOk(s.pvVelValid, s.pvAccKn, kSog)) {
         ++s.sogBadCount;
         dampingReset();                          // 튄 값이 다듬기에 남지 않게
-        if (!(s.sogShownOk && s.sogShownKn == 0.0f)) s.sogShownOk = false;
+        s.sogShownOk = false;                    // 거절된 원본은 화면·BLE에서 없는 값이다
         return;
     }
 

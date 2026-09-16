@@ -764,12 +764,15 @@ static sail::Telemetry buildTelemetry(uint32_t ms) {
     sail::Telemetry t;
     t.moduleID = ble::moduleId();
     t.uptimeMs = ms;
-    // 품질 거절로 숫자를 숨기지 않는다. 다듬은 값이 없으면 현재 RMC 원본을 표시한다.
-    // 원본 자체가 없거나 오래됐으면 gs.fix가 false다.
-    t.sogValid = gs.fix;
-    t.cogValid = gs.fix && gps::parser().course.isValid() && gps::parser().course.age() < gps::kStaleMs;
-    if (gs.fix) {
-        t.sogKn  = gs.sogShownOk ? gs.sogShownKn : (float)gps::parser().speed.knots();
+    // NAV-PV가 방금 잰 속도이고 칩이 밝힌 오차가 한도 안일 때만 계기에 쓴다.
+    // 거절된 RMC 원본은 HLG에만 남고 화면·BLE에서는 값 없음이다.
+    t.sogValid = gs.sogShownOk;
+    t.cogValid = gs.sogShownOk && gps::parser().course.isValid() &&
+                 gps::parser().course.age() < gps::kStaleMs;
+    if (gs.sogShownOk) {
+        t.sogKn  = gs.sogShownKn;
+    }
+    if (t.cogValid) {
         t.cogDeg = (gs.cogDamped >= 0.0f) ? gs.cogDamped : (float)gps::parser().course.deg();
     }
     t.heelValid = imu::ok();
@@ -2379,7 +2382,7 @@ extern "C" void app_main(void) {
     // 없거나 실패해도 보드는 그대로 돈다.
     lora::begin();
 
-    printf("[SRC] SOG/COG 는 GPS 가 위성을 잡았을 때만 값이 있습니다 (못 잡으면 무효)\n");
+    printf("[SRC] SOG/COG 는 GPS fix와 방금 잰 속도 품질이 모두 맞을 때만 값이 있습니다\n");
     printf("      HEEL·9축은 IMU 가 붙어 있을 때만 값이 있습니다\n");
 
     ble::start(buildTelemetry(nowMs()), buildExtra());
@@ -2479,7 +2482,7 @@ extern "C" void app_main(void) {
                 ds.recClosing   = hlog::phase() == recctl::Phase::Closing;
                 ds.battLow      = kBattWarnVolts > 0.0f && gBattVolts > 0.0f && gBattVolts < kBattWarnVolts;
                 ds.recSeconds   = ds.recording ? (now - hlog::recStartedMs()) / 1000 : 0;
-                ds.sogKn        = lt.sogKn;   // 정상은 다듬은 값, 품질 거절 시 원본 + ?
+                ds.sogKn        = lt.sogKn;
                 // ★ 정해 둔 모드(선박 4)와 다를 때만 속도 줄에 띄운다. 전압 옆 칸은 늘.
                 ds.gnssMode     = (gs.dyModel == gps::kBoatMode) ? 0 : modeChar(gs.dyModel);
                 ds.gnssModeNow  = modeChar(gs.dyModel);
@@ -2491,7 +2494,7 @@ extern "C" void app_main(void) {
                 ds.magOk        = imu::magOk();
                 ds.sogValid     = lt.sogValid;
                 ds.cogValid     = lt.cogValid;
-                ds.sogCaution   = lt.sogValid && !gs.sogShownOk;
+                ds.sogCaution   = false;       // 품질 거절은 숫자+?가 아니라 ---
                 ds.headingCaution = ds.headingDeg >= 0.0f && gHeading.latest(nowMs()).caution;
                 ds.heelValid    = lt.heelValid;
                 ds.gpsFix       = gs.fix;
