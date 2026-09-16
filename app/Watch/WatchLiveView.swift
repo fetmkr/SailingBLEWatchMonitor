@@ -286,25 +286,29 @@ private struct MainPage: View {
         .frame(maxWidth: .infinity)
     }
 
-    // 상단 한 줄 — 주황=통신 없음, 녹색=수신 중, 빨강 점멸=SD 기록 중.
+    // 상단 첫 줄은 상태, 둘째 줄은 선택한 보드 이름이다.
+    // 주황=통신 없음, 녹색=수신 중, 빨강 점멸=SD 기록 중.
     private var statusLine: some View {
-        HStack(spacing: 5) {
-            RecordingDot(communicating: ble.isLive,
-                         recording: ble.isLive && ble.sample?.recording == true,
-                         isDim: isDim)
-            Text(recordingLabel)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(recordingColor)
-                .lineLimit(1)
-            Spacer(minLength: 3)
-            if !isDim {
-                Text(connectionLabel)
-                    .font(.system(size: 10))
+        VStack(spacing: 0) {
+            HStack(spacing: 5) {
+                RecordingDot(communicating: ble.isLive,
+                             recording: ble.isLive && ble.sample?.recording == true,
+                             isDim: isDim)
+                Text(recordingLabel)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(recordingColor)
+                    .lineLimit(1)
+            }
+
+            if !isDim, let boardName = ble.pinnedModule?.displayName {
+                Text(boardName)
+                    .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                    .minimumScaleFactor(0.6)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private var recordingLabel: String {
@@ -320,17 +324,6 @@ private struct MainPage: View {
         return .green
     }
 
-    private var connectionLabel: String {
-        switch ble.source {
-        case .connection:
-            return ble.pinnedModule?.displayName ?? "연결"
-        case .advertising:
-            return "광고"
-        case .none:
-            if ble.state == .reconnecting { return "재연결 중…" }
-            return ble.state.displayText
-        }
-    }
 }
 
 /// 통신은 고정색, 실제 SD 기록만 빨간색으로 깜박인다.
