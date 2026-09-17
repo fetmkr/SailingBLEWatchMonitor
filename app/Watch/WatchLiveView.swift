@@ -553,7 +553,8 @@ private struct SettingsPage: View {
                 WKInterfaceDevice.current().play(.click)
                 ble.sendControl(enabled ? "lora live off" : "lora live on")
             } label: {
-                Label(enabled ? "장거리 통신 종료" : "장거리 통신 시작",
+                Label(enabled ? "장거리 통신 종료" :
+                      (boat == 0 ? "장거리 수신 시작" : "장거리 송수신 시작"),
                       systemImage: enabled ? "antenna.radiowaves.left.and.right.slash" : "antenna.radiowaves.left.and.right")
                     .font(.system(size: 14, weight: .semibold))
                     .frame(maxWidth: .infinity, minHeight: 44)
@@ -593,7 +594,11 @@ private struct SettingsPage: View {
               let at = ble.controlReplyAt,
               Date().timeIntervalSince(at) < 10,
               !ble.controlReply.isEmpty else { return nil }
-        if ble.controlReply.hasPrefix("ok lora live on") { return "장거리 통신을 시작했습니다" }
+        if ble.controlReply.hasPrefix("ok lora live on") {
+            if ble.controlReply.contains("boat 0") { return "장거리 수신을 시작했습니다" }
+            if ble.controlReply.contains("pps wait") { return "수신 시작 · GPS 시각을 기다립니다" }
+            return "장거리 송수신을 시작했습니다"
+        }
         if ble.controlReply.hasPrefix("ok lora live off") { return "장거리 통신을 종료했습니다" }
         if ble.controlReply.hasPrefix("ok boat") { return "배 번호를 저장했습니다" }
         if ble.controlReply.hasPrefix("err") { return "실패: \(ble.controlReply)" }

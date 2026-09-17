@@ -157,7 +157,10 @@ function renderList(now: number) {
   const list = [...boats.values()].sort((a, b) => a.boat - b.boat);
   $("fleetCount").textContent = `${list.filter((b) => now - b.receivedAt <= 3000).length}척 수신`;
   if (!list.length) {
-    box.innerHTML = `<div class="fleet-empty"><b>아직 들린 배가 없습니다</b><span>오른쪽 보드 칸에서 수신 보드를 연결하세요.</span></div>`;
+    const hint = link
+      ? "수신기는 연결됐습니다. 송신 보드가 B01~B32이고 GPS 시각을 잡아야 보냅니다."
+      : "오른쪽 보드 칸에서 수신 보드를 연결하세요.";
+    box.innerHTML = `<div class="fleet-empty"><b>아직 들린 배가 없습니다</b><span>${hint}</span></div>`;
     return;
   }
   box.innerHTML = list.map((b) => {
@@ -279,11 +282,14 @@ async function connectBoard(board: ble.Board) {
       boats.set(b.boat, b);
       render();
     });
-    // 전용 수신기는 송신하지 않는다. 켜져 있던 장거리 모드를 먼저 끄고 번호를 0으로 맞춘다.
-    const off = await fresh.ask("lora live off", 2500);
-    if (!off?.startsWith("ok")) throw new Error(off || "장거리 통신을 끄는 답이 없습니다");
-    const zero = await fresh.ask("boat 0", 2500);
-    if (!zero?.startsWith("ok boat 0")) throw new Error(zero || "수신 전용 번호를 저장하지 못했습니다");
+    // 수신 보드는 사람이 미리 0번으로 정한 보드만 받는다. 앱이 여기서 번호를
+    // 몰래 0으로 바꾸면 선수가 쓰던 송신 보드를 잘못 골랐을 때 함대에서 사라진다.
+    const boat = await fresh.ask("boat", 2500);
+    const parsed = /^boat (\d+)$/.exec(boat ?? "");
+    if (!parsed) throw new Error(boat || "배 번호를 확인하지 못했습니다");
+    if (Number(parsed[1]) !== 0) {
+      throw new Error(`${board.name}은 B${parsed[1].padStart(2, "0")} 송신 보드입니다. 수신 전용 0번 보드를 고르세요`);
+    }
     const on = await fresh.ask("lora live on", 3000);
     if (!on?.startsWith("ok lora live on boat 0")) throw new Error(on || "장거리 수신을 켜지 못했습니다");
     link = fresh;
