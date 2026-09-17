@@ -164,6 +164,15 @@ static void testLoraPacket() {
     check((d.flags & 0x0F) == 0x0F && (d.flags >> 4) == 12, "fix·REC·PPS·번호변경과 배터리 4비트");
     check(d.heard == 0x80000005u && d.tie == 0xA3F2, "들은 배 비트와 MAC tie 보존");
 
+    lora::Live presence = v;
+    lora::makePresence(&presence);
+    lora::encode(presence, b);
+    check(lora::decode(b, &d) && !(d.flags & lora::kFlagGpsFix) && !(d.flags & lora::kFlagTime) &&
+          d.lat == lora::kLatLonInvalid && d.lon == lora::kLatLonInvalid &&
+          d.sog == lora::kSogInvalid && d.cog == lora::kCogInvalid &&
+          d.heel == -12 && d.pitch == 9 && (d.flags & lora::kFlagRecording),
+          "PPS 전 확인 신호는 항해값만 비우고 자세·REC·배터리는 살린다");
+
     v.gpsFix = false; v.sogValid = false; v.cogValid = false; v.attitudeValid = false;
     lora::encode(v, b);
     check(lora::decode(b, &d) && d.lat == lora::kLatLonInvalid && d.lon == lora::kLatLonInvalid &&

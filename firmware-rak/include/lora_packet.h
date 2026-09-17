@@ -121,6 +121,19 @@ inline void encode(const Live& v, uint8_t out[kPayloadLen]) {
     put16(out + 20, v.tie);
 }
 
+// GPS 시각을 잡기 전의 저빈도 확인 신호. 배 번호·REC·배터리·자세는 살리고,
+// 찍힌 시각을 보장할 수 없는 항해값은 반드시 비운다. 수신 측은 kFlagTime이
+// 꺼진 것으로 정상 TDMA 자료와 구분한다.
+inline void makePresence(Live* v) {
+    if (!v) return;
+    v->lat = kLatLonInvalid;
+    v->lon = kLatLonInvalid;
+    v->gpsFix = false;
+    v->timeValid = false;
+    v->sogValid = false;
+    v->cogValid = false;
+}
+
 inline bool decode(const uint8_t in[kPayloadLen], Decoded* out) {
     Decoded v;
     v.boat = in[0];

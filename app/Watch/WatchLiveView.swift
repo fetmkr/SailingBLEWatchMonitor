@@ -562,7 +562,7 @@ private struct SettingsPage: View {
             .buttonStyle(.borderedProminent)
             .tint(enabled ? .orange : .blue)
 
-            Text(boat == 0 ? "0번은 코치용 수신 전용입니다" : "켜면 자기 위치를 보내면서 다른 배도 받습니다")
+            Text(boat == 0 ? "0번은 코치용 수신 전용입니다" : "GPS 시각 전에는 확인 신호, 이후에는 위치를 보냅니다")
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
 
@@ -586,7 +586,7 @@ private struct SettingsPage: View {
         if extra.boatID == 0 { return "장거리 수신 중 · 코치" }
         return extra.loraPPSReady
             ? String(format: "장거리 송수신 중 · B%02d", extra.boatID)
-            : "수신 중 · GPS 시각 대기"
+            : "확인 신호 송신 중 · GPS 시각 대기"
     }
 
     private var recentLoraReply: String? {
@@ -596,7 +596,7 @@ private struct SettingsPage: View {
               !ble.controlReply.isEmpty else { return nil }
         if ble.controlReply.hasPrefix("ok lora live on") {
             if ble.controlReply.contains("boat 0") { return "장거리 수신을 시작했습니다" }
-            if ble.controlReply.contains("pps wait") { return "수신 시작 · GPS 시각을 기다립니다" }
+            if ble.controlReply.contains("pps wait") { return "확인 신호 송신 시작 · GPS 시각 대기" }
             return "장거리 송수신을 시작했습니다"
         }
         if ble.controlReply.hasPrefix("ok lora live off") { return "장거리 통신을 종료했습니다" }

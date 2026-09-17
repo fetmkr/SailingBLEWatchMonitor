@@ -26,6 +26,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_mac.h"
+#include "esp_random.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -179,6 +180,12 @@ constexpr uint8_t kPreamble  = 8;
 // **안테나 이득을 포함한 값이 규제 대상이다** (§10.8). 안테나를 바꾸면 여기도 바꾼다.
 constexpr int8_t  kTxDbm     = 8;
 
+// PPS 전에는 TDMA 차례를 모르므로 같은 속도로 보내면 함대를 망친다. 대신
+// 5~8초에 한 번만, 무작위 간격으로 항해값을 비운 확인 신호를 보낸다.
+// 한 대의 점유율은 14.14ms / 5~8s = 0.18~0.28%다.
+constexpr uint32_t kPresenceMinMs    = 5000;
+constexpr uint32_t kPresenceJitterMs = 3001;
+
 // 링버퍼. 30척이 1초에 한 번 보내니 한 프레임치보다 넉넉하면 된다.
 // 64개면 루프가 2초를 통째로 멈춰도 안 흘린다.
 constexpr size_t kRingLen = 64;
@@ -243,6 +250,8 @@ volatile bool gTransmitting = false;
 volatile bool gRadioAwake = false;
 volatile bool gLiveEnabled = false; // 장거리 송수신은 `lora live on` 뒤에만. 재부팅하면 꺼진다.
 volatile uint32_t gTxOk = 0, gTxFailed = 0, gTxLate = 0;
+volatile uint32_t gPresenceOk = 0, gPresenceFailed = 0, gPresenceBusy = 0;
+volatile uint32_t gPresenceAtMs = 0;
 uint32_t gAirTimeUs = 0; // 설정 직후, 무전기를 재우기 전에 한 번 계산한다.
 
 // pump()와 BLE 전달은 모두 메인 루프에서 돈다. 잠금이 필요 없는 짧은 큐다.
@@ -344,6 +353,28 @@ void rxWorker(void*) {
     }
 }
 
+// 최신 항해값을 실제 전파로 한 번 보낸다. PPS 전 확인 신호면 위치·SOG·COG를
+// 비우고 timeValid도 내린다. 자세·REC·배터리는 시각과 무관하므로 그대로 간다.
+// false는 무전기 잠금을 못 잡았다는 뜻이고, 송신 결과는 status에 돌려준다.
+bool transmitLive(Live live, bool timeValid, int16_t* status) {
+    live.timeValid = timeValid;
+    live.boatChanged = gBoatChangedAt && millis32() - gBoatChangedAt < 30000u;
+    live.heard = heardMask(millis32());
+    live.tie = gTie;
+    if (!timeValid) makePresence(&live);
+
+    uint8_t pkt[kPayloadLen];
+    encode(live, pkt);
+    RadioLock lk(5);
+    if (!lk.ok) return false;
+    gTransmitting = true;
+    const int16_t st = gRadio.transmit(pkt, kPayloadLen);
+    gRadio.startReceive();
+    gTransmitting = false;
+    if (status) *status = st;
+    return true;
+}
+
 void txWorker(void*) {
     uint32_t lastFrameStart = UINT32_MAX;
     for (;;) {
@@ -361,15 +392,43 @@ void txWorker(void*) {
             vTaskDelay(pdMS_TO_TICKS(250));
             continue;
         }
-        if (!ever || live.boat < 1 || live.boat > 32) {
+        if (live.boat < 1 || live.boat > 32) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
 
         const uint32_t nowUs = micros32();
         const uint32_t ageUs = nowUs - ppsAt;
-        if (ageUs > kPpsHoldoverMs * 1000u) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+        if (ever && ageUs > kPpsHoldoverMs * 1000u) {
+            // micros32는 약 71분에 돈다. 20분을 넘긴 PPS를 계속 ever로 두면
+            // 한 바퀴 뒤 낡은 PPS가 다시 새것처럼 보일 수 있으므로 여기서 폐기한다.
+            portENTER_CRITICAL(&gPpsMux);
+            if (gPpsAtUs == ppsAt) gPpsEver = false;
+            ever = gPpsEver;
+            portEXIT_CRITICAL(&gPpsMux);
+        }
+
+        if (!ever) {
+            const uint32_t nowMs = millis32();
+            if ((int32_t)(nowMs - gPresenceAtMs) < 0) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+            // 실패해도 즉시 연타하지 않는다. 확인 신호는 살아 있음을 알리는
+            // 보조 통로라서, 정상 TDMA 자료를 방해하지 않는 것이 먼저다.
+            gPresenceAtMs = nowMs + kPresenceMinMs + esp_random() % kPresenceJitterMs;
+            portENTER_CRITICAL(&gLiveMux);
+            live = gLive;
+            portEXIT_CRITICAL(&gLiveMux);
+            if (live.boat < 1 || live.boat > 32) continue;
+            int16_t st = 0;
+            if (!transmitLive(live, false, &st)) {
+                gPresenceBusy = gPresenceBusy + 1;
+            } else if (st == RADIOLIB_ERR_NONE) {
+                gPresenceOk = gPresenceOk + 1;
+            } else {
+                gPresenceFailed = gPresenceFailed + 1;
+            }
             continue;
         }
         const uint32_t after = ageUs / kFrameUs;
@@ -394,20 +453,9 @@ void txWorker(void*) {
         live = gLive;
         portEXIT_CRITICAL(&gLiveMux);
         if (live.boat < 1 || live.boat > 32) { lastFrameStart = frameStart; continue; }
-        live.timeValid = true;
-        live.boatChanged = gBoatChangedAt && millis32() - gBoatChangedAt < 30000u;
-        live.heard = heardMask(millis32());
-        live.tie = gTie;
-        uint8_t pkt[kPayloadLen];
-        encode(live, pkt);
-
         lastFrameStart = frameStart; // 실패해도 같은 차례에 두 번 쏘지 않는다
-        RadioLock lk(5);
-        if (!lk.ok) { gTxLate = gTxLate + 1; continue; }
-        gTransmitting = true;
-        const int16_t st = gRadio.transmit(pkt, kPayloadLen);
-        gRadio.startReceive();
-        gTransmitting = false;
+        int16_t st = 0;
+        if (!transmitLive(live, true, &st)) { gTxLate = gTxLate + 1; continue; }
         if (st == RADIOLIB_ERR_NONE) gTxOk = gTxOk + 1;
         else                         gTxFailed = gTxFailed + 1;
     }
@@ -556,12 +604,14 @@ void report() {
     printf("  장거리     %s · 무전기 %s · 배 %u · 송신 %u 성공 / %u 실패 / %u 차례 놓침\n",
            gLiveEnabled ? "송수신" : "끔", gRadioAwake ? "깨어 있음" : "sleep", live.boat,
            (unsigned)gTxOk, (unsigned)gTxFailed, (unsigned)gTxLate);
+    printf("  PPS 전     확인 신호 %u 성공 / %u 실패 / %u 무전기 바쁨 · 5~8초 무작위 간격\n",
+           (unsigned)gPresenceOk, (unsigned)gPresenceFailed, (unsigned)gPresenceBusy);
     if (ppsEver) {
         const uint32_t ageMs = (micros32() - ppsAt) / 1000u;
         printf("  GPS PPS    %u회 · %u ms 전 · %s\n", (unsigned)ppsCount, (unsigned)ageMs,
                ageMs <= kPpsHoldoverMs ? "송신 시각 사용 가능" : "20분 지나 송신 중지");
     } else {
-        printf("  GPS PPS    아직 없음 — 실시간 송신 안 함\n");
+        printf("  GPS PPS    아직 없음 — TDMA 위치 송신 없음, 확인 신호만 사용\n");
     }
     printf("  페이로드   함대 %u · 시험 %u · 거절 %u · 같은 배 번호 충돌 %u\n",
            (unsigned)gReceived - (unsigned)gBadPayload - (unsigned)gTestPayload,
@@ -687,8 +737,8 @@ void pump() {
         if (d.sog == kSogInvalid) printf("---"); else printf("%.2f", d.sog / 100.0f);
         printf("  COG ");
         if (d.cog == kCogInvalid) printf("---"); else printf("%.1f", d.cog / 10.0f);
-        printf("  fix %u rec %u tie %04X\n", !!(d.flags & kFlagGpsFix),
-               !!(d.flags & kFlagRecording), d.tie);
+        printf("  fix %u time %u rec %u tie %04X\n", !!(d.flags & kFlagGpsFix),
+               !!(d.flags & kFlagTime), !!(d.flags & kFlagRecording), d.tie);
     }
 }
 
@@ -755,8 +805,9 @@ bool setLiveEnabled(bool enabled) {
     if (live.boat == 0) {
         printf("[LORA] 장거리 수신 켬 — 배 번호 0은 송신하지 않습니다\n");
     } else {
-        printf("[LORA] 장거리 송수신 켬 — 자기 슬롯 송신, 나머지 슬롯 수신\n");
-        if (!ppsReady()) printf("[LORA] GPS PPS를 기다립니다 — 수신은 지금부터, 송신은 PPS 뒤부터\n");
+        gPresenceAtMs = millis32() + 250u + esp_random() % 751u;
+        printf("[LORA] 장거리 통신 켬 — PPS 뒤 자기 슬롯 송신, 나머지 시간 수신\n");
+        if (!ppsReady()) printf("[LORA] GPS PPS를 기다립니다 — 5~8초마다 확인 신호만 보냅니다\n");
     }
     return true;
 }

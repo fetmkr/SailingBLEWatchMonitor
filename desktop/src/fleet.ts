@@ -80,6 +80,10 @@ function ageText(ms: number) {
   return `${Math.floor(ms / 1000)}초 끊김`;
 }
 
+// PPS 전 확인 신호는 5~8초마다 온다. 정상 1 Hz 자료와 같은 3초 기준을 쓰면
+// 살아 있는 보드가 주기 사이마다 끊긴 것으로 보이므로 12초까지 확인 상태로 둔다.
+function freshMs(b: FleetBoat) { return b.timeValid ? 3000 : 12000; }
+
 function shortestDeg(a: number, b: number) {
   let d = (b - a + 540) % 360 - 180;
   if (d === -180) d = 180;
@@ -187,10 +191,10 @@ function markerPoints(now: number): FleetPoint[] {
 function renderList(now: number) {
   const box = $("fleetBoats");
   const list = [...boats.values()].sort((a, b) => a.boat - b.boat);
-  $("fleetCount").textContent = `${list.filter((b) => now - b.receivedAt <= 3000).length}척 수신`;
+  $("fleetCount").textContent = `${list.filter((b) => now - b.receivedAt <= freshMs(b)).length}척 수신`;
   if (!list.length) {
     const hint = link
-      ? "수신기는 연결됐습니다. 송신 보드가 B01~B32이고 GPS 시각을 잡아야 보냅니다."
+      ? "수신기는 연결됐습니다. 송신 보드를 켜면 GPS 시각 전에도 확인 신호가 옵니다."
       : "오른쪽 보드 칸에서 수신 보드를 연결하세요.";
     box.innerHTML = `<div class="fleet-empty"><b>아직 들린 배가 없습니다</b><span>${hint}</span></div>`;
     return;
@@ -198,10 +202,13 @@ function renderList(now: number) {
   box.innerHTML = list.map((b) => {
     const age = now - b.receivedAt;
     const pick = selected[0] === b.boat ? "a" : selected[1] === b.boat ? "b" : "";
-    const health = age <= 3000 ? "live" : age <= 10000 ? "late" : "lost";
+    const health = age <= freshMs(b) ? "live" : age <= 20000 ? "late" : "lost";
+    const nav = b.timeValid
+      ? `${value(b.sogKn, 2, " kn")} · ${value(b.cogDeg, 1, "°T")}`
+      : "보드 켜짐 · GPS 시각 대기";
     return `<button class="fleet-boat ${pick ? `pick-${pick}` : ""}" data-boat="${b.boat}">
       <span class="fleet-id">${pick ? pick.toUpperCase() : b.boat}</span>
-      <span class="fleet-main"><b>${b.boat}번 배</b><small>${value(b.sogKn, 2, " kn")} · ${value(b.cogDeg, 1, "°T")}</small></span>
+      <span class="fleet-main"><b>${b.boat}번 배</b><small>${nav}</small></span>
       <span class="fleet-health ${health}"><i></i>${ageText(age)}</span>
     </button>`;
   }).join("");
@@ -226,7 +233,9 @@ function boatCard(b: FleetBoat, letter: "A" | "B" | null) {
       ${metric("BAT", `${b.batteryPct}%`)}
       ${metric("REC", b.recording ? "기록 중" : "꺼짐")}
     </div>
-    ${!b.gpsFix ? `<div class="fleet-warn">GPS 위치 없음 — 마지막 위치를 새 위치처럼 쓰지 않습니다.</div>` : ""}
+    ${!b.timeValid
+      ? `<div class="fleet-warn">보드·LoRa 응답 확인 · GPS 시각 대기 — 위치·속도·침로는 보내지 않습니다.</div>`
+      : !b.gpsFix ? `<div class="fleet-warn">GPS 위치 없음 — 마지막 위치를 새 위치처럼 쓰지 않습니다.</div>` : ""}
   </section>`;
 }
 
