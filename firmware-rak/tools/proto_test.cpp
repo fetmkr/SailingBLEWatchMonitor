@@ -113,7 +113,7 @@ static void testManufacturerEncoding() {
 
     uint8_t p[2 + sail::kMfgLen];
     sail::encodeManufacturerData(
-        t, 200, p, sail::manufacturerStatus(/*recording=*/true, /*recFailed=*/false));
+        t, 200, p, sail::manufacturerStatus(/*recording=*/true, /*recFailed=*/false, /*boatId=*/7));
 
     check(u16At(&p[0]) == sail::kCompanyID, "Company ID (LE)");
     check(p[2] == sail::kVersion,           "버전");
@@ -125,6 +125,7 @@ static void testManufacturerEncoding() {
     check(p[10] == 200,                     "시퀀스");
     check((p[11] & sail::kMfgRecording) != 0, "광고 status = 기록 중");
     check((p[11] & sail::kMfgRecFailed) == 0, "광고 status = 기록 실패 아님");
+    check((p[11] >> sail::kMfgBoatShift) == 8, "광고 status = B07 (boat_id + 1)");
 }
 
 // ── 4. 확장 37바이트 ─────────────────────────────────────────────────────

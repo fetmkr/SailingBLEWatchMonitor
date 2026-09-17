@@ -20,13 +20,14 @@ import {
   getAdapterState, checkPermissions,
   type BleDevice,
 } from "@mnlphlp/plugin-blec";
-import { SERVICE_UUID, CONTROL_UUID, FLEET_UUID, NAME_PREFIX } from "./protocol";
+import { SERVICE_UUID, CONTROL_UUID, FLEET_UUID, NAME_PREFIX, advertisedBoatID } from "./protocol";
 
 /** 주변에서 찾은 보드 하나. */
 export interface Board {
   address: string;
   name: string;        // "SAIL-random()"
   rssi: number;        // dBm. -50 이면 아주 가깝고 -85 면 겨우 잡힌다
+  boatId: number | null; // 광고에 번호를 실은 새 펌웨어만 알 수 있다
 }
 
 const inApp = typeof (globalThis as any).__TAURI_INTERNALS__ !== "undefined";
@@ -65,7 +66,12 @@ export async function scan(
       const ours = nm.startsWith(NAME_PREFIX) ||
                    d.services?.some((s) => s.toLowerCase() === SERVICE_UUID.toLowerCase());
       if (!ours) continue;
-      seen.set(d.address, { address: d.address, name: nm || "(이름 없음)", rssi: d.rssi });
+      seen.set(d.address, {
+        address: d.address,
+        name: nm || "(이름 없음)",
+        rssi: d.rssi,
+        boatId: advertisedBoatID(d.manufacturerData),
+      });
     }
     // 가까운 것부터. 코치는 대개 자기 앞의 배를 고른다.
     onList([...seen.values()].sort((a, b) => b.rssi - a.rssi));
@@ -74,6 +80,11 @@ export async function scan(
 
 export async function scanStop(): Promise<void> {
   try { await stopScan(); } catch { /* 이미 멈췄으면 그만이다 */ }
+}
+
+/** 앱이 비정상 종료된 뒤 macOS/plugin에 남은 예전 연결을 정리한다. */
+export async function resetConnection(): Promise<void> {
+  try { await disconnect(); } catch { /* 연결이 없으면 정상 */ }
 }
 
 /**

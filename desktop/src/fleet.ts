@@ -112,9 +112,41 @@ let link: ble.Link | null = null;
 let linkedName = "";
 let boards: ble.Board[] = [];
 let scanning = false;
+let connecting = false;
+let healthChecking = false;
+let connectionGeneration = 0;
+let reconnectTimer: number | null = null;
 const boats = new Map<number, FleetBoat>();
 let selected: number[] = [];
 let firstPosition = true;
+const RECEIVER_KEY = "fleetReceiver.v1";
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+interface SavedReceiver { address: string; name: string }
+
+function savedReceiver(): SavedReceiver | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(RECEIVER_KEY) ?? "null");
+    return v && typeof v.address === "string" && typeof v.name === "string" ? v : null;
+  } catch { return null; }
+}
+
+function rememberReceiver(board: ble.Board) {
+  localStorage.setItem(RECEIVER_KEY, JSON.stringify({ address: board.address, name: board.name }));
+}
+
+function clearReconnectTimer() {
+  if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
+function scheduleReconnect(ms = 1200) {
+  if (reconnectTimer !== null || link || connecting || !savedReceiver() || document.body.dataset.mode !== "fleet") return;
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = null;
+    void reconnectSavedReceiver();
+  }, ms);
+}
 
 function setState(text: string, kind: "" | "good" | "bad" = "") {
   const el = $("fleetState");
@@ -244,38 +276,69 @@ function render() {
 
 function renderReceivers() {
   const box = $("fleetReceivers");
-  if (!boards.length) { box.innerHTML = scanning ? `<span class="dim">주변 수신 보드를 찾는 중…</span>` : ""; return; }
+  if (!boards.length) { box.innerHTML = scanning ? `<span class="dim">0번 수신 전용 보드를 찾는 중…</span>` : ""; return; }
   box.innerHTML = boards.map((b, i) => `<button data-rx="${i}"><b>${esc(b.name)}</b><small>${b.rssi < 0 ? `${b.rssi} dBm` : "세기 모름"}</small></button>`).join("");
   box.querySelectorAll<HTMLElement>("[data-rx]").forEach((el) => {
     el.onclick = () => void connectBoard(boards[Number(el.dataset.rx)]);
   });
 }
 
+function keepReceiverBoards(list: ble.Board[]) {
+  const next = list.filter((b) => b.boatId === 0);
+  // 광고가 올 때마다 버튼을 다시 만들면 누르는 순간 DOM이 바뀌어 클릭이 실패한다.
+  if (next.length === boards.length && next.every((b, i) => b.address === boards[i].address)) return;
+  boards = next;
+  renderReceivers();
+}
+
 async function scanReceivers() {
-  if (scanning) return;
+  if (scanning || connecting) return;
   scanning = true; boards = []; renderReceivers();
   const ready = await ble.ready();
   if (!ready.ok) { scanning = false; setState(ready.why, "bad"); renderReceivers(); return; }
-  setState("주변 보드를 찾는 중…");
+  setState("0번 수신 전용 보드를 찾는 중…");
   try {
-    await ble.scan(5000, (list) => { boards = list; renderReceivers(); });
-    await new Promise((r) => setTimeout(r, 5200));
+    await ble.scan(5000, keepReceiverBoards);
+    await wait(5200);
     await ble.scanStop();
-    setState(boards.length ? "연결할 수신 보드를 고르세요." : "주변 보드를 못 찾았습니다.", boards.length ? "" : "bad");
+    setState(boards.length ? "연결할 수신 보드를 고르세요." : "주변에 0번 수신 전용 보드가 없습니다.", boards.length ? "" : "bad");
   } catch (e) {
     setState(`보드 찾기 실패 — ${e}`, "bad");
   } finally { scanning = false; renderReceivers(); }
 }
 
-async function connectBoard(board: ble.Board) {
-  setState(`${board.name} 연결 중…`);
+async function connectBoard(board: ble.Board, automatic = false) {
+  if (connecting) return;
+  connecting = true;
+  rememberReceiver(board);
   await ble.scanStop();
-  let opening: ble.Link | null = null;
+  let fresh: ble.Link | null = null;
+  let retry = false;
   try {
-    await disconnectFleet(true);
-    const fresh = opening = await ble.Link.open(board, () => {
-      link = null; linkedName = ""; setState("수신 보드 연결이 끊겼습니다.", "bad"); render();
-    });
+    await disconnectFleet(false, false);
+    // 앱이 강제 종료됐으면 plugin/CoreBluetooth에 예전 연결이 남을 수 있다.
+    // 새 connect 전에 한 번 끊어 즉시 재실행해도 `Device disconnected`에 갇히지 않게 한다.
+    await ble.resetConnection();
+    await wait(250);
+    const mine = ++connectionGeneration;
+    setState(`${board.name}${automatic ? " 자동 재연결" : " 연결"} 중…`);
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2 && !fresh; attempt++) {
+      try {
+        fresh = await ble.Link.open(board, () => {
+          if (connectionGeneration !== mine) return;
+          link = null; linkedName = "";
+          setState("수신 보드 연결이 끊겼습니다. 다시 연결하는 중…", "bad");
+          render();
+          scheduleReconnect();
+        });
+      } catch (e) {
+        lastError = e;
+        await ble.resetConnection();
+        if (attempt === 0) await wait(500);
+      }
+    }
+    if (!fresh) throw lastError ?? new Error("보드에 연결하지 못했습니다");
     await fresh.onFleet((raw) => {
       const b = decodeFleet(raw);
       if (!b) return;
@@ -293,21 +356,28 @@ async function connectBoard(board: ble.Board) {
     const on = await fresh.ask("lora live on", 3000);
     if (!on?.startsWith("ok lora live on boat 0")) throw new Error(on || "장거리 수신을 켜지 못했습니다");
     link = fresh;
-    opening = null;
     linkedName = board.name;
     boards = []; renderReceivers();
     boats.clear(); selected = []; firstPosition = true;
     setState(`${board.name} · LoRa 수신 중`, "good");
     render();
   } catch (e) {
-    try { await opening?.close(); } catch { /* 이미 끊김 */ }
-    try { await link?.close(); } catch { /* 이미 끊김 */ }
+    ++connectionGeneration;
+    try { await fresh?.close(); } catch { /* 이미 끊김 */ }
+    await ble.resetConnection();
     link = null; linkedName = "";
     setState(`연결 실패 — ${e}`, "bad"); render();
+    retry = true;
+  } finally {
+    connecting = false;
+    if (retry) scheduleReconnect(3000);
   }
 }
 
-async function disconnectFleet(turnRadioOff = true) {
+async function disconnectFleet(turnRadioOff = true, forget = false) {
+  clearReconnectTimer();
+  ++connectionGeneration;
+  if (forget) localStorage.removeItem(RECEIVER_KEY);
   const old = link;
   link = null; linkedName = "";
   if (!old) { render(); return; }
@@ -317,6 +387,55 @@ async function disconnectFleet(turnRadioOff = true) {
   render();
 }
 
+async function reconnectSavedReceiver() {
+  const wanted = savedReceiver();
+  if (!wanted || link || connecting || scanning || document.body.dataset.mode !== "fleet") return;
+  const ready = await ble.ready();
+  if (!ready.ok) { setState(ready.why, "bad"); scheduleReconnect(5000); return; }
+
+  scanning = true;
+  boards = [];
+  renderReceivers();
+  setState(`${wanted.name} 자동 재연결 중…`);
+  let found: ble.Board | null = null;
+  try {
+    await ble.scan(4000, (list) => {
+      found = list.find((b) => b.boatId === 0 && (b.address === wanted.address || b.name === wanted.name)) ?? null;
+    });
+    await wait(4200);
+  } catch { /* 아래에서 재시도한다 */ }
+  finally {
+    await ble.scanStop();
+    scanning = false;
+    renderReceivers();
+  }
+  if (found) await connectBoard(found, true);
+  else {
+    setState(`${wanted.name} 수신 보드를 기다리는 중…`, "bad");
+    scheduleReconnect(5000);
+  }
+}
+
+async function checkReceiver() {
+  const current = link;
+  if (!current || healthChecking || connecting || document.body.dataset.mode !== "fleet") return;
+  healthChecking = true;
+  try {
+    let state = await current.ask("lora live", 2200);
+    if (state?.startsWith("lora live off")) state = await current.ask("lora live on", 3000);
+    if (!state || !state.includes("boat 0") || state.includes(" off ")) throw new Error("수신 상태 답 없음");
+  } catch {
+    if (link === current) {
+      ++connectionGeneration;
+      link = null; linkedName = "";
+      await ble.resetConnection();
+      setState("수신 보드 응답이 없어 다시 연결하는 중…", "bad");
+      render();
+      scheduleReconnect();
+    }
+  } finally { healthChecking = false; }
+}
+
 function setMode(mode: "review" | "fleet") {
   const before = document.body.dataset.mode;
   document.body.dataset.mode = mode;
@@ -324,8 +443,11 @@ function setMode(mode: "review" | "fleet") {
   localStorage.setItem("appMode.v1", mode);
   // 화면을 바꾸는 것만으로 파일 전송용 보드 AP를 끄면 안 된다.
   // 함대 수신 보드는 BLE, 기록 보드는 WiFi라 두 연결을 함께 유지할 수 있다.
-  if (mode === "review" && before === "fleet") void disconnectFleet();
-  if (mode === "fleet") requestAnimationFrame(() => { mapUp().resize(); render(); });
+  if (mode === "review" && before === "fleet") void disconnectFleet(true, false);
+  if (mode === "fleet") {
+    requestAnimationFrame(() => { mapUp().resize(); render(); });
+    scheduleReconnect(300);
+  }
 }
 
 function seedBrowserPreview() {
@@ -349,16 +471,16 @@ export function initFleetUI() {
     b.onclick = () => setMode(b.dataset.mode === "fleet" ? "fleet" : "review");
   });
   $("fleetScan").onclick = () => void scanReceivers();
-  $("fleetDisconnect").onclick = () => void disconnectFleet();
+  $("fleetDisconnect").onclick = () => void disconnectFleet(true, true);
   $("fleetFit").onclick = () => mapUp().fitFleet();
   const base = $("fleetBase") as HTMLSelectElement;
   base.innerHTML = TrackMap.bases().map((b) => `<option value="${b.id}">${b.label}</option>`).join("");
   base.onchange = () => mapUp().setBase(base.value);
   ($("fleetSeamark") as HTMLInputElement).onchange = () => mapUp().setSeamark(($("fleetSeamark") as HTMLInputElement).checked);
   addEventListener("resize", () => map?.resize());
-  addEventListener("beforeunload", () => { if (link) void link.say("lora live off"); });
   seedBrowserPreview();
   setInterval(render, 1000);
+  setInterval(() => void checkReceiver(), 10000);
   setMode(localStorage.getItem("appMode.v1") === "fleet" ? "fleet" : "review");
   render();
 }

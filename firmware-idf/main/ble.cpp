@@ -84,7 +84,7 @@ NimBLEAdvertisementData buildScanData(const Telemetry& tm, const sail::Telemetry
                                       uint8_t seq) {
     uint8_t mfg[2 + sail::kMfgLen];
     sail::encodeManufacturerData(
-        tm, seq, mfg, sail::manufacturerStatus(extra.recording, extra.recFailed));
+        tm, seq, mfg, sail::manufacturerStatus(extra.recording, extra.recFailed, extra.boatId));
     NimBLEAdvertisementData d;
     d.setManufacturerData(mfg, sizeof(mfg));
     d.setName(sFullName, /*isComplete=*/true);

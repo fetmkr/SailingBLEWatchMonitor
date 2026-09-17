@@ -3859,6 +3859,7 @@ static sail::TelemetryExtra buildExtra() {
     e.gyrX = gGyr.x; e.gyrY = gGyr.y; e.gyrZ = gGyr.z;
     e.magX = gMag.x; e.magY = gMag.y; e.magZ = gMag.z;
     e.battVolts = gBattVolts;
+    e.boatId = gBoatId;
     return e;
 }
 
@@ -3900,7 +3901,7 @@ static NimBLEAdvertisementData buildScanData(const Telemetry& tm,
                                               uint8_t seq) {
     uint8_t mfg[2 + sail::kMfgLen];
     sail::encodeManufacturerData(
-        tm, seq, mfg, sail::manufacturerStatus(extra.recording, extra.recFailed));
+        tm, seq, mfg, sail::manufacturerStatus(extra.recording, extra.recFailed, extra.boatId));
 
     NimBLEAdvertisementData d;
     d.setManufacturerData(mfg, sizeof(mfg));

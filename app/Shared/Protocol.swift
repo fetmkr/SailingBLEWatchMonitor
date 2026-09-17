@@ -52,6 +52,7 @@ enum SailProtocol {
     static let manufacturerPayloadLength = 10
     static let manufacturerRecording: UInt8 = 0x01
     static let manufacturerRecordingFailed: UInt8 = 0x02
+    static let manufacturerBoatShift: UInt8 = 2
 
     // ── 값 없음 표식 (PROTOCOL.md §2.1) ──────────────────────────────────
     //
@@ -205,6 +206,8 @@ struct TelemetrySample: Equatable {
     var recording: Bool? = nil
     /// 기록이 사람의 조작 없이 멈췄는지. 옛 광고처럼 상태를 안 보낸 경우 nil.
     var recordingFailed: Bool? = nil
+    /// 광고에 실린 LoRa 배 번호. 0=수신 전용, nil=옛 펌웨어/알 수 없음.
+    var advertisedBoatID: Int? = nil
     /// 앱이 이 값을 수신한 시각
     var receivedAt: Date
 
@@ -348,6 +351,10 @@ extension TelemetrySample {
         let battRaw  = r.u8()
         let seq      = r.u8()
         let status: UInt8? = r.remaining > 0 ? r.u8() : nil
+        let boatCode = status.map { $0 >> SailProtocol.manufacturerBoatShift }
+        let advertisedBoatID = boatCode.flatMap { code in
+            code >= 1 && code <= 33 ? Int(code) - 1 : nil
+        }
 
         return TelemetrySample(
             version: ver,
@@ -360,6 +367,7 @@ extension TelemetrySample {
             sequence: seq,
             recording: status.map { $0 & SailProtocol.manufacturerRecording != 0 },
             recordingFailed: status.map { $0 & SailProtocol.manufacturerRecordingFailed != 0 },
+            advertisedBoatID: advertisedBoatID,
             receivedAt: date
         )
     }

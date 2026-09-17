@@ -286,14 +286,18 @@ inline void encodeTelemetryExt(const Telemetry& t, const TelemetryExtra& e,
 
 // Manufacturer Specific Data. Company ID(2) + 페이로드(10) = 12바이트. PROTOCOL.md §4.3
 // status bit0: 기록 중, bit1: 기록이 저절로 멈춤.
+// bit2..7: boat_id + 1. 0은 이 필드가 없던 옛 펌웨어, 1은 수신 전용 0번,
+// 2..33은 B01..B32다. +1로 저장해야 옛 광고와 0번 수신기를 구별할 수 있다.
 // status 는 맨 뒤에 덧붙여 옛 앱이 앞 11바이트를 그대로 읽을 수 있게 한다.
 static constexpr uint8_t kMfgRecording = 0x01;
 static constexpr uint8_t kMfgRecFailed = 0x02;
+static constexpr uint8_t kMfgBoatShift = 2;
 
-inline uint8_t manufacturerStatus(bool recording, bool recFailed) {
+inline uint8_t manufacturerStatus(bool recording, bool recFailed, uint8_t boatId) {
     uint8_t status = 0;
     if (recording) status |= kMfgRecording;
     if (recFailed) status |= kMfgRecFailed;
+    if (boatId <= 32) status |= (uint8_t)((boatId + 1u) << kMfgBoatShift);
     return status;
 }
 
