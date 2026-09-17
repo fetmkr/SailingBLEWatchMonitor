@@ -131,12 +131,13 @@ xcrun devicectl list devices
 ### 3.3 아이폰 설치
 
 ```bash
+DD="/tmp/sail-ios-$(date +%Y%m%d-%H%M%S)"
 xcodebuild -project SailingMonitor.xcodeproj -scheme "SailingMonitor" \
-  -destination 'platform=iOS,id=<아이폰 UDID>' -configuration Debug build \
+  -destination 'platform=iOS,id=<아이폰 UDID>' -configuration Debug \
+  -derivedDataPath "$DD" build \
   -allowProvisioningUpdates
 
-APP=$(find ~/Library/Developer/Xcode/DerivedData/SailingMonitor-*/Build/Products/Debug-iphoneos \
-      -maxdepth 1 -name "SailingMonitor.app" | head -1)
+APP="$DD/Build/Products/Debug-iphoneos/SailingMonitor.app"
 xcrun devicectl device install app --device <아이폰 UDID> "$APP"
 xcrun devicectl device process launch --device <아이폰 UDID> kr.fetm.sailingmonitor
 ```
@@ -173,14 +174,18 @@ xcrun devicectl device info details --device <워치 UDID> | grep -E "transportT
 **아이폰 설정 → Bluetooth → 끄기.** 그러면 워치가 Wi-Fi 로 올라오고 터널이 붙는다.
 
 ```bash
+DD="/tmp/sail-watch-$(date +%Y%m%d-%H%M%S)"
 xcodebuild -project SailingMonitor.xcodeproj -scheme "SailingMonitor Watch App" \
-  -destination 'generic/platform=watchOS' -configuration Debug build -allowProvisioningUpdates
+  -destination 'generic/platform=watchOS' -configuration Debug \
+  -derivedDataPath "$DD" build -allowProvisioningUpdates
 
-WAPP=$(find ~/Library/Developer/Xcode/DerivedData/SailingMonitor-*/Build/Products/Debug-watchos \
-       -maxdepth 1 -name "SailingMonitor Watch App.app" | head -1)
+WAPP="$DD/Build/Products/Debug-watchos/SailingMonitor Watch App.app"
 xcrun devicectl device install app --device <워치 UDID> --timeout 240 "$WAPP"
 xcrun devicectl device process launch --device <워치 UDID> kr.fetm.sailingmonitor.watchkitapp
 ```
+
+`DerivedData/SailingMonitor-*`를 `find | head -1`로 고르면 안 된다. 맥에 남은 옛 빌드가
+먼저 잡혀 최신 소스 대신 설치될 수 있다. 위처럼 매번 새 경로를 만들고 그 경로의 앱을 직접 지정한다.
 
 > `-destination 'platform=watchOS,id=...'` 로 빌드하면 기기 대기에서 타임아웃 날 수 있다.
 > `generic/platform=watchOS` 로 빌드하고 `devicectl` 로 따로 설치하는 편이 확실하다.
@@ -415,17 +420,18 @@ xcrun devicectl device install app --device "$IPHONE" \
 
 기기 ID 는 `xcrun devicectl list devices` 로 확인한다.
 
-### ★ 워치는 명령줄로 안 된다
+### ★ 워치 명령줄 설치는 연결 상태를 먼저 본다
 
-같은 방법으로 워치에 넣으면 이렇게 막힌다.
+워치가 `available`이 아니면 아래 CoreDevice 오류가 날 수 있다.
 
 ```
 ERROR: CoreDeviceError 3002
 Coordinator ... was process-scoped, but not for client installcoordination_proxy
 ```
 
-워치 앱이 아이폰 앱 번들 안에 embed 되어 시스템이 관리하기 때문이다.
-**Xcode 에서 스킴 `SailingMonitor Watch App` + 기기 워치로 ⌘R** 해야 한다.
+오류가 나면 옛 빌드로 물러서지 않는다. `xcrun devicectl list devices`에서 워치가
+`available`로 돌아온 뒤 §3.4의 **새 전용 빌드 경로** 명령을 다시 실행한다.
+2026-09-17 Apple Watch Ultra 3에서는 직접 설치와 실행이 정상 동작했다.
 
 > 기기 목록에 워치가 안 보이면 **스킴이 아직 아이폰 앱**인 것이다.
 > 스킴을 먼저 바꿔야 기기 목록에 워치가 나타난다.
