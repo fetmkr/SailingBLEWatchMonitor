@@ -15,6 +15,7 @@
 //                                       메인(또는 sdcard_idf.cpp)이 안 주면 "모름" 으로 찍는다 (지어내지 않는다)
 #include "diagnostics.h"
 
+#include <errno.h>
 #include <cstdio>
 #include <cstring>
 #include <sys/stat.h>
@@ -107,14 +108,31 @@ void sdCheck() {
     }
 
     // 쓰기까지 돼야 기록에 쓸 수 있다.
-    FILE* f = fopen("/sd/sail_test.txt", "w");
+    static const char kTestPath[] = "/sd/sail_test.txt";
+    static const char kTestLine[] = "sailing monitor write test\n";
+    errno = 0;
+    FILE* f = fopen(kTestPath, "w");
     if (f) {
         setvbuf(f, nullptr, _IOFBF, 4096);
-        fprintf(f, "sailing monitor write test, uptime %lu ms\n", (unsigned long)millis32());
-        fclose(f);
-        printf("  쓰기       OK (/sail_test.txt)\n");
+        bool ok = fwrite(kTestLine, 1, sizeof(kTestLine) - 1, f) == sizeof(kTestLine) - 1;
+        ok = fflush(f) == 0 && ok;
+        ok = fsync(fileno(f)) == 0 && ok;
+        ok = fclose(f) == 0 && ok;
+
+        char got[sizeof(kTestLine)] = {};
+        FILE* check = ok ? fopen(kTestPath, "r") : nullptr;
+        if (check) {
+            ok = fread(got, 1, sizeof(kTestLine) - 1, check) == sizeof(kTestLine) - 1 &&
+                 memcmp(got, kTestLine, sizeof(kTestLine) - 1) == 0;
+            ok = fclose(check) == 0 && ok;
+        } else {
+            ok = false;
+        }
+        if (ok) printf("  쓰기       OK (/sail_test.txt 되읽기까지 일치)\n");
+        else    printf("  쓰기       실패 — 쓴 파일을 다시 읽지 못했습니다 (errno %d: %s)\n", errno, strerror(errno));
+        remove(kTestPath);
     } else {
-        printf("  쓰기       실패 — 카드가 쓰기 잠금이거나 가득 찼을 수 있습니다\n");
+        printf("  쓰기       실패 — 파일을 열지 못했습니다 (errno %d: %s)\n", errno, strerror(errno));
     }
 
     sdcard::release(sdcard::Owner::Diagnostic);

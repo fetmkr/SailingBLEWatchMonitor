@@ -513,7 +513,39 @@ bool start(const Header& h) {
         gLastErrorShort = used ? "카드 사용 중" : "마운트 실패";
         return false;
     }
-    mkdir("/sd/LOGS", 0777);                 // 이미 있으면 EEXIST — 아두이노 SD.mkdir 도 결과를 안 본다
+    errno = 0;
+    const int mkdirRc = mkdir("/sd/LOGS", 0777);
+    const int mkdirErr = errno;
+    if (mkdirRc != 0 && mkdirErr != EEXIST) {
+        const int e = mkdirErr;
+        printf("[LOG] ★ /sd/LOGS 폴더 생성 실패 errno %d (%s)\n", e, strerror(e));
+        sdcard::release(sdcard::Owner::Recorder);
+        gLastError = "LOGS 폴더를 만들지 못했습니다";
+        gLastErrorShort = "폴더 실패";
+        return false;
+    }
+    errno = 0;
+    DIR* logsDir = opendir("/sd/LOGS");
+    if (!logsDir) {
+        const int e = errno;
+        printf("[LOG] ★ /sd/LOGS를 열 수 없습니다 — mkdir %d errno %d (%s), opendir errno %d (%s)\n",
+               mkdirRc, mkdirErr, strerror(mkdirErr), e, strerror(e));
+        if (DIR* root = opendir("/sd")) {
+            printf("[LOG] 카드 루트 항목:");
+            unsigned shown = 0;
+            while (struct dirent* entry = readdir(root)) {
+                if (shown++ == 16) { printf(" […]"); break; }
+                printf(" [%s]", entry->d_name);
+            }
+            printf("\n");
+            closedir(root);
+        }
+        sdcard::release(sdcard::Owner::Recorder);
+        gLastError = mkdirRc == 0 ? "카드 쓰기가 반영되지 않습니다" : "LOGS가 폴더가 아닙니다";
+        gLastErrorShort = mkdirRc == 0 ? "카드 쓰기 실패" : "폴더 아님";
+        return false;
+    }
+    closedir(logsDir);
     // ★ 남은 자리를 시작 전에 본다 (체크리스트 12). 기준은 8시간 분량 90 MB.
     {
         const uint64_t freeB = cardFreeBytes();
@@ -571,8 +603,18 @@ bool start(const Header& h) {
     }
     const uint16_t bootCount = (uint16_t)bootN;
 
+    errno = 0;
     gBin = sdOpen(gPath, "w");
-    if (!gBin) { gLastError = "파일을 못 열었습니다"; gLastErrorShort = "파일 못 엶"; sdcard::release(sdcard::Owner::Recorder); return false; }
+    if (!gBin) {
+        const int e = errno;
+        char fullPath[96];
+        sdPath(fullPath, sizeof(fullPath), gPath);
+        printf("[LOG] ★ %s 열기 실패 errno %d (%s)\n", fullPath, e, strerror(e));
+        gLastError = "HLG 파일을 못 열었습니다";
+        gLastErrorShort = "파일 못 엶";
+        sdcard::release(sdcard::Owner::Recorder);
+        return false;
+    }
     gTxt = sdOpen(gTxtPath, "w");
 
     // ── 128바이트 머리글 ────────────────────────────────────────────────
