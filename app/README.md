@@ -130,6 +130,14 @@ xcrun devicectl list devices
 
 ### 3.3 아이폰 설치
 
+아이폰과 워치를 함께 최신 소스로 맞출 때는 저장소의 `app` 폴더에서 아래 한 줄만 쓴다.
+새 빌드 번호와 전용 DerivedData 경로를 만들고, 아이폰에 포함된 워치앱과 직접 설치하는
+워치앱을 같은 바이너리로 맞춘 뒤 실행 중인 옛 앱도 종료한다.
+
+```bash
+zsh ./install_current_devices.sh
+```
+
 ```bash
 DD="/tmp/sail-ios-$(date +%Y%m%d-%H%M%S)"
 xcodebuild -project SailingMonitor.xcodeproj -scheme "SailingMonitor" \

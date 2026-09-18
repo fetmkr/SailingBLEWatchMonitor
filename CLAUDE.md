@@ -9,7 +9,7 @@
 
 1. `REQUIREMENTS.md` — 넷(보드·아이폰·워치·데스크탑)이 어디까지 왔나
 2. `NEXT.md` — 다음 할 일과 **돌고 있는 시험**
-3. `docs/testing/boat-device-checklist.md` — **장치가 통과해야 하는 시험 01~15.** 사용자가 정한 합격 기준이다.
+3. `docs/testing/boat-device-checklist.md` — **장치가 통과해야 하는 시험 01~16.** 사용자가 정한 합격 기준이다.
    "고쳤다" 는 이 표의 해당 항목을 다시 돌려 `통과` 로 적을 수 있을 때만 쓴다
 4. 손댈 영역의 문서 — `POWER.md` · `GPS.md` · `SDLOG.md` · `PROTOCOL.md` ·
    `TRANSFER.md` · `ARCHITECTURE.md` · `COMMANDS.md` · `docs/imu/HEADING.md`

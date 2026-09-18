@@ -119,7 +119,7 @@ export class Link {
     try { await disconnect(); } catch { /* 이미 끊겼으면 그만이다 */ }
   }
 
-  /** 수신 보드가 LoRa로 들은 배를 받을 때마다 30바이트 그대로 알린다. */
+  /** 수신 보드가 LoRa로 들은 배를 받을 때마다 함대 알림을 그대로 알린다. */
   async onFleet(handler: (data: number[]) => void) {
     await subscribe(FLEET_UUID, SERVICE_UUID, handler);
   }

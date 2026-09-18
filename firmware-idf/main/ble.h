@@ -64,6 +64,8 @@ void refreshAdvPayload();                   // 1 Hz. 광고를 안 멈추고 sca
 void publish(const sail::Telemetry& t, const sail::TelemetryExtra& e);   // notify 주기마다
 /// LoRa에서 받은 22바이트를 수신 프레임·신호 세기와 함께 함대 앱에 알린다.
 void publishFleet(const uint8_t payload[22], uint32_t frame, int16_t rssi, int8_t snr);
+uint32_t fleetNotifyOk();
+uint32_t fleetNotifyFailed();
 const sail::Telemetry& latest();
 
 bool    connected();

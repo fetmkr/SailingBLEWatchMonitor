@@ -18,6 +18,9 @@ constexpr uint32_t kFrameUs          = 1000000;
 constexpr uint32_t kSlotUs           = kFrameUs / 32;
 constexpr uint32_t kPpsHoldoverMs    = 20u * 60u * 1000u;
 constexpr uint32_t kHeardFreshMs     = 3000;
+constexpr uint8_t  kWireVersion      = 1;
+constexpr uint8_t  kBoatMask         = 0x3F;
+constexpr uint8_t  kVersionShift     = 6;
 
 constexpr uint8_t kFlagGpsFix      = 1u << 0;
 constexpr uint8_t kFlagRecording   = 1u << 1;
@@ -45,6 +48,7 @@ struct Live {
 };
 
 struct Decoded {
+    uint8_t wireVersion = 0;
     uint8_t boat = 0;
     int32_t lat = kLatLonInvalid;
     int32_t lon = kLatLonInvalid;
@@ -103,7 +107,7 @@ inline bool validLatLon(int32_t lat, int32_t lon) {
 
 inline void encode(const Live& v, uint8_t out[kPayloadLen]) {
     memset(out, 0, kPayloadLen);
-    out[0] = v.boat;
+    out[0] = (uint8_t)((kWireVersion << kVersionShift) | (v.boat & kBoatMask));
     const bool pos = v.gpsFix && validLatLon(v.lat, v.lon) && v.lat != kLatLonInvalid;
     put32(out + 1, (uint32_t)(pos ? v.lat : kLatLonInvalid));
     put32(out + 5, (uint32_t)(pos ? v.lon : kLatLonInvalid));
@@ -136,7 +140,8 @@ inline void makePresence(Live* v) {
 
 inline bool decode(const uint8_t in[kPayloadLen], Decoded* out) {
     Decoded v;
-    v.boat = in[0];
+    v.wireVersion = in[0] >> kVersionShift;
+    v.boat = in[0] & kBoatMask;
     v.lat = (int32_t)get32(in + 1);
     v.lon = (int32_t)get32(in + 5);
     v.sog = get16(in + 9);
@@ -146,7 +151,9 @@ inline bool decode(const uint8_t in[kPayloadLen], Decoded* out) {
     v.flags = in[15];
     v.heard = get32(in + 16);
     v.tie = get16(in + 20);
-    const bool ok = v.boat >= 1 && v.boat <= 32 && validLatLon(v.lat, v.lon) &&
+    // version 0은 이 필드를 넣기 전의 22바이트다. 교체 기간에는 읽되,
+    // 모르는 미래 버전은 같은 길이라도 뜻이 다를 수 있으므로 거절한다.
+    const bool ok = v.wireVersion <= kWireVersion && v.boat >= 1 && v.boat <= 32 && validLatLon(v.lat, v.lon) &&
                     (v.cog == kCogInvalid || v.cog <= 3599);
     if (ok && out) *out = v;
     return ok;
@@ -154,6 +161,13 @@ inline bool decode(const uint8_t in[kPayloadLen], Decoded* out) {
 
 inline uint32_t slotOffsetUs(uint8_t boat) {
     return (boat >= 1 && boat <= 32) ? (uint32_t)(boat - 1) * kSlotUs : 0;
+}
+
+// 32-bit micros()는 약 71분에 한 바퀴 돈다. 부호 없는 뺄셈은 한 번의
+// wrap을 지나도 경과 시간을 보존한다. holdover는 그보다 짧아야 한다.
+inline bool ppsWithinHoldover(bool ever, uint32_t nowUs, uint32_t ppsAtUs,
+                             uint32_t holdoverMs) {
+    return ever && (uint32_t)(nowUs - ppsAtUs) <= holdoverMs * 1000u;
 }
 
 } // namespace lora

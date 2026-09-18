@@ -63,6 +63,11 @@ c++ -std=c++17 -Wall -Wextra -Werror -O2 \
     "$BUILD/FusionAhrs.o" -o "$BUILD/heading_filter_test"
 "$BUILD/heading_filter_test"
 
+# LoRa 수신 보드 BLE v1/v2, 배 번호 충돌, PPS 프레임·BLE 알림 누락.
+"$ROOT/desktop/node_modules/.bin/esbuild" "$ROOT/desktop/tools/fleet_check.ts" \
+    --bundle --platform=node --log-level=warning --outfile="$BUILD/fleet_check.cjs"
+node "$BUILD/fleet_check.cjs"
+
 # ── 2. C++ ↔ Swift 교차 검증 ─────────────────────────────────────────────
 bar "2/4  펌웨어 인코더 ↔ 앱 디코더 교차 검증"
 swiftc -O -o "$BUILD/decode_check" \

@@ -270,6 +270,29 @@ PeerSlot gPeers[32];
 portMUX_TYPE gPeerMux = portMUX_INITIALIZER_UNLOCKED;
 volatile uint32_t gBadPayload = 0, gDuplicateBoat = 0;
 volatile uint32_t gTestPayload = 0;
+volatile uint32_t gFleetDropped = 0;
+
+struct PpsState {
+    uint32_t atUs = 0;
+    uint32_t count = 0;
+    bool valid = false;
+};
+
+// PPS 유효성은 이 한 곳에서만 판단한다. 송신하지 않는 boat 0도 수신 프레임을
+// 찍으므로 txWorker에만 만료 처리를 두면 낡은 프레임 번호가 영원히 남는다.
+PpsState ppsState() {
+    const uint32_t nowUs = micros32();
+    PpsState s;
+    portENTER_CRITICAL(&gPpsMux);
+    if (gPpsEver && !ppsWithinHoldover(true, nowUs, gPpsAtUs, kPpsHoldoverMs)) {
+        gPpsEver = false;
+    }
+    s.atUs = gPpsAtUs;
+    s.count = gPpsCount;
+    s.valid = gPpsEver;
+    portEXIT_CRITICAL(&gPpsMux);
+    return s;
+}
 
 uint32_t heardMask(uint32_t now) {
     uint32_t mask = 0;
@@ -343,9 +366,8 @@ void rxWorker(void*) {
 
         memcpy(gRing[gHead].data, buf, kPayloadLen);
         gRing[gHead].atMs = at;
-        portENTER_CRITICAL(&gPpsMux);
-        gRing[gHead].frame = gPpsEver ? gPpsCount : 0;
-        portEXIT_CRITICAL(&gPpsMux);
+        const PpsState pps = ppsState();
+        gRing[gHead].frame = pps.valid ? pps.count : 0;
         gRing[gHead].rssi = (int16_t)gRadio.getRSSI();
         gRing[gHead].snr  = (int8_t)gRadio.getSNR();
         gHead = next;
@@ -378,11 +400,9 @@ bool transmitLive(Live live, bool timeValid, int16_t* status) {
 void txWorker(void*) {
     uint32_t lastFrameStart = UINT32_MAX;
     for (;;) {
-        uint32_t ppsAt;
-        bool ever;
-        portENTER_CRITICAL(&gPpsMux);
-        ppsAt = gPpsAtUs; ever = gPpsEver;
-        portEXIT_CRITICAL(&gPpsMux);
+        const PpsState pps = ppsState();
+        const uint32_t ppsAt = pps.atUs;
+        const bool ever = pps.valid;
 
         Live live;
         portENTER_CRITICAL(&gLiveMux);
@@ -399,14 +419,6 @@ void txWorker(void*) {
 
         const uint32_t nowUs = micros32();
         const uint32_t ageUs = nowUs - ppsAt;
-        if (ever && ageUs > kPpsHoldoverMs * 1000u) {
-            // micros32는 약 71분에 돈다. 20분을 넘긴 PPS를 계속 ever로 두면
-            // 한 바퀴 뒤 낡은 PPS가 다시 새것처럼 보일 수 있으므로 여기서 폐기한다.
-            portENTER_CRITICAL(&gPpsMux);
-            if (gPpsAtUs == ppsAt) gPpsEver = false;
-            ever = gPpsEver;
-            portEXIT_CRITICAL(&gPpsMux);
-        }
 
         if (!ever) {
             const uint32_t nowMs = millis32();
@@ -573,6 +585,7 @@ bool pop(Rx& out) {
 uint32_t dropped()   { return gDropped; }
 uint32_t received()  { return gReceived; }
 uint32_t crcErrors() { return gCrcErrors; }
+uint32_t fleetDropped() { return gFleetDropped; }
 
 // `lora` — 설정과 지금까지의 성적을 사람이 읽게 뱉는다.
 // 제일 중요한 줄은 마지막의 "버림" 이다.
@@ -592,11 +605,7 @@ void report() {
     }
     printf("  받음       %u개,  CRC 깨짐 %u개,  버림 %u개\n",
            (unsigned)gReceived, (unsigned)gCrcErrors, (unsigned)gDropped);
-    uint32_t ppsAt, ppsCount;
-    bool ppsEver;
-    portENTER_CRITICAL(&gPpsMux);
-    ppsAt = gPpsAtUs; ppsCount = gPpsCount; ppsEver = gPpsEver;
-    portEXIT_CRITICAL(&gPpsMux);
+    const PpsState pps = ppsState();
     Live live;
     portENTER_CRITICAL(&gLiveMux);
     live = gLive;
@@ -606,10 +615,13 @@ void report() {
            (unsigned)gTxOk, (unsigned)gTxFailed, (unsigned)gTxLate);
     printf("  PPS 전     확인 신호 %u 성공 / %u 실패 / %u 무전기 바쁨 · 5~8초 무작위 간격\n",
            (unsigned)gPresenceOk, (unsigned)gPresenceFailed, (unsigned)gPresenceBusy);
-    if (ppsEver) {
-        const uint32_t ageMs = (micros32() - ppsAt) / 1000u;
-        printf("  GPS PPS    %u회 · %u ms 전 · %s\n", (unsigned)ppsCount, (unsigned)ageMs,
-               ageMs <= kPpsHoldoverMs ? "송신 시각 사용 가능" : "20분 지나 송신 중지");
+    if (pps.valid) {
+        const uint32_t ageMs = (micros32() - pps.atUs) / 1000u;
+        printf("  GPS PPS    %u회 · %u ms 전 · 송신 시각 사용 가능\n",
+               (unsigned)pps.count, (unsigned)ageMs);
+    } else if (pps.count) {
+        printf("  GPS PPS    %u회 · 20분 넘게 없음 — 프레임 0, 확인 신호만 사용\n",
+               (unsigned)pps.count);
     } else {
         printf("  GPS PPS    아직 없음 — TDMA 위치 송신 없음, 확인 신호만 사용\n");
     }
@@ -617,7 +629,9 @@ void report() {
            (unsigned)gReceived - (unsigned)gBadPayload - (unsigned)gTestPayload,
            (unsigned)gTestPayload, (unsigned)gBadPayload,
            (unsigned)gDuplicateBoat);
-    if (gDropped) printf("  ★ 버린 게 있습니다 — loop 가 링버퍼를 안 꺼내 가고 있습니다\n");
+    printf("  앱 전달    큐 버림 %u개\n", (unsigned)gFleetDropped);
+    if (gDropped) printf("  ★ 무전기 수신을 버렸습니다 — loop 가 링버퍼를 안 꺼내 가고 있습니다\n");
+    if (gFleetDropped) printf("  ★ 앱 전달 큐가 찼습니다 — BLE 쪽이 받은 속도를 못 따라갑니다\n");
     printf("──────────────────────────────────────────\n");
 }
 
@@ -730,6 +744,8 @@ void pump() {
             gFleetRing[gFleetHead].rssi = r.rssi;
             gFleetRing[gFleetHead].snr = r.snr;
             gFleetHead = next;
+        } else {
+            gFleetDropped = gFleetDropped + 1;
         }
 
         if (!gWatch) continue;
@@ -815,13 +831,7 @@ bool setLiveEnabled(bool enabled) {
 bool liveEnabled() { return gLiveEnabled; }
 
 bool ppsReady() {
-    uint32_t at;
-    bool ever;
-    portENTER_CRITICAL(&gPpsMux);
-    at = gPpsAtUs;
-    ever = gPpsEver;
-    portEXIT_CRITICAL(&gPpsMux);
-    return ever && (micros32() - at) / 1000u <= kPpsHoldoverMs;
+    return ppsState().valid;
 }
 
 void reportPeers() {

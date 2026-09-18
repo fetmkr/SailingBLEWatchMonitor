@@ -45,6 +45,9 @@ volatile bool sSubscribed    = false;   // notify 구독 여부(로그용)
 uint8_t   sSeq = 0;                     // manufacturer data 시퀀스
 Telemetry sLatest;
 sail::TelemetryExtra sLatestExtra;
+uint16_t sFleetSeq = 0;
+uint32_t sFleetNotifyOk = 0;
+uint32_t sFleetNotifyFailed = 0;
 
 // 설정한 이름이 없을 때의 기본값. MAC 의 **뒤쪽** 바이트 (앞 3바이트는 Espressif OUI 라 모든 보드가 같다).
 void defaultUserName(char* out, size_t cap) {
@@ -362,9 +365,16 @@ void publishFleet(const uint8_t payload[22], uint32_t frame, int16_t rssi, int8_
     out[27] = (uint8_t)rssi;
     out[28] = (uint8_t)((uint16_t)rssi >> 8);
     out[29] = (uint8_t)snr;
+    const uint16_t seq = sFleetSeq++;
+    out[30] = (uint8_t)seq;
+    out[31] = (uint8_t)(seq >> 8);
     sFleetChr->setValue(out, sizeof(out));
-    sFleetChr->notify();
+    if (sFleetChr->notify()) sFleetNotifyOk++;
+    else                     sFleetNotifyFailed++;
 }
+
+uint32_t fleetNotifyOk() { return sFleetNotifyOk; }
+uint32_t fleetNotifyFailed() { return sFleetNotifyFailed; }
 
 const Telemetry& latest() { return sLatest; }
 

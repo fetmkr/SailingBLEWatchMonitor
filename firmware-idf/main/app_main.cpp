@@ -1347,9 +1347,12 @@ static void controlLine(const char* raw) {
         return;
     }
     if (!strcmp(line, "lora live")) {
-        snprintf(out, sizeof out, "lora live %s boat %u pps %s",
+        snprintf(out, sizeof out,
+                 "lora live %s boat %u pps %s rx %u ringdrop %u appdrop %u notifyfail %u",
                  lora::liveEnabled() ? "on" : "off", gBoatId,
-                 lora::ppsReady() ? "ready" : "wait");
+                 lora::ppsReady() ? "ready" : "wait", (unsigned)lora::received(),
+                 (unsigned)lora::dropped(), (unsigned)lora::fleetDropped(),
+                 (unsigned)ble::fleetNotifyFailed());
         ble::controlSay(out);
         return;
     }
@@ -2287,7 +2290,12 @@ static void handleLine(char* line) {
         printf("  wifi status        지금 상태\n");
         return;
     }
-    if (!strcmp(line, "lora"))       { lora::report();      return; }
+    if (!strcmp(line, "lora"))       {
+        lora::report();
+        printf("[BLE] 함대 알림 %u 성공 / %u 실패\n",
+               (unsigned)ble::fleetNotifyOk(), (unsigned)ble::fleetNotifyFailed());
+        return;
+    }
     if (!strcmp(line, "lora regs"))  { lora::reportRegs();  return; }
     if (!strcmp(line, "lora tx"))    { lora::txTest();      return; }
     if (!strcmp(line, "lora rssi"))  { lora::reportNoise(); return; }

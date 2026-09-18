@@ -24,9 +24,10 @@ enum SailProtocol {
     static let telemetryUUID = CBUUID(string: "B0A70002-0000-4000-8000-000000000001")
     /// 설정 통로. 글자 한 줄을 써 넣으면 한 줄로 답한다 (PROTOCOL.md §9).
     static let controlUUID   = CBUUID(string: "B0A70003-0000-4000-8000-000000000001")
-    /// LoRa 수신 보드가 함대 라이브 앱에 보내는 30바이트 알림 (PROTOCOL.md §10.13).
+    /// LoRa 수신 보드가 함대 라이브 앱에 보내는 v2 32바이트 알림 (PROTOCOL.md §10.13).
     static let fleetUUID     = CBUUID(string: "B0A70004-0000-4000-8000-000000000001")
-    static let fleetLength = 30
+    static let fleetVersion: UInt8 = 2
+    static let fleetLength = 32
 
     /// 미할당(테스트용) Company ID
     static let companyID: UInt16 = 0xFFFF

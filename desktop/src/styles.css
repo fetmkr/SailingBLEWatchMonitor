@@ -940,6 +940,8 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .fleet-boat:hover { background: var(--hover); border-color: var(--line); }
 .fleet-boat.pick-a { background: color-mix(in srgb, #3b82f6 18%, var(--panel)); border-color: #3b82f6; }
 .fleet-boat.pick-b { background: color-mix(in srgb, #f97316 18%, var(--panel)); border-color: #f97316; }
+.fleet-boat.conflict { background: color-mix(in srgb, #ef4444 14%, var(--panel)); border-color: #ef4444; }
+.fleet-boat.indirect { opacity: .78; }
 .fleet-id {
   width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
   color: #fff; background: #53606f; font-weight: 750;
@@ -953,7 +955,11 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .fleet-health.live i { background: #22c55e; }
 .fleet-health.late i { background: #f59e0b; }
 .fleet-health.lost i { background: #ef4444; }
+.fleet-health.indirect i { background: #60a5fa; }
+.fleet-health.conflict { color: #ef4444; }
+.fleet-health.conflict i { background: #ef4444; box-shadow: 0 0 0 3px #ef444424; }
 #fleetState { padding-top: var(--sp2); font-size: var(--fs-sm); }
+#fleetTransport { padding-top: 4px; font-size: var(--fs-xs); }
 #fleetMapPane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 #fleetMap { flex: 1; min-height: 0; background: var(--tl-plot); }
 .fleet-map-bar {

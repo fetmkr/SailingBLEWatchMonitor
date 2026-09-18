@@ -69,6 +69,8 @@ uint32_t dropped();
 /// 지금까지 받은 개수와 CRC 가 깨진 개수
 uint32_t received();
 uint32_t crcErrors();
+/// 형식 검사를 통과했지만 메인 루프의 앱 전달 큐가 차서 버린 개수.
+uint32_t fleetDropped();
 
 /// `lora` — 설정과 상태를 사람이 읽게 뱉는다
 void report();

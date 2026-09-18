@@ -34,8 +34,12 @@ struct WatchLiveView: View {
     /// 설정 화면에 갇힌다. 옆으로 못 넘기고, 크라운을 길게 누르면 잠금이 풀려서
     /// 그것도 길이 아니다. 걸기 직전에 항해 화면으로 옮겨 놓아야 한다.
     @State private var page = 0
+    /// 홈 화면으로 나갔다가 다시 열었는지 구분한다. 손목을 내렸다 드는
+    /// inactive 전환에는 페이지를 바꾸지 않는다.
+    @State private var wasBackgrounded = false
 
     @EnvironmentObject private var ble: BLEManager
+    @Environment(\.scenePhase) private var scenePhase
 
     /// 보드의 SD 기록이 저절로 멈추면 세 페이지 배경을 빨갛게 (flags bit5).
     /// TabView 페이지 배경은 containerBackground(_:for: .tabView) 로만 바뀐다
@@ -54,6 +58,14 @@ struct WatchLiveView: View {
                 .containerBackground(pageBackground, for: .tabView)
         }
         .tabViewStyle(.page)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background {
+                wasBackgrounded = true
+            } else if phase == .active, wasBackgrounded {
+                page = 0
+                wasBackgrounded = false
+            }
+        }
     }
 }
 

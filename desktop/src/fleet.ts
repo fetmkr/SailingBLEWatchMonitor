@@ -3,72 +3,10 @@
 
 import * as ble from "./ble";
 import { TrackMap, type FleetPoint } from "./map";
+import { decodeFleet, FleetTracker, FleetTransportCounter, freshMs, MAP_KEEP_MS, type FleetBoat } from "./fleet_model";
 
-export interface FleetBoat {
-  boat: number;
-  lat: number | null;
-  lon: number | null;
-  sogKn: number | null;
-  cogDeg: number | null;
-  heelDeg: number | null;
-  pitchDeg: number | null;
-  batteryPct: number;
-  gpsFix: boolean;
-  recording: boolean;
-  timeValid: boolean;
-  changed: boolean;
-  heard: number;
-  tie: number;
-  frame: number;
-  rssi: number;
-  snr: number;
-  receivedAt: number;
-}
-
-const INVALID_POS = -2147483648;
 const $ = (id: string) => document.getElementById(id)!;
 const esc = (v: string) => v.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
-const u16 = (d: DataView, at: number) => d.getUint16(at, true);
-
-/** PROTOCOL.md §10.13의 30바이트 알림을 푼다. 이상하면 조용히 버린다. */
-export function decodeFleet(bytes: number[], now = Date.now()): FleetBoat | null {
-  if (bytes.length !== 30) return null;
-  const a = Uint8Array.from(bytes);
-  const d = new DataView(a.buffer);
-  if (a[0] !== 1) return null;
-  const boat = a[1];
-  if (boat < 1 || boat > 32) return null;
-  const latRaw = d.getInt32(2, true);
-  const lonRaw = d.getInt32(6, true);
-  const sog = u16(d, 10);
-  const cog = u16(d, 12);
-  const heel = d.getInt8(14);
-  const pitch = d.getInt8(15);
-  const flags = a[16];
-  if (latRaw !== INVALID_POS && (latRaw < -900000000 || latRaw > 900000000)) return null;
-  if (lonRaw !== INVALID_POS && (lonRaw < -1800000000 || lonRaw > 1800000000)) return null;
-  if (cog !== 0xffff && cog > 3599) return null;
-  return {
-    boat,
-    lat: latRaw === INVALID_POS ? null : latRaw / 1e7,
-    lon: lonRaw === INVALID_POS ? null : lonRaw / 1e7,
-    sogKn: sog === 0xffff ? null : sog / 100,
-    cogDeg: cog === 0xffff ? null : cog / 10,
-    heelDeg: heel === -128 ? null : heel,
-    pitchDeg: pitch === -128 ? null : pitch,
-    batteryPct: Math.round(((flags >> 4) & 0x0f) * 100 / 15),
-    gpsFix: !!(flags & 0x01),
-    recording: !!(flags & 0x02),
-    timeValid: !!(flags & 0x04),
-    changed: !!(flags & 0x08),
-    heard: d.getUint32(17, true),
-    tie: u16(d, 21),
-    frame: d.getUint32(23, true),
-    rssi: d.getInt16(27, true),
-    snr: d.getInt8(29),
-    receivedAt: now,
-  };
-}
 
 function value(v: number | null, digits: number, unit: string) {
   return v === null ? "—" : `${v.toFixed(digits)}${unit}`;
@@ -79,10 +17,6 @@ function ageText(ms: number) {
   if (ms < 10000) return `${Math.floor(ms / 1000)}초 전`;
   return `${Math.floor(ms / 1000)}초 끊김`;
 }
-
-// PPS 전 확인 신호는 5~8초마다 온다. 정상 1 Hz 자료와 같은 3초 기준을 쓰면
-// 살아 있는 보드가 주기 사이마다 끊긴 것으로 보이므로 12초까지 확인 상태로 둔다.
-function freshMs(b: FleetBoat) { return b.timeValid ? 3000 : 12000; }
 
 function shortestDeg(a: number, b: number) {
   let d = (b - a + 540) % 360 - 180;
@@ -120,9 +54,14 @@ let connecting = false;
 let healthChecking = false;
 let connectionGeneration = 0;
 let reconnectTimer: number | null = null;
-const boats = new Map<number, FleetBoat>();
+const tracker = new FleetTracker();
 let selected: number[] = [];
 let firstPosition = true;
+let firstFitTimer: number | null = null;
+const transport = new FleetTransportCounter();
+let receiverRingDropped = 0;
+let receiverAppDropped = 0;
+let receiverNotifyFailed = 0;
 const RECEIVER_KEY = "fleetReceiver.v1";
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -142,6 +81,26 @@ function rememberReceiver(board: ble.Board) {
 function clearReconnectTimer() {
   if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
   reconnectTimer = null;
+}
+
+function resetLiveData() {
+  tracker.reset();
+  selected = [];
+  firstPosition = true;
+  transport.reset();
+  receiverRingDropped = 0;
+  receiverAppDropped = 0;
+  receiverNotifyFailed = 0;
+  if (firstFitTimer !== null) window.clearTimeout(firstFitTimer);
+  firstFitTimer = null;
+}
+
+function readReceiverCounters(line: string | null) {
+  const m = /\brx (\d+) ringdrop (\d+) appdrop (\d+) notifyfail (\d+)\b/.exec(line ?? "");
+  if (!m) return;
+  receiverRingDropped = Number(m[2]);
+  receiverAppDropped = Number(m[3]);
+  receiverNotifyFailed = Number(m[4]);
 }
 
 function scheduleReconnect(ms = 1200) {
@@ -170,6 +129,12 @@ function mapUp() {
 }
 
 function choose(boat: number) {
+  if (tracker.conflicted(boat)) {
+    selected = selected.filter((n) => n !== boat);
+    setState(`${boat}번 배 번호를 서로 다른 보드가 쓰고 있습니다. 번호를 바꿔야 합니다.`, "bad");
+    render();
+    return;
+  }
   if (selected.includes(boat)) {
     selected = selected.filter((n) => n !== boat);
   } else if (selected.length < 2) {
@@ -181,7 +146,8 @@ function choose(boat: number) {
 }
 
 function markerPoints(now: number): FleetPoint[] {
-  return [...boats.values()].filter((b) => b.lat !== null && b.lon !== null).map((b) => ({
+  return [...tracker.boats.values()].filter((b) => b.lat !== null && b.lon !== null &&
+    now - b.receivedAt <= MAP_KEEP_MS && !tracker.conflicted(b.boat, now)).map((b) => ({
     boat: b.boat, lat: b.lat!, lon: b.lon!, cogDeg: b.cogDeg,
     select: selected[0] === b.boat ? "a" : selected[1] === b.boat ? "b" : null,
     stale: now - b.receivedAt > 3000,
@@ -190,26 +156,37 @@ function markerPoints(now: number): FleetPoint[] {
 
 function renderList(now: number) {
   const box = $("fleetBoats");
-  const list = [...boats.values()].sort((a, b) => a.boat - b.boat);
-  $("fleetCount").textContent = `${list.filter((b) => now - b.receivedAt <= freshMs(b)).length}척 수신`;
-  if (!list.length) {
+  const ids = tracker.listedBoats(now);
+  const directFresh = [...tracker.boats.values()].filter((b) => now - b.receivedAt <= freshMs(b)).length;
+  const indirectOnly = ids.filter((id) => !tracker.boats.has(id)).length;
+  $("fleetCount").textContent = `${directFresh}척 직접${indirectOnly ? ` · ${indirectOnly}척 간접` : ""}`;
+  if (!ids.length) {
     const hint = link
       ? "수신기는 연결됐습니다. 송신 보드를 켜면 GPS 시각 전에도 확인 신호가 옵니다."
       : "오른쪽 보드 칸에서 수신 보드를 연결하세요.";
     box.innerHTML = `<div class="fleet-empty"><b>아직 들린 배가 없습니다</b><span>${hint}</span></div>`;
     return;
   }
-  box.innerHTML = list.map((b) => {
+  box.innerHTML = ids.map((boat) => {
+    const b = tracker.boats.get(boat);
+    if (!b) return `<div class="fleet-boat indirect">
+      <span class="fleet-id">${boat}</span>
+      <span class="fleet-main"><b>${boat}번 배</b><small>다른 배의 수신 목록에서 확인</small></span>
+      <span class="fleet-health indirect"><i></i>본부 직접 수신 없음</span>
+    </div>`;
     const age = now - b.receivedAt;
     const pick = selected[0] === b.boat ? "a" : selected[1] === b.boat ? "b" : "";
-    const health = age <= freshMs(b) ? "live" : age <= 20000 ? "late" : "lost";
-    const nav = b.timeValid
+    const conflict = tracker.conflicted(b.boat, now);
+    const indirect = !conflict && age > freshMs(b) && tracker.heardByOthers(b.boat, now);
+    const health = conflict ? "conflict" : age <= freshMs(b) ? "live" : indirect ? "indirect" : age <= 20000 ? "late" : "lost";
+    const healthText = conflict ? "번호 충돌" : indirect ? "다른 배는 수신" : ageText(age);
+    const nav = conflict ? "서로 다른 보드가 같은 번호를 사용 중" : b.timeValid
       ? `${value(b.sogKn, 2, " kn")} · ${value(b.cogDeg, 1, "°T")}`
       : "보드 켜짐 · GPS 시각 대기";
-    return `<button class="fleet-boat ${pick ? `pick-${pick}` : ""}" data-boat="${b.boat}">
+    return `<button class="fleet-boat ${conflict ? "conflict" : ""} ${pick ? `pick-${pick}` : ""}" data-boat="${b.boat}">
       <span class="fleet-id">${pick ? pick.toUpperCase() : b.boat}</span>
       <span class="fleet-main"><b>${b.boat}번 배</b><small>${nav}</small></span>
-      <span class="fleet-health ${health}"><i></i>${ageText(age)}</span>
+      <span class="fleet-health ${health}"><i></i>${healthText}</span>
     </button>`;
   }).join("");
   box.querySelectorAll<HTMLElement>("[data-boat]").forEach((el) => {
@@ -223,8 +200,10 @@ function metric(label: string, text: string, sub = "") {
 
 function boatCard(b: FleetBoat, letter: "A" | "B" | null) {
   const age = Date.now() - b.receivedAt;
+  const rx = tracker.reception(b);
+  const reception = rx ? ` · 수신 ${rx.percent.toFixed(1)}%${rx.missed ? ` (${rx.missed}회 누락)` : ""}` : "";
   return `<section class="fleet-card ${letter ? `pick-${letter.toLowerCase()}` : ""}">
-    <div class="fleet-card-head"><span>${letter ?? b.boat}</span><b>${b.boat}번 배</b><small>${ageText(age)} · ${b.rssi} dBm · SNR ${b.snr}</small></div>
+    <div class="fleet-card-head"><span>${letter ?? b.boat}</span><b>${b.boat}번 배</b><small>${ageText(age)} · ${b.rssi} dBm · SNR ${b.snr}${reception}</small></div>
     <div class="fleet-metrics">
       ${metric("SOG", value(b.sogKn, 2, " kn"))}
       ${metric("COG", value(b.cogDeg, 1, "°T"))}
@@ -241,7 +220,7 @@ function boatCard(b: FleetBoat, letter: "A" | "B" | null) {
 
 function renderDetail() {
   const box = $("fleetDetailBody");
-  const picked = selected.map((n) => boats.get(n)).filter((b): b is FleetBoat => !!b);
+  const picked = selected.map((n) => tracker.boats.get(n)).filter((b): b is FleetBoat => !!b && !tracker.conflicted(b.boat));
   if (!picked.length) {
     box.innerHTML = `<div class="fleet-empty large"><b>전체 함대</b><span>목록이나 지도에서 한 척을 누르면 상세, 두 척을 누르면 비교합니다.</span></div>`;
     return;
@@ -249,13 +228,17 @@ function renderDetail() {
   if (picked.length === 1) { box.innerHTML = boatCard(picked[0], null); return; }
   const [a, b] = picked;
   const pos = between(a, b);
-  const same = a.frame !== 0 && a.frame === b.frame;
+  // 수신 보드의 PPS 프레임 번호가 같아도, 송신 배가 PPS 없이 보낸 확인 신호는
+  // 임의 시각의 패킷이다. 양쪽 모두 TDMA 시각이 있을 때만 같은 GPS 초로 본다.
+  const framesKnown = a.timeValid && b.timeValid && a.frame !== 0 && b.frame !== 0;
+  const same = framesKnown && a.frame === b.frame;
+  const frameText = !framesKnown ? "수신기 GPS 시각 없음" : same ? "같은 GPS 초" : "수신 초가 다름";
   const cogDelta = a.cogDeg !== null && b.cogDeg !== null ? shortestDeg(a.cogDeg, b.cogDeg) : null;
   const sogDelta = a.sogKn !== null && b.sogKn !== null ? b.sogKn - a.sogKn : null;
   const rate = pos?.rateKn;
   box.innerHTML = `${boatCard(a, "A")}${boatCard(b, "B")}
     <section class="fleet-compare">
-      <div class="fleet-compare-head"><b>A ↔ B 비교</b><span class="${same ? "good" : "bad"}">${same ? "같은 GPS 초" : "수신 초가 다름"}</span></div>
+      <div class="fleet-compare-head"><b>A ↔ B 비교</b><span class="${same ? "good" : "bad"}">${frameText}</span></div>
       <div class="fleet-metrics">
         ${metric("거리", pos ? (pos.meters < 1000 ? `${Math.round(pos.meters)} m` : `${(pos.meters / 1852).toFixed(2)} nm`) : "—")}
         ${metric("A→B", pos ? `${pos.bearing.toFixed(0)}°T` : "—")}
@@ -264,7 +247,7 @@ function renderDetail() {
         ${metric("상대 거리", rate === null || rate === undefined ? "—" : `${Math.abs(rate).toFixed(2)} kn`, rate === null || rate === undefined ? "" : rate < 0 ? "가까워짐" : "멀어짐")}
         ${metric("수신", same ? `프레임 ${a.frame}` : `${a.frame} / ${b.frame}`)}
       </div>
-      ${same ? "" : `<div class="fleet-warn">두 배가 같은 GPS 초에 보낸 값이 아니므로 차이를 확정값처럼 보지 마세요.</div>`}
+      ${same ? "" : `<div class="fleet-warn">${framesKnown ? "두 배가 같은 GPS 초에 받은 값이 아닙니다." : "수신 보드에 유효한 GPS PPS가 없어 같은 초의 값인지 확인할 수 없습니다."} 차이를 확정값처럼 보지 마세요.</div>`}
     </section>`;
 }
 
@@ -275,12 +258,31 @@ function render() {
   const points = markerPoints(now);
   if (document.body.dataset.mode === "fleet" || map) {
     mapUp().setFleet(points);
-    if (firstPosition && points.length) { firstPosition = false; map?.fitFleet(); }
+    if (firstPosition && points.length && firstFitTimer === null) {
+      // 첫 배 한 척에 즉시 화면을 끌려가지 않고 2초 동안 같이 들어오는 배를 모은다.
+      firstFitTimer = window.setTimeout(() => {
+        firstFitTimer = null;
+        if (!firstPosition || !markerPoints(Date.now()).length) return;
+        firstPosition = false;
+        map?.fitFleet();
+      }, 2000);
+    }
   }
   $("fleetLinkName").textContent = linkedName || "수신 보드 연결 안 됨";
   $("fleetLinkName").closest(".fleet-link-row")?.classList.toggle("connected", !!link);
   $("fleetLinkName").closest(".fleet-board-block")?.classList.toggle("connected", !!link);
   $("fleetDisconnect").toggleAttribute("hidden", !link);
+  if (!link) {
+    $("fleetTransport").textContent = "연결 후 BLE·보드 누락을 측정합니다.";
+    $("fleetTransport").className = "dim";
+    return;
+  }
+  const transportText = !transport.ready
+    ? transport.legacySeen ? "구형 수신 보드 · BLE 누락 측정 불가" : "BLE 알림 순번 대기"
+    : `BLE 전달 ${transport.percent.toFixed(1)}% · ${transport.missed}개 누락`;
+  const boardDrops = receiverRingDropped + receiverAppDropped + receiverNotifyFailed;
+  $("fleetTransport").textContent = `${transportText} · 보드 버림 ${receiverRingDropped + receiverAppDropped} · 알림 실패 ${receiverNotifyFailed}`;
+  $("fleetTransport").className = transport.missed || boardDrops ? "bad" : "dim";
 }
 
 function renderReceivers() {
@@ -351,7 +353,9 @@ async function connectBoard(board: ble.Board, automatic = false) {
     await fresh.onFleet((raw) => {
       const b = decodeFleet(raw);
       if (!b) return;
-      boats.set(b.boat, b);
+      transport.ingest(b.notifySeq);
+      tracker.ingest(b);
+      if (tracker.conflicted(b.boat)) selected = selected.filter((n) => n !== b.boat);
       render();
     });
     // 수신 보드는 사람이 미리 0번으로 정한 보드만 받는다. 앱이 여기서 번호를
@@ -367,7 +371,8 @@ async function connectBoard(board: ble.Board, automatic = false) {
     link = fresh;
     linkedName = board.name;
     boards = []; renderReceivers();
-    boats.clear(); selected = []; firstPosition = true;
+    resetLiveData();
+    readReceiverCounters(await fresh.ask("lora live", 2500));
     setState(`${board.name} · LoRa 수신 중`, "good");
     render();
   } catch (e) {
@@ -433,6 +438,8 @@ async function checkReceiver() {
     let state = await current.ask("lora live", 2200);
     if (state?.startsWith("lora live off")) state = await current.ask("lora live on", 3000);
     if (!state || !state.includes("boat 0") || state.includes(" off ")) throw new Error("수신 상태 답 없음");
+    readReceiverCounters(state);
+    render();
   } catch {
     if (link === current) {
       ++connectionGeneration;
@@ -450,9 +457,9 @@ function setMode(mode: "review" | "fleet") {
   document.body.dataset.mode = mode;
   document.querySelectorAll<HTMLElement>("#modeSeg button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
   localStorage.setItem("appMode.v1", mode);
-  // 화면을 바꾸는 것만으로 파일 전송용 보드 AP를 끄면 안 된다.
-  // 함대 수신 보드는 BLE, 기록 보드는 WiFi라 두 연결을 함께 유지할 수 있다.
-  if (mode === "review" && before === "fleet") void disconnectFleet(true, false);
+  // 화면을 바꾸는 것만으로 수신 보드의 LoRa까지 끄면 리뷰 중 함대 자료가 끊긴다.
+  // BLE 연결만 놓고 무전기는 계속 듣게 하며, 돌아오면 저장한 보드로 다시 붙는다.
+  if (mode === "review" && before === "fleet") void disconnectFleet(false, false);
   if (mode === "fleet") {
     requestAnimationFrame(() => { mapUp().resize(); render(); });
     scheduleReconnect(300);
@@ -469,9 +476,9 @@ function seedBrowserPreview() {
     [18, 37.4532, 126.5514, 6.12, 48, 16, 3, 67],
   ] as const;
   for (const [boat, lat, lon, sogKn, cogDeg, heelDeg, pitchDeg, batteryPct] of seed) {
-    boats.set(boat, { boat, lat, lon, sogKn, cogDeg, heelDeg, pitchDeg, batteryPct,
+    tracker.ingest({ radioVersion: 1, boat, lat, lon, sogKn, cogDeg, heelDeg, pitchDeg, batteryPct,
       gpsFix: true, recording: true, timeValid: true, changed: false, heard: 0, tie: boat,
-      frame: 1042, rssi: -62 - boat, snr: 9, receivedAt: now });
+      frame: 1042, rssi: -62 - boat, snr: 9, notifySeq: boat, receivedAt: now });
   }
 }
 
