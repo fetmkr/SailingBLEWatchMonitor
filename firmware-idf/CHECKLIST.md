@@ -1,5 +1,15 @@
 # firmware-idf 이사 체크리스트
 
+**09-18 Fleet BLE v2·LoRa 무선 v1 두 보드 적용 (F4)**
+- 두 보드를 `web-picker-fast-134-g443acbf`로 수신기→송신기 순서로 플래시했다. NVS·SD는 지우지 않았다.
+- 수신 `SAIL-3282`는 배 0, 송신 `SAIL-random()`은 배 2로 유지됐다. 실내 PPS 전 18초 시험에서
+  송신 확인 신호 3회 성공, 수신 3회(RSSI -96~-97 dBm, SNR 8), CRC·무전기 링·앱 전달 큐·송신 실패 0이었다.
+  BLE Fleet v2 알림은 앱 연결 뒤 2회 성공·실패 0이었다. 실외 PPS 1 Hz 위치와 장시간 앱 화면 시험은 남았다.
+- 송신 보드에 남아 있던 이전 코어덤프 64 KB는 플래시 전 `/tmp/sail-coredump-2fb4-20260918.bin`으로 보존했다.
+  SHA가 `build-nofix` 시험판과 일치해 그 ELF로 해석했다. `InterruptWDTTimoutCPU0`가
+  `usb_serial_jtag_driver_install()` 중 난, 이미 원인을 확정했던 옛 USB 무고침 시험판의 덤프다.
+  현재 LoRa·SD 코드에서 새로 난 고장이 아니다.
+
 **09-17 LoRa 수신 전용 두 번째 보드 준비 (F4)**
 - 최신 전체판 `web-picker-fast-127-g68cdcd3`을 `/dev/cu.usbmodem1101`에 플래시했다. NVS는 지우지 않았다.
 - 새 보드 MAC `3C:DC:75:70:32:82`, 기본 이름 `SAIL-3282`, `module_id 206`으로 기존 보드와 겹치지 않는다.
@@ -175,11 +185,11 @@
 | L01 | F1 | 켤 때 설정 줄 · 전파시간 | ✅ | ✅ | 켤 때 · `lora` | 922.55 · SF7 · BW500 · 8 dBm · 14144 us | ✅ 19:25 `lora` 14144 us · 922.55 · SF7 · BW500 · 8 dBm | |
 | L02 | F1 | 칩 버그 셋 레지스터 | ✅ | ✅ | `lora regs` 보내기 전·후 | 15.1 bit2=1 → tx 뒤 0x0E→0x00 · 15.2 0xF · RxGain 0x96 · Sync 0x1424 | ✅ 보내기 전 0x0E bit2=1 · 15.2 0x5E bit4~1=0xF · RxGain 0x96 · Sync 0x1424 · tx 뒤 0x00 (21.4 ms) | |
 | L03 | — | 바닥 잡음 | ✅ | ✅ | `lora rssi` | firmware-rak 같은 자리 값과 대조 | 🔶 −110 / 평균 −108.2 / −106 dBm — firmware-rak 같은 자리 대조는 안 함 | |
-| L04 | — | 두 보드 주고받기 | ✅ | ✅ | watch/tx | 받은 수 늘고 CRC 오류 0 | ⬜ **보드 두 대 필요** | |
+| L04 | — | 두 보드 주고받기 | ✅ | ✅ | watch/tx | 받은 수 늘고 CRC 오류 0 | ✅ 09-18 B02 확인 신호 3회 송신·3회 수신, CRC·버림 0 | |
 | L05 | F2 | `boat` 저장 · 기록 중 거절 | ✅ | ✅ | 시리얼 | firmware-rak 과 같은 줄 | 🔶 boat 3 저장·리셋 뒤 유지 ✅ · 기록 중 거절은 안 쳐 봄 | |
 | L06 | — | 기록 중 `lora tx` — SD(SPI2)와 LoRa(SPI3) 안 부딪힘 | ✅ | ✅ | rec on 중 tx | 버린 줄 0 | ✅ 세션 107 기록 중 tx · 최대 멈춤 9 ms · CRC 0 (버림 956 은 같은 세션의 IMU 끊김 시험 몫) | |
-| L07 | F3 | 22바이트 실시간 패킷·GPS PPS 32슬롯·20분 holdover·PPS 전 확인 신호·송수신 일꾼·off sleep | ✅ | ✅ | 워치에서 배 번호 저장 → 장거리 시작 → 실외 60초 → 종료 | 시작 전/종료 후 SX1262 sleep · PPS 전 5~8초 확인 · PPS 뒤 송신 약 60 · 실패/차례 놓침 0 | 🔶 PPS 전 실물 두 보드 4/4 수신·앱 표시 ✅. 실외 PPS 1 Hz·종료 sleep 남음 | 호스트 163개·C++↔Swift·IDF·워치·데스크탑 빌드 통과 |
-| L08 | F4 | 수신 패킷 해석·최근 3초 heard·`lora peers`·번호 tie 충돌 | ✅ | ✅ | 두 보드: 송신 boat 1 / 수신 boat 0 watch+peers | 좌표·SOG·COG 일치 · CRC/버림 0 · 3초 뒤 목록에서 사라짐 | ⬜ **보드 두 대 필요** | |
+| L07 | F3 | 22바이트 실시간 패킷·GPS PPS 32슬롯·20분 holdover·PPS 전 확인 신호·송수신 일꾼·off sleep | ✅ | ✅ | 워치에서 배 번호 저장 → 장거리 시작 → 실외 60초 → 종료 | 시작 전/종료 후 SX1262 sleep · PPS 전 5~8초 확인 · PPS 뒤 송신 약 60 · 실패/차례 놓침 0 | 🔶 09-18 최신판 PPS 전 3/3 수신·실패 0 ✅. 실외 PPS 1 Hz·종료 sleep 남음 | 호스트 169개·함대 모델 15개·전체 빌드 통과 |
+| L08 | F4 | 수신 패킷 해석·최근 3초 heard·`lora peers`·번호 tie 충돌 | ✅ | ✅ | 두 보드: 송신 boat 1 / 수신 boat 0 watch+peers | 좌표·SOG·COG 일치 · CRC/버림 0 · 3초 뒤 목록에서 사라짐 | 🔶 09-18 무선 v1 B02·tie B42F·time/fix 0 해석, BLE v2 2회 성공·실패 0. 실외 좌표와 충돌 시험 남음 | |
 
 ### 4.7 전원 · 버튼 · 잠 (7단계)
 
