@@ -47,8 +47,8 @@ static uint32_t u32At(const uint8_t* p) {
 static void testTelemetryEncoding() {
     std::printf("\n── 1. GATT 패킷 ──\n");
 
-    check(sail::kFleetVersion == 2 && sail::kFleetLen == 32,
-          "함대 BLE v2 = 32바이트");
+    check(sail::kFleetVersion == 3 && sail::kFleetLen == 34,
+          "함대 BLE v3 = 34바이트");
 
     Telemetry t;
     t.moduleID = 42;

@@ -156,7 +156,7 @@ bool begin() {
     //   LBT 냐 듀티냐로 따지던 그 4 dB 와 같은 크기다 (§10.7).
     gRadio.setRxBoostedGainMode(true);
 
-    // implicit 헤더 — 길이가 22바이트로 고정이라 헤더를 안 실어 시간을 아낀다.
+    // implicit 헤더 — 길이가 24바이트로 고정이라 헤더를 안 실어 시간을 아낀다.
     gRadio.implicitHeader(kPayloadLen);
     gRadio.setCRC(2);
 

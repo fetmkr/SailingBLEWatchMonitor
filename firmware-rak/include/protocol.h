@@ -14,10 +14,10 @@ static constexpr const char* kTelemetryUUID = "b0a70002-0000-4000-8000-000000000
 // 설정 통로. 글자 한 줄을 써 넣으면 한 줄로 답한다 (PROTOCOL.md §9).
 // WiFi 이름·비밀번호를 넣고, 받을 때만 WiFi 를 켜는 데 쓴다.
 static constexpr const char* kControlUUID   = "b0a70003-0000-4000-8000-000000000001";
-// LoRa 수신 보드 → 함대 라이브 앱. v2 32바이트 알림, PROTOCOL.md §10.13.
+// LoRa 수신 보드 → 함대 라이브 앱. v3 34바이트 알림, PROTOCOL.md §10.13.
 static constexpr const char* kFleetUUID     = "b0a70004-0000-4000-8000-000000000001";
-static constexpr uint8_t     kFleetVersion  = 2;
-static constexpr size_t      kFleetLen      = 32;
+static constexpr uint8_t     kFleetVersion  = 3;
+static constexpr size_t      kFleetLen      = 34;
 
 // 한 줄의 최대 길이. BLE 한 번에 들어가는 크기(기본 MTU 23 → 20바이트)보다
 // 크지만, 요즘 폰·맥은 MTU 를 185 이상으로 올려 잡는다. 넘치면 잘라 보낸다.

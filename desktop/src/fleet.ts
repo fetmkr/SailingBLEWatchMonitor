@@ -64,6 +64,21 @@ let receiverAppDropped = 0;
 let receiverNotifyFailed = 0;
 const RECEIVER_KEY = "fleetReceiver.v1";
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const HISTORY_MS = 5 * 60 * 1000;
+const HISTORY_MAX = 420;
+
+interface FleetSample {
+  at: number;
+  sogKn: number | null;
+  cogDeg: number | null;
+  headingDeg: number | null;
+  heelDeg: number | null;
+  pitchDeg: number | null;
+  rssi: number;
+  snr: number;
+}
+
+const histories = new Map<number, FleetSample[]>();
 
 interface SavedReceiver { address: string; name: string }
 
@@ -85,6 +100,7 @@ function clearReconnectTimer() {
 
 function resetLiveData() {
   tracker.reset();
+  histories.clear();
   selected = [];
   firstPosition = true;
   transport.reset();
@@ -148,7 +164,8 @@ function choose(boat: number) {
 function markerPoints(now: number): FleetPoint[] {
   return [...tracker.boats.values()].filter((b) => b.lat !== null && b.lon !== null &&
     now - b.receivedAt <= MAP_KEEP_MS && !tracker.conflicted(b.boat, now)).map((b) => ({
-    boat: b.boat, lat: b.lat!, lon: b.lon!, cogDeg: b.cogDeg,
+    boat: b.boat, lat: b.lat!, lon: b.lon!, sogKn: b.sogKn,
+    cogDeg: b.cogDeg, headingDeg: b.headingDeg,
     select: selected[0] === b.boat ? "a" : selected[1] === b.boat ? "b" : null,
     stale: now - b.receivedAt > 3000,
   }));
@@ -198,6 +215,12 @@ function metric(label: string, text: string, sub = "") {
   return `<div class="fleet-metric"><span>${label}</span><b>${text}</b>${sub ? `<small>${sub}</small>` : ""}</div>`;
 }
 
+function navMissingReason(b: FleetBoat) {
+  if (!b.timeValid) return "GPS 시각 대기";
+  if (!b.gpsFix) return "GPS fix 없음";
+  return "GPS 품질 거절";
+}
+
 function boatCard(b: FleetBoat, letter: "A" | "B" | null) {
   const age = Date.now() - b.receivedAt;
   const rx = tracker.reception(b);
@@ -205,17 +228,101 @@ function boatCard(b: FleetBoat, letter: "A" | "B" | null) {
   return `<section class="fleet-card ${letter ? `pick-${letter.toLowerCase()}` : ""}">
     <div class="fleet-card-head"><span>${letter ?? b.boat}</span><b>${b.boat}번 배</b><small>${ageText(age)} · ${b.rssi} dBm · SNR ${b.snr}${reception}</small></div>
     <div class="fleet-metrics">
-      ${metric("SOG", value(b.sogKn, 2, " kn"))}
-      ${metric("COG", value(b.cogDeg, 1, "°T"))}
+      ${metric("SOG", value(b.sogKn, 2, " kn"), b.sogKn === null ? navMissingReason(b) : "")}
+      ${metric("HDG", value(b.headingDeg, 1, "°M"), b.headingDeg === null ? "IMU·자력계 값 없음" : "자북")}
+      ${metric("COG", value(b.cogDeg, 1, "°T"), b.cogDeg === null ? navMissingReason(b) : "진북")}
       ${metric("HEEL", value(b.heelDeg, 0, "°"))}
       ${metric("PITCH", value(b.pitchDeg, 0, "°"))}
       ${metric("BAT", `${b.batteryPct}%`)}
       ${metric("REC", b.recording ? "기록 중" : "꺼짐")}
     </div>
     ${!b.timeValid
-      ? `<div class="fleet-warn">보드·LoRa 응답 확인 · GPS 시각 대기 — 위치·속도·침로는 보내지 않습니다.</div>`
+      ? `<div class="fleet-warn">보드·LoRa 응답 확인 · GPS 시각 대기 — 위치·SOG·COG만 비웁니다. HDG·자세·REC는 계속 받습니다.</div>`
       : !b.gpsFix ? `<div class="fleet-warn">GPS 위치 없음 — 마지막 위치를 새 위치처럼 쓰지 않습니다.</div>` : ""}
   </section>`;
+}
+
+function rememberSample(b: FleetBoat) {
+  const list = histories.get(b.boat) ?? [];
+  list.push({
+    at: b.receivedAt, sogKn: b.sogKn, cogDeg: b.cogDeg, headingDeg: b.headingDeg,
+    heelDeg: b.heelDeg, pitchDeg: b.pitchDeg, rssi: b.rssi, snr: b.snr,
+  });
+  const cutoff = b.receivedAt - HISTORY_MS;
+  while (list.length && list[0].at < cutoff) list.shift();
+  if (list.length > HISTORY_MAX) list.splice(0, list.length - HISTORY_MAX);
+  histories.set(b.boat, list);
+}
+
+type NumberAt = (s: FleetSample) => number | null;
+
+function graphPath(samples: FleetSample[], pick: NumberAt, min: number, max: number, now: number, circular = false) {
+  let out = "", drawing = false, previous: number | null = null, points = 0;
+  for (const sample of samples) {
+    const v = pick(sample);
+    if (v === null || !Number.isFinite(v) || sample.at < now - HISTORY_MS) {
+      drawing = false; previous = null; continue;
+    }
+    const x = 8 + Math.max(0, Math.min(1, (sample.at - (now - HISTORY_MS)) / HISTORY_MS)) * 584;
+    const y = 6 + (1 - Math.max(0, Math.min(1, (v - min) / (max - min)))) * 88;
+    if (circular && previous !== null && Math.abs(v - previous) > 180) drawing = false;
+    out += `${drawing ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+    drawing = true; previous = v; points++;
+  }
+  if (points === 1) out += "l0.2,0";
+  return out;
+}
+
+function chart(title: string, subtitle: string, boats: FleetBoat[], now: number,
+               range: [number, number], lines: { label: string; pick: NumberAt; show?: NumberAt; dash?: string; circular?: boolean }[]) {
+  const colors = ["#38bdf8", "#fb923c"];
+  const paths: string[] = [];
+  const legend: string[] = [];
+  boats.forEach((boat, bi) => {
+    const samples = histories.get(boat.boat) ?? [];
+    lines.forEach((line) => {
+      const path = graphPath(samples, line.pick, range[0], range[1], now, !!line.circular);
+      if (path) paths.push(`<path d="${path}" stroke="${colors[bi]}" ${line.dash ? `stroke-dasharray="${line.dash}"` : ""}/>`);
+      const current = samples.length ? (line.show ?? line.pick)(samples[samples.length - 1]) : null;
+      legend.push(`<span style="color:${colors[bi]}"><i class="${line.dash ? "dash" : ""}"></i>B${boat.boat} ${line.label} ${current === null ? "—" : current.toFixed(line.label === "SOG" ? 2 : 1)}</span>`);
+    });
+  });
+  return `<section class="fleet-chart">
+    <div class="fleet-chart-title"><b>${title}</b><small>${subtitle}</small></div>
+    <div class="fleet-chart-legend">${legend.join("")}</div>
+    <svg viewBox="0 0 600 100" preserveAspectRatio="none" aria-label="${title} 실시간 그래프">
+      <path class="grid" d="M8 6H592M8 35H592M8 64H592M8 94H592" />${paths.join("")}
+    </svg>
+  </section>`;
+}
+
+function renderCharts(now: number) {
+  const body = $("fleetChartsBody");
+  const chosen = selected.map((n) => tracker.boats.get(n)).filter((b): b is FleetBoat => !!b && !tracker.conflicted(b.boat));
+  const boats = (chosen.length ? chosen : [...tracker.boats.values()].sort((a, b) => b.receivedAt - a.receivedAt)).slice(0, 2);
+  $("fleetChartScope").textContent = boats.length ? `${boats.map((b) => `B${b.boat}`).join(" · ")} · 최근 5분` : "배를 기다리는 중";
+  if (!boats.length) {
+    body.innerHTML = `<div class="fleet-chart-empty">LoRa 데이터가 들어오면 SOG·HDG·COG·자세·신호 추이를 여기에 쌓습니다.</div>`;
+    return;
+  }
+  const samples = boats.flatMap((b) => histories.get(b.boat) ?? []);
+  const sogMax = Math.max(1, Math.ceil(Math.max(0, ...samples.map((s) => s.sogKn ?? 0)) * 1.2 * 2) / 2);
+  const attitudeMax = Math.max(10, Math.ceil(Math.max(0, ...samples.flatMap((s) => [Math.abs(s.heelDeg ?? 0), Math.abs(s.pitchDeg ?? 0)])) / 5) * 5);
+  body.innerHTML = [
+    chart("SOG", `0–${sogMax.toFixed(1)} kn`, boats, now, [0, sogMax], [{ label: "SOG", pick: (s) => s.sogKn }]),
+    chart("HDG M / COG T", "0–360° · 점선은 COG", boats, now, [0, 360], [
+      { label: "HDG", pick: (s) => s.headingDeg, circular: true },
+      { label: "COG", pick: (s) => s.cogDeg, dash: "7 5", circular: true },
+    ]),
+    chart("HEEL / PITCH", `−${attitudeMax}–+${attitudeMax}° · 점선은 PITCH`, boats, now, [-attitudeMax, attitudeMax], [
+      { label: "HEEL", pick: (s) => s.heelDeg },
+      { label: "PITCH", pick: (s) => s.pitchDeg, dash: "7 5" },
+    ]),
+    chart("LoRa RSSI / SNR", "RSSI −130…−20 dBm · 점선 SNR −20…20 dB", boats, now, [-130, -20], [
+      { label: "RSSI", pick: (s) => s.rssi },
+      { label: "SNR", pick: (s) => -130 + (s.snr + 20) / 40 * 110, show: (s) => s.snr, dash: "7 5" },
+    ]),
+  ].join("");
 }
 
 function renderDetail() {
@@ -255,6 +362,7 @@ function render() {
   const now = Date.now();
   renderList(now);
   renderDetail();
+  renderCharts(now);
   const points = markerPoints(now);
   if (document.body.dataset.mode === "fleet" || map) {
     mapUp().setFleet(points);
@@ -354,6 +462,7 @@ async function connectBoard(board: ble.Board, automatic = false) {
       const b = decodeFleet(raw);
       if (!b) return;
       transport.ingest(b.notifySeq);
+      rememberSample(b);
       tracker.ingest(b);
       if (tracker.conflicted(b.boat)) selected = selected.filter((n) => n !== b.boat);
       render();
@@ -476,9 +585,11 @@ function seedBrowserPreview() {
     [18, 37.4532, 126.5514, 6.12, 48, 16, 3, 67],
   ] as const;
   for (const [boat, lat, lon, sogKn, cogDeg, heelDeg, pitchDeg, batteryPct] of seed) {
-    tracker.ingest({ radioVersion: 1, boat, lat, lon, sogKn, cogDeg, heelDeg, pitchDeg, batteryPct,
+    const sample: FleetBoat = { radioVersion: 2, boat, lat, lon, sogKn, cogDeg, headingDeg: (cogDeg + 352) % 360, heelDeg, pitchDeg, batteryPct,
       gpsFix: true, recording: true, timeValid: true, changed: false, heard: 0, tie: boat,
-      frame: 1042, rssi: -62 - boat, snr: 9, notifySeq: boat, receivedAt: now });
+      frame: 1042, rssi: -62 - boat, snr: 9, notifySeq: boat, receivedAt: now };
+    rememberSample(sample);
+    tracker.ingest(sample);
   }
 }
 

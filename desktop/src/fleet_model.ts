@@ -10,6 +10,7 @@ export interface FleetBoat {
   lon: number | null;
   sogKn: number | null;
   cogDeg: number | null;
+  headingDeg: number | null;
   heelDeg: number | null;
   pitchDeg: number | null;
   batteryPct: number;
@@ -34,34 +35,42 @@ export const MAP_KEEP_MS = 20000;
 
 export function freshMs(b: FleetBoat) { return b.timeValid ? 3000 : 12000; }
 
-/** PROTOCOL.md §10.13. v1도 받아 보드 교체 중 화면이 비지 않게 한다. */
+/** PROTOCOL.md §10.13. v1/v2도 받아 앱과 수신 보드 교체 중 화면이 비지 않게 한다. */
 export function decodeFleet(bytes: number[], now = Date.now()): FleetBoat | null {
-  if (bytes.length !== 30 && bytes.length !== FLEET_LENGTH) return null;
+  if (bytes.length !== 30 && bytes.length !== 32 && bytes.length !== FLEET_LENGTH) return null;
   const a = Uint8Array.from(bytes);
   const d = new DataView(a.buffer);
-  if ((a[0] === 1 && bytes.length !== 30) || (a[0] === FLEET_VERSION && bytes.length !== FLEET_LENGTH)) return null;
-  if (a[0] !== 1 && a[0] !== FLEET_VERSION) return null;
+  const envelopeVersion = a[0];
+  if ((envelopeVersion === 1 && bytes.length !== 30) ||
+      (envelopeVersion === 2 && bytes.length !== 32) ||
+      (envelopeVersion === FLEET_VERSION && bytes.length !== FLEET_LENGTH)) return null;
+  if (envelopeVersion !== 1 && envelopeVersion !== 2 && envelopeVersion !== FLEET_VERSION) return null;
   const radioVersion = a[1] >> 6;
   const boat = a[1] & 0x3f;
-  if (radioVersion > LORA_WIRE_VERSION || boat < 1 || boat > 32) return null;
+  // LoRa v2는 끝의 HDG 두 바이트가 필수라 34바이트 BLE 봉투에서만 유효하다.
+  if (radioVersion > LORA_WIRE_VERSION || (radioVersion >= 2 && envelopeVersion < 3) || boat < 1 || boat > 32) return null;
   const latRaw = d.getInt32(2, true);
   const lonRaw = d.getInt32(6, true);
   const sog = u16(d, 10);
   const cog = u16(d, 12);
+  const heading = envelopeVersion >= 3 ? u16(d, 23) : 0xffff;
   const heel = d.getInt8(14);
   const pitch = d.getInt8(15);
   const flags = a[16];
+  const frameAt = envelopeVersion >= 3 ? 25 : 23;
   if (latRaw !== INVALID_POS && (latRaw < -900000000 || latRaw > 900000000)) return null;
   if (lonRaw !== INVALID_POS && (lonRaw < -1800000000 || lonRaw > 1800000000)) return null;
   // 위치는 위·경도가 한 쌍이다. 한쪽만 '없음'인 손상 패킷을 정상 위치로 넘기지 않는다.
   if ((latRaw === INVALID_POS) !== (lonRaw === INVALID_POS)) return null;
   if (cog !== 0xffff && cog > 3599) return null;
+  if (heading !== 0xffff && heading > 3599) return null;
   return {
     radioVersion, boat,
     lat: latRaw === INVALID_POS ? null : latRaw / 1e7,
     lon: lonRaw === INVALID_POS ? null : lonRaw / 1e7,
     sogKn: sog === 0xffff ? null : sog / 100,
     cogDeg: cog === 0xffff ? null : cog / 10,
+    headingDeg: heading === 0xffff ? null : heading / 10,
     heelDeg: heel === -128 ? null : heel,
     pitchDeg: pitch === -128 ? null : pitch,
     batteryPct: Math.round(((flags >> 4) & 0x0f) * 100 / 15),
@@ -71,10 +80,10 @@ export function decodeFleet(bytes: number[], now = Date.now()): FleetBoat | null
     changed: !!(flags & 0x08),
     heard: d.getUint32(17, true),
     tie: u16(d, 21),
-    frame: d.getUint32(23, true),
-    rssi: d.getInt16(27, true),
-    snr: d.getInt8(29),
-    notifySeq: a[0] >= 2 ? u16(d, 30) : null,
+    frame: d.getUint32(frameAt, true),
+    rssi: d.getInt16(frameAt + 4, true),
+    snr: d.getInt8(frameAt + 6),
+    notifySeq: envelopeVersion >= 2 ? u16(d, frameAt + 7) : null,
     receivedAt: now,
   };
 }

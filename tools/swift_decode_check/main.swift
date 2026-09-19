@@ -292,10 +292,10 @@ if SailProtocol.namePrefix != "SAIL-" {
 if SailProtocol.maxFullNameLength != 15 {
     failures.append("  maxFullNameLength 가 15 가 아님: \(SailProtocol.maxFullNameLength)")
 }
-if SailProtocol.fleetVersion != 2 || SailProtocol.fleetLength != 32 {
-    failures.append("  함대 BLE v2/32가 아님: v\(SailProtocol.fleetVersion), \(SailProtocol.fleetLength)바이트")
+if SailProtocol.fleetVersion != 3 || SailProtocol.fleetLength != 34 {
+    failures.append("  함대 BLE v3/34가 아님: v\(SailProtocol.fleetVersion), \(SailProtocol.fleetLength)바이트")
 } else {
-    print("  [ OK ] 함대 BLE v2 길이 32바이트")
+    print("  [ OK ] 함대 BLE v3 길이 34바이트")
 }
 let nameCases: [(String, Bool, String)] = [
     ("SAIL-hojun", true,  "hojun"),

@@ -103,7 +103,9 @@ export interface FleetPoint {
   boat: number;
   lat: number;
   lon: number;
+  sogKn: number | null;
   cogDeg: number | null;
+  headingDeg: number | null;
   select: "a" | "b" | null;
   stale: boolean;
 }
@@ -486,7 +488,7 @@ export class TrackMap {
         const el = document.createElement("button");
         el.type = "button";
         el.className = "fleet-marker";
-        el.innerHTML = `<span class="fleet-arrow">▲</span><b>${p.boat}</b>`;
+        el.innerHTML = `<span class="fleet-arrow">▲</span><b>${p.boat}</b><span class="fleet-marker-data"></span>`;
         el.title = `${p.boat}번 배 선택`;
         el.onclick = () => this.onFleetPick?.(p.boat);
         marker = new Marker({ element: el, anchor: "center" }).setLngLat([p.lon, p.lat]).addTo(this.map);
@@ -500,6 +502,13 @@ export class TrackMap {
         arrow.hidden = p.cogDeg === null;
         arrow.style.transform = `rotate(${p.cogDeg ?? 0}deg)`;
       }
+      const data = el.querySelector<HTMLElement>(".fleet-marker-data");
+      if (data) {
+        const sog = p.sogKn === null ? "SOG —" : `${p.sogKn.toFixed(2)} kn`;
+        const hdg = p.headingDeg === null ? "HDG —" : `HDG ${Math.round(p.headingDeg).toString().padStart(3, "0")}°M`;
+        data.textContent = `${sog}  ${hdg}`;
+      }
+      el.title = `${p.boat}번 배 · ${data?.textContent ?? ""} · 화살표 COG(T)`;
     }
   }
 

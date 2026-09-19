@@ -101,7 +101,7 @@ void pump();
 bool takeFleetUpdate(FleetUpdate& out);
 
 /// 메인 루프가 최신 항해값을 넘긴다. 송신 일꾼은 PPS에 맞춘 자기 차례에서
-/// 이 사본을 22바이트로 만들어 보낸다. boat=0이면 듣기만 한다.
+/// 이 사본을 24바이트로 만들어 보낸다. boat=0이면 듣기만 한다.
 void updateLive(const Live& live);
 
 /// 배 번호를 실제로 바꾼 직후 부른다. 그 뒤 30초 동안 패킷 flags bit3을 세운다.

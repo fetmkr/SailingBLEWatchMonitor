@@ -353,21 +353,24 @@ void publish(const Telemetry& t, const sail::TelemetryExtra& e) {
     if (sConnected) sTelemetryChr->notify();           // 구독자가 없으면 NimBLE 가 알아서 무시
 }
 
-void publishFleet(const uint8_t payload[22], uint32_t frame, int16_t rssi, int8_t snr) {
+void publishFleet(const uint8_t payload[lora::kPayloadLen], uint32_t frame, int16_t rssi, int8_t snr) {
     if (!sBleUp || !sFleetChr || !sConnected) return;
+    static_assert(sail::kFleetLen == 1 + lora::kPayloadLen + 4 + 2 + 1 + 2,
+                  "fleet envelope length must match LoRa payload and metadata");
     uint8_t out[sail::kFleetLen];
     out[0] = sail::kFleetVersion;
-    memcpy(out + 1, payload, 22);
-    out[23] = (uint8_t)frame;
-    out[24] = (uint8_t)(frame >> 8);
-    out[25] = (uint8_t)(frame >> 16);
-    out[26] = (uint8_t)(frame >> 24);
-    out[27] = (uint8_t)rssi;
-    out[28] = (uint8_t)((uint16_t)rssi >> 8);
-    out[29] = (uint8_t)snr;
+    memcpy(out + 1, payload, lora::kPayloadLen);
+    const size_t frameAt = 1 + lora::kPayloadLen;
+    out[frameAt]     = (uint8_t)frame;
+    out[frameAt + 1] = (uint8_t)(frame >> 8);
+    out[frameAt + 2] = (uint8_t)(frame >> 16);
+    out[frameAt + 3] = (uint8_t)(frame >> 24);
+    out[frameAt + 4] = (uint8_t)rssi;
+    out[frameAt + 5] = (uint8_t)((uint16_t)rssi >> 8);
+    out[frameAt + 6] = (uint8_t)snr;
     const uint16_t seq = sFleetSeq++;
-    out[30] = (uint8_t)seq;
-    out[31] = (uint8_t)(seq >> 8);
+    out[frameAt + 7] = (uint8_t)seq;
+    out[frameAt + 8] = (uint8_t)(seq >> 8);
     sFleetChr->setValue(out, sizeof(out));
     if (sFleetChr->notify()) sFleetNotifyOk++;
     else                     sFleetNotifyFailed++;

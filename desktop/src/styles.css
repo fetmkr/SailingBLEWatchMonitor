@@ -968,6 +968,23 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 }
 .fleet-map-bar select { width: 140px; }
 .fleet-map-bar > .dim { margin-left: auto; font-size: var(--fs-xs); }
+#fleetCharts { flex: 0 0 250px; min-height: 0; overflow: auto; padding: var(--sp2) var(--sp3) var(--sp3); border-top: 1px solid var(--line); background: var(--panel); }
+.fleet-charts-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp2); margin-bottom: 7px; }
+.fleet-charts-head b { font-size: var(--fs-sm); }
+.fleet-charts-head span { color: var(--dim); font-size: var(--fs-xs); }
+#fleetChartsBody { display: grid; grid-template-columns: repeat(2, minmax(250px, 1fr)); gap: 7px; }
+.fleet-chart { min-width: 0; height: 101px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px 8px; background: var(--bg); display: grid; grid-template-rows: auto auto 1fr; }
+.fleet-chart-title { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp2); }
+.fleet-chart-title b { font-size: var(--fs-xs); }
+.fleet-chart-title small { color: var(--dim); font-size: 10px; white-space: nowrap; }
+.fleet-chart-legend { min-height: 15px; display: flex; flex-wrap: wrap; gap: 3px 9px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.fleet-chart-legend span { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.fleet-chart-legend i { display: inline-block; width: 12px; border-top: 2px solid currentColor; }
+.fleet-chart-legend i.dash { border-top-style: dashed; }
+.fleet-chart svg { width: 100%; height: 100%; overflow: visible; }
+.fleet-chart svg path:not(.grid) { fill: none; stroke-width: 2.2; vector-effect: non-scaling-stroke; }
+.fleet-chart svg .grid { fill: none; stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.fleet-chart-empty { grid-column: 1 / -1; min-height: 185px; display: grid; place-items: center; color: var(--dim); text-align: center; }
 .fleet-empty { min-height: 150px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; gap: var(--sp2); color: var(--dim); padding: var(--sp5); }
 .fleet-empty.large { min-height: 280px; }
 .fleet-empty b { color: var(--ink); font-size: var(--fs-lg); }
@@ -998,6 +1015,13 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .fleet-marker.pick-b { background: #ea580c; transform: scale(1.12); }
 .fleet-marker.stale { opacity: .45; }
 .fleet-arrow { position: absolute; left: 14px; top: -20px; width: 12px; transform-origin: 6px 27px; color: #111827; text-shadow: 0 0 2px white, 0 0 3px white; }
+.fleet-marker-data {
+  position: absolute; left: 50%; top: 45px; transform: translateX(-50%); width: max-content;
+  padding: 3px 6px; border: 1px solid #ffffff55; border-radius: 6px;
+  background: #111827e8; color: #fff; box-shadow: 0 2px 7px #0008;
+  font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre;
+  pointer-events: none;
+}
 
 @media (max-width: 1020px) {
   body[data-mode="fleet"] #fleetShell { grid-template-columns: 210px minmax(300px, 1fr) 300px; }
@@ -1031,6 +1055,9 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
   #fleetMapPane { grid-column: 2; grid-row: 1; }
   #fleetDetailPane { grid-column: 2; grid-row: 2; border-left: none; border-top: 1px solid var(--line); }
   .fleet-empty.large { min-height: 150px; }
+  #fleetCharts { flex-basis: 222px; }
+  #fleetChartsBody { grid-template-columns: repeat(2, minmax(210px, 1fr)); }
+  .fleet-chart { height: 88px; }
 }
 
 /* 켜져 있는 위 띠 단추 (센서 원본) */

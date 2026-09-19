@@ -182,7 +182,7 @@ constexpr int8_t  kTxDbm     = 8;
 
 // PPS 전에는 TDMA 차례를 모르므로 같은 속도로 보내면 함대를 망친다. 대신
 // 5~8초에 한 번만, 무작위 간격으로 항해값을 비운 확인 신호를 보낸다.
-// 한 대의 점유율은 14.14ms / 5~8s = 0.18~0.28%다.
+// 한 대의 점유율은 15.42ms / 5~8s = 0.19~0.31%다.
 constexpr uint32_t kPresenceMinMs    = 5000;
 constexpr uint32_t kPresenceJitterMs = 3001;
 
@@ -376,7 +376,7 @@ void rxWorker(void*) {
 }
 
 // 최신 항해값을 실제 전파로 한 번 보낸다. PPS 전 확인 신호면 위치·SOG·COG를
-// 비우고 timeValid도 내린다. 자세·REC·배터리는 시각과 무관하므로 그대로 간다.
+// 비우고 timeValid도 내린다. HDG·자세·REC·배터리는 시각과 무관하므로 그대로 간다.
 // false는 무전기 잠금을 못 잡았다는 뜻이고, 송신 결과는 status에 돌려준다.
 bool transmitLive(Live live, bool timeValid, int16_t* status) {
     live.timeValid = timeValid;
@@ -494,7 +494,7 @@ bool begin() {
     // ★ 감도 4 dB 가 여기서 갈린다. 데이터시트의 -117 dBm(SF7/BW500)은 "Rx Boosted gain" 값이다.
     gRadio.setRxBoostedGainMode(true);
 
-    // implicit 헤더 — 길이가 22바이트로 고정이라 헤더를 안 실어 시간을 아낀다.
+    // implicit 헤더 — 길이가 24바이트로 고정이라 헤더를 안 실어 시간을 아낀다.
     gRadio.implicitHeader(kPayloadLen);
     gRadio.setCRC(2);
 
@@ -753,6 +753,8 @@ void pump() {
         if (d.sog == kSogInvalid) printf("---"); else printf("%.2f", d.sog / 100.0f);
         printf("  COG ");
         if (d.cog == kCogInvalid) printf("---"); else printf("%.1f", d.cog / 10.0f);
+        printf("  HDG ");
+        if (d.heading == kHdgInvalid) printf("---"); else printf("%.1fM", d.heading / 10.0f);
         printf("  fix %u time %u rec %u tie %04X\n", !!(d.flags & kFlagGpsFix),
                !!(d.flags & kFlagTime), !!(d.flags & kFlagRecording), d.tie);
     }
@@ -851,6 +853,7 @@ void reportPeers() {
                p.packet.boat, (unsigned)(now - p.atMs), p.rssi, p.snr, p.packet.tie);
         if (p.packet.sog != kSogInvalid) printf("  SOG %.2f", p.packet.sog / 100.0f);
         if (p.packet.cog != kCogInvalid) printf("  COG %.1f", p.packet.cog / 10.0f);
+        if (p.packet.heading != kHdgInvalid) printf("  HDG %.1fM", p.packet.heading / 10.0f);
         printf("\n");
     }
     if (!n) printf("  없음\n");

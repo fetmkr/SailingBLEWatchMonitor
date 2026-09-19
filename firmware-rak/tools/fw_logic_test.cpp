@@ -151,17 +151,19 @@ static void testLoraPacket() {
     v.sogValid = true; v.sogKn = 1.23f;
     v.cogValid = true; v.cogDeg = 359.96f;
     v.attitudeValid = true; v.heelDeg = -12.4f; v.pitchDeg = 8.6f;
+    v.headingValid = true; v.headingDeg = 165.4f;
     v.battPct = 80;
     v.heard = 0x80000005u;
     v.tie = 0xA3F2;
     uint8_t b[lora::kPayloadLen];
     lora::encode(v, b);
     lora::Decoded d;
-    check(lora::decode(b, &d), "22바이트 정상 패킷을 다시 읽는다");
+    check(lora::decode(b, &d), "24바이트 정상 패킷을 다시 읽는다");
     check(d.wireVersion == lora::kWireVersion && d.boat == 7 && d.lat == v.lat && d.lon == v.lon,
           "무선 버전·배 번호와 위·경도는 보존");
     check(d.sog == 123 && d.cog == 0, "SOG 1.23 kn, COG 359.96°는 0.01 kn·0.1° 단위와 360° wrap");
     check(d.heel == -12 && d.pitch == 9, "힐·피치는 1도 단위");
+    check(d.heading == 1654, "HDG M은 0.1도 단위로 보존");
     check((d.flags & 0x0F) == 0x0F && (d.flags >> 4) == 12, "fix·REC·PPS·번호변경과 배터리 4비트");
     check(d.heard == 0x80000005u && d.tie == 0xA3F2, "들은 배 비트와 MAC tie 보존");
 
@@ -171,21 +173,21 @@ static void testLoraPacket() {
     check(lora::decode(b, &d) && !(d.flags & lora::kFlagGpsFix) && !(d.flags & lora::kFlagTime) &&
           d.lat == lora::kLatLonInvalid && d.lon == lora::kLatLonInvalid &&
           d.sog == lora::kSogInvalid && d.cog == lora::kCogInvalid &&
-          d.heel == -12 && d.pitch == 9 && (d.flags & lora::kFlagRecording),
-          "PPS 전 확인 신호는 항해값만 비우고 자세·REC·배터리는 살린다");
+          d.heel == -12 && d.pitch == 9 && d.heading == 1654 && (d.flags & lora::kFlagRecording),
+          "PPS 전 확인 신호는 GPS 항해값만 비우고 HDG·자세·REC·배터리는 살린다");
 
-    v.gpsFix = false; v.sogValid = false; v.cogValid = false; v.attitudeValid = false;
+    v.gpsFix = false; v.sogValid = false; v.cogValid = false; v.attitudeValid = false; v.headingValid = false;
     lora::encode(v, b);
     check(lora::decode(b, &d) && d.lat == lora::kLatLonInvalid && d.lon == lora::kLatLonInvalid &&
           d.sog == lora::kSogInvalid && d.cog == lora::kCogInvalid &&
-          d.heel == lora::kAttitudeInvalid && d.pitch == lora::kAttitudeInvalid,
+          d.heel == lora::kAttitudeInvalid && d.pitch == lora::kAttitudeInvalid && d.heading == lora::kHdgInvalid,
           "fix·센서값이 없으면 0 대신 값 없음 표식");
     b[0] = 7; // 버전 필드를 넣기 전의 legacy 패킷
     check(lora::decode(b, &d) && d.wireVersion == 0 && d.boat == 7,
-          "교체 기간에는 무버전 22바이트도 읽는다");
+          "교체 기간에는 무버전 24바이트도 읽는다");
     b[0] = 0;
     check(!lora::decode(b, &d), "배 번호 0인 수신 패킷은 거절");
-    b[0] = (uint8_t)(2u << lora::kVersionShift) | 7u;
+    b[0] = (uint8_t)(3u << lora::kVersionShift) | 7u;
     check(!lora::decode(b, &d), "모르는 미래 무선 버전은 조용히 거절");
     check(lora::slotOffsetUs(1) == 0 && lora::slotOffsetUs(7) == 187500 &&
           lora::slotOffsetUs(32) == 968750, "1초를 32개 31.25ms 차례로 나눈다");

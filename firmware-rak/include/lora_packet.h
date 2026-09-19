@@ -1,4 +1,4 @@
-// LoRa 함대 텔레메트리 22바이트의 순수 인코더/디코더.
+// LoRa 함대 텔레메트리 24바이트의 순수 인코더/디코더.
 // 보드 의존 코드가 없어 맥의 fw_logic_test 에서 같은 바이트를 검증한다.
 #pragma once
 
@@ -9,16 +9,17 @@
 
 namespace lora {
 
-constexpr size_t   kPayloadLen       = 22;
+constexpr size_t   kPayloadLen       = 24;
 constexpr int32_t  kLatLonInvalid    = (int32_t)0x80000000;
 constexpr uint16_t kSogInvalid       = 0xFFFF;
 constexpr uint16_t kCogInvalid       = 0xFFFF;
+constexpr uint16_t kHdgInvalid       = 0xFFFF;
 constexpr int8_t   kAttitudeInvalid  = -128;
 constexpr uint32_t kFrameUs          = 1000000;
 constexpr uint32_t kSlotUs           = kFrameUs / 32;
 constexpr uint32_t kPpsHoldoverMs    = 20u * 60u * 1000u;
 constexpr uint32_t kHeardFreshMs     = 3000;
-constexpr uint8_t  kWireVersion      = 1;
+constexpr uint8_t  kWireVersion      = 2;
 constexpr uint8_t  kBoatMask         = 0x3F;
 constexpr uint8_t  kVersionShift     = 6;
 
@@ -38,10 +39,12 @@ struct Live {
     bool sogValid = false;
     bool cogValid = false;
     bool attitudeValid = false;
+    bool headingValid = false;
     float sogKn = 0.0f;
     float cogDeg = 0.0f;
     float heelDeg = 0.0f;
     float pitchDeg = 0.0f;
+    float headingDeg = 0.0f; // magnetic north (M), independent of GPS PPS
     uint8_t battPct = 0;
     uint32_t heard = 0;
     uint16_t tie = 0;
@@ -59,6 +62,7 @@ struct Decoded {
     uint8_t flags = 0;
     uint32_t heard = 0;
     uint16_t tie = 0;
+    uint16_t heading = kHdgInvalid; // 0.1 deg magnetic
 };
 
 inline void put16(uint8_t* p, uint16_t v) {
@@ -123,6 +127,7 @@ inline void encode(const Live& v, uint8_t out[kPayloadLen]) {
     out[15] = flags;
     put32(out + 16, v.heard);
     put16(out + 20, v.tie);
+    put16(out + 22, v.headingValid ? encodeCog(v.headingDeg) : kHdgInvalid);
 }
 
 // GPS 시각을 잡기 전의 저빈도 확인 신호. 배 번호·REC·배터리·자세는 살리고,
@@ -151,10 +156,12 @@ inline bool decode(const uint8_t in[kPayloadLen], Decoded* out) {
     v.flags = in[15];
     v.heard = get32(in + 16);
     v.tie = get16(in + 20);
-    // version 0은 이 필드를 넣기 전의 22바이트다. 교체 기간에는 읽되,
-    // 모르는 미래 버전은 같은 길이라도 뜻이 다를 수 있으므로 거절한다.
+    v.heading = get16(in + 22);
+    // implicit header 길이도 24바이트로 바뀌었다. 교체 시험을 위해 같은 길이의
+    // 옛 버전 값은 읽되, 모르는 미래 버전은 필드 뜻이 다를 수 있으므로 거절한다.
     const bool ok = v.wireVersion <= kWireVersion && v.boat >= 1 && v.boat <= 32 && validLatLon(v.lat, v.lon) &&
-                    (v.cog == kCogInvalid || v.cog <= 3599);
+                    (v.cog == kCogInvalid || v.cog <= 3599) &&
+                    (v.heading == kHdgInvalid || v.heading <= 3599);
     if (ok && out) *out = v;
     return ok;
 }
