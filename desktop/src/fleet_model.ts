@@ -65,12 +65,16 @@ export function decodeFleet(bytes: number[], now = Date.now()): FleetBoat | null
   if ((latRaw === INVALID_POS) !== (lonRaw === INVALID_POS)) return null;
   if (cog !== 0xffff && cog > 3599) return null;
   if (heading !== 0xffff && heading > 3599) return null;
+  const sogKn = sog === 0xffff ? null : sog / 100;
+  // 예전 송신기는 정지 판정(SOG 0.00) 뒤에도 마지막/잡음 COG를 실었다.
+  // 정지에는 이동 방향이 없으므로 앱에서도 방어해 값 없음으로 읽는다.
+  const cogDeg = cog === 0xffff || sogKn === null || sogKn === 0 ? null : cog / 10;
   return {
     radioVersion, boat,
     lat: latRaw === INVALID_POS ? null : latRaw / 1e7,
     lon: lonRaw === INVALID_POS ? null : lonRaw / 1e7,
-    sogKn: sog === 0xffff ? null : sog / 100,
-    cogDeg: cog === 0xffff ? null : cog / 10,
+    sogKn,
+    cogDeg,
     headingDeg: heading === 0xffff ? null : heading / 10,
     headingTrue: radioVersion >= 3,
     heelDeg: heel === -128 ? null : heel,

@@ -295,7 +295,7 @@ function renderList(now: number) {
     const health = conflict ? "conflict" : age <= freshMs(b) ? "live" : indirect ? "indirect" : age <= 20000 ? "late" : "lost";
     const healthText = conflict ? "번호 충돌" : indirect ? "다른 배는 수신" : ageText(age);
     const nav = conflict ? "서로 다른 보드가 같은 번호를 사용 중" : b.timeValid
-      ? `${value(b.sogKn, 2, " kn")} · ${value(b.cogDeg, 1, "°T")}`
+      ? `SOG ${value(b.sogKn, 2, " kn")} · HDG ${value(b.headingDeg, 1, b.headingTrue ? "°T" : "°M")}`
       : "보드 켜짐 · GPS 시각 대기";
     const trail = trails.get(b.boat);
     const trailOn = !!trail?.recording;

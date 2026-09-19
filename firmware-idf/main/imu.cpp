@@ -239,6 +239,10 @@ void writeAK(uint8_t reg, uint8_t val) {
     wr(REG_I2C_SLV0_ADDR, AK_ADDR);
     wr(REG_I2C_SLV0_REG, reg);
     wr(REG_I2C_SLV0_DO, val);
+    // SLV0_EN은 리셋 직후 0이다. 이전 코드는 앞선 읽기가 남긴 EN에 기대서
+    // 첫 reset/mode 쓰기가 실제 AK8963에 가지 않을 수 있었다.
+    wr(REG_I2C_SLV0_CTRL, 0x81);             // enable, one byte
+    delayMs(10);
 }
 
 uint8_t readAK8(uint8_t reg) {
@@ -249,10 +253,10 @@ uint8_t readAK8(uint8_t reg) {
 }
 
 void setMagOpMode(uint8_t mode) {
-    uint8_t r = readAK8(AK_CNTL_1);
-    r &= 0xF0;
-    r |= mode;
-    writeAK(AK_CNTL_1, r);
+    // CNTL1을 거울에서 읽어 BIT를 보존하지 않는다. 그 읽기가 한 주기 늦으면
+    // 14/16-bit가 부팅마다 바뀌고, 같은 자기장이 정확히 약 4배 달라진다.
+    // 이 제품은 모든 모드에서 16-bit를 명시한다.
+    writeAK(AK_CNTL_1, AK_VAL_16_BIT | mode);
     delayMs(10);
     if (mode != AK_PWR_DOWN) enableMagDataRead(AK_HXL, 0x08);
 }
@@ -268,12 +272,6 @@ bool initMagnetometer() {
     // loadAsa 로 다시 읽는다. 칩에 가는 순서를 같게 두려고 읽기만 한다.
     for (int i = 0; i < 3; ++i) (void)readAK8((uint8_t)(AK_ASAX + i));
     delayMs(10);
-    {
-        uint8_t r = readAK8(AK_CNTL_1);       // setMagnetometer16Bit
-        r |= AK_VAL_16_BIT;
-        writeAK(AK_CNTL_1, r);
-    }
-    delayMs(10);
     setMagOpMode(AK_CONT_MODE_8HZ);
     delayMs(10);
     return true;
@@ -282,10 +280,19 @@ bool initMagnetometer() {
 // SailImu::loadAsa — Fuse ROM 모드로 들어가 읽고 연속 8 Hz 로 되돌린다 (mag_sample.h)
 bool loadAsa() {
     uint8_t raw[3] = {0, 0, 0};
-    const bool good = mag::readAsaFuseRom(
-        [](uint8_t m) { setMagOpMode(m); },
-        [](uint8_t r) { return readAK8(r); },
-        AK_PWR_DOWN, AK_FUSE_ROM_ACC_MODE, AK_CONT_MODE_8HZ, AK_ASAX, raw);
+    setMagOpMode(AK_PWR_DOWN);
+    setMagOpMode(AK_FUSE_ROM_ACC_MODE);
+
+    // 세 ASA를 한 번의 연속 읽기로 가져온다. 한 축씩 SLV0 주소를 바꾸던 코드는
+    // 간헐적으로 직전 HXL 거울값을 ASA_Z로 읽어 부팅마다 자력 스케일이 달라졌다.
+    enableMagDataRead(AK_ASAX, 3);
+    delayMs(20);
+    const bool readOk = rdN(REG_EXT_SLV_SENS_DATA_00, raw, sizeof raw);
+
+    setMagOpMode(AK_PWR_DOWN);
+    setMagOpMode(AK_CONT_MODE_8HZ);
+    bool good = readOk;
+    for (uint8_t v : raw) good &= v != 0x00 && v != 0xFF;
     for (int i = 0; i < 3; ++i) {
         sAsaRaw[i] = raw[i];
         sAsa[i] = good ? mag::asaFactor(raw[i]) : 1.0f;
@@ -732,6 +739,12 @@ bool update() {
         // 거울 8바이트를 한 번에 읽고 검사한다. 같은 값도 정상 읽기다.
         uint8_t b[8] = {0};
         const uint8_t got = readMagMirror(b);
+        // HXL부터 8바이트의 마지막은 CNTL1이다. 16-bit/8 Hz가 아니면 그
+        // 표본은 단위부터 틀렸으므로 쓰지 않고 즉시 같은 모드로 복구한다.
+        if (got == 8 && (b[7] & 0x1F) != (AK_VAL_16_BIT | AK_CONT_MODE_8HZ)) {
+            setMagOpMode(AK_CONT_MODE_8HZ);
+            return false;
+        }
         const mag::Check ck = mag::check(got, b, sMagPrev, sMagHavePrev);
         ++sMagCount[(int)ck];
         sMagFreshness.update(ck, millis32());

@@ -779,7 +779,10 @@ static sail::Telemetry buildTelemetry(uint32_t ms) {
     // NAV-PV가 방금 잰 속도이고 칩이 밝힌 오차가 한도 안일 때만 계기에 쓴다.
     // 거절된 RMC 원본은 HLG에만 남고 화면·BLE에서는 값 없음이다.
     t.sogValid = gs.sogShownOk;
-    t.cogValid = gs.sogShownOk && gps::parser().course.isValid() &&
+    // 멈춤으로 판정한 순간의 GPS COG는 방향이 아니다. 책상 위 실측에서도
+    // SOG 0.00인 채 228°→208°→269°→304°로 돌았다. 속도 0은 유지하되
+    // COG만 값 없음으로 보내 HDG와 비교되는 일을 막는다.
+    t.cogValid = gs.sogShownOk && gs.sogShownKn > 0.0f && gps::parser().course.isValid() &&
                  gps::parser().course.age() < gps::kStaleMs;
     if (gs.sogShownOk) {
         t.sogKn  = gs.sogShownKn;

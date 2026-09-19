@@ -30,6 +30,9 @@ check(!!v3 && v3.radioVersion === 3 && v3.boat === 7 && v3.lat === 37.5512345 &&
       "v3 위치와 무선 버전·배 번호 디코드");
 check(v3.sogKn === 1.23 && v3.cogDeg === 359.9 && v3.headingDeg === 165.4 && v3.headingTrue && v3.heelDeg === -12 && v3.pitchDeg === 9,
       "v3 항해값·HDG T·자세 부호 디코드");
+const stopped = packet(); put16(stopped, 10, 0); put16(stopped, 12, 1461);
+check(decodeFleet(stopped)?.sogKn === 0 && decodeFleet(stopped)?.cogDeg === null,
+      "정지 SOG 0.00에서 GPS COG는 방향인 척하지 않음");
 check(v3.notifySeq === 10 && v3.frame === 42 && v3.rssi === -60 && v3.snr === 9,
       "v3 BLE 순번·프레임·신호 품질 디코드");
 check(decodeFleet(packet(2), 1000)?.headingDeg === null, "v2 32바이트도 읽되 HDG는 없음");
