@@ -813,11 +813,11 @@ static void updateLoraLive(uint32_t now) {
         v.heelDeg = currentHeelDeg();
         v.pitchDeg = currentPitchDeg();
     }
-    // HDG M은 GPS 시각·위치와 무관한 선체 자세다. PPS 전 확인 신호에도 실어
-    // 실내 함대 시험과 GPS 일시 손실 때 코치가 뱃머리 방향을 계속 볼 수 있게 한다.
+    // 지도와 GPS COG는 진북(T) 기준이다. LoRa v3에만 편각을 더한 HDG T를 싣는다.
+    // OLED·워치·HLG의 기본 HDG M은 그대로 두며, PPS 전 확인 신호에도 방향은 보낸다.
     const float heading = boatHeadingDeg();
     v.headingValid = std::isfinite(heading) && heading >= 0.0f;
-    if (v.headingValid) v.headingDeg = heading;
+    if (v.headingValid) v.headingDeg = hdg::wrap360(heading + gHdgDeclDeg);
     v.recording = hlog::recording();
     float pct = gBattPct;
     if (pct < 0.0f) pct = 0.0f;

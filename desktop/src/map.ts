@@ -106,6 +106,7 @@ export interface FleetPoint {
   sogKn: number | null;
   cogDeg: number | null;
   headingDeg: number | null;
+  headingTrue: boolean;
   select: "a" | "b" | null;
   stale: boolean;
 }
@@ -255,6 +256,9 @@ export class TrackMap {
       const ms = e.features?.[0]?.properties?.ms;
       if (typeof ms === "number") this.onPick?.(ms);
     });
+    // HTML 표식은 화면 기준으로 그려진다. 지도를 돌리면 진북 방위에서 현재
+    // 지도 bearing을 빼야 같은 지리 방향을 계속 가리킨다.
+    m.on("rotate", () => this.paintFleetHeadings());
     this.paintFleet();
   }
 
@@ -554,20 +558,34 @@ export class TrackMap {
       }
       marker.setLngLat([p.lon, p.lat]);
       const el = marker.getElement();
-      el.className = `fleet-marker${p.select ? ` pick-${p.select}` : ""}${p.stale ? " stale" : ""}${p.headingDeg === null ? " no-heading" : ""}`;
-      const hull = el.querySelector<HTMLElement>(".fleet-hull");
-      if (hull && p.headingDeg !== null) {
-        // SVG의 뾰족한 끝은 0°(지도 위쪽)다. HDG M만큼 시계 방향으로 돌린다.
-        // COG로 돌리면 요트의 리웨이가 지도에서 사라지므로 쓰지 않는다.
-        hull.style.transform = `rotate(${p.headingDeg}deg)`;
-      }
+      const canPoint = p.headingDeg !== null && p.headingTrue;
+      el.className = `fleet-marker${p.select ? ` pick-${p.select}` : ""}${p.stale ? " stale" : ""}${canPoint ? "" : " no-heading"}`;
+      if (canPoint) el.dataset.mapHeading = String(p.headingDeg);
+      else delete el.dataset.mapHeading;
       const data = el.querySelector<HTMLElement>(".fleet-marker-data");
       if (data) {
         const sog = p.sogKn === null ? "SOG —" : `${p.sogKn.toFixed(2)} kn`;
-        const hdg = p.headingDeg === null ? "HDG —" : `HDG ${Math.round(p.headingDeg).toString().padStart(3, "0")}°M`;
+        const hdg = p.headingDeg === null ? "HDG —" : `HDG ${Math.round(p.headingDeg).toString().padStart(3, "0")}°${p.headingTrue ? "T" : "M"}`;
         data.textContent = `${sog}  ${hdg}`;
       }
-      el.title = `${p.boat}번 배 · ${data?.textContent ?? ""} · 선수 방향 HDG(M)`;
+      el.title = `${p.boat}번 배 · ${data?.textContent ?? ""}${canPoint ? " · 선수 방향 HDG(T)" : ""}`;
+    }
+    this.paintFleetHeadings();
+  }
+
+  private paintFleetHeadings() {
+    if (!this.map) return;
+    const mapBearing = this.map.getBearing();
+    for (const marker of this.fleetMarkers.values()) {
+      const el = marker.getElement();
+      const raw = el.dataset.mapHeading;
+      const hull = el.querySelector<HTMLElement>(".fleet-hull");
+      if (!hull || raw === undefined) continue;
+      const headingTrue = Number(raw);
+      if (!Number.isFinite(headingTrue)) continue;
+      // SVG의 뾰족한 끝은 화면 위쪽 0°다. HDG T에서 지도 회전을 빼면
+      // 북쪽 고정 지도와 회전한 지도 모두 같은 실제 선수 방향을 가리킨다.
+      hull.style.transform = `rotate(${headingTrue - mapBearing}deg)`;
     }
   }
 

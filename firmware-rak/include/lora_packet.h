@@ -22,7 +22,7 @@ constexpr uint8_t  kBenchRateHz      = 5;
 constexpr uint32_t kBenchPeriodUs    = kFrameUs / kBenchRateHz;
 constexpr uint32_t kPpsHoldoverMs    = 20u * 60u * 1000u;
 constexpr uint32_t kHeardFreshMs     = 3000;
-constexpr uint8_t  kWireVersion      = 2;
+constexpr uint8_t  kWireVersion      = 3;
 constexpr uint8_t  kBoatMask         = 0x3F;
 constexpr uint8_t  kVersionShift     = 6;
 
@@ -47,7 +47,7 @@ struct Live {
     float cogDeg = 0.0f;
     float heelDeg = 0.0f;
     float pitchDeg = 0.0f;
-    float headingDeg = 0.0f; // magnetic north (M), independent of GPS PPS
+    float headingDeg = 0.0f; // v3: true north (T), independent of GPS PPS
     uint8_t battPct = 0;
     uint32_t heard = 0;
     uint16_t tie = 0;
@@ -65,7 +65,7 @@ struct Decoded {
     uint8_t flags = 0;
     uint32_t heard = 0;
     uint16_t tie = 0;
-    uint16_t heading = kHdgInvalid; // 0.1 deg magnetic
+    uint16_t heading = kHdgInvalid; // v3: 0.1 deg true; v2 legacy: magnetic
 };
 
 inline void put16(uint8_t* p, uint16_t v) {

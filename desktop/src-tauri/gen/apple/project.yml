@@ -61,7 +61,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: 0.1.0
         # 기기에 옛 앱이 남아 다시 실행되는 일을 막기 위해 실제 설치 빌드마다 올린다.
-        CFBundleVersion: "0.1.0.2026091905"
+        CFBundleVersion: "0.1.0.2026091906"
         # 블루투스를 쓰려면 왜 쓰는지 적어야 한다. 안 적으면 iOS 가
         # 앱을 그냥 죽인다. 맥용 Info.plist 에 있던 문장을 옮겼다.
         NSBluetoothAlwaysUsageDescription:

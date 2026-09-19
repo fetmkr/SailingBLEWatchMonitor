@@ -790,7 +790,8 @@ void pump() {
         printf("  COG ");
         if (d.cog == kCogInvalid) printf("---"); else printf("%.1f", d.cog / 10.0f);
         printf("  HDG ");
-        if (d.heading == kHdgInvalid) printf("---"); else printf("%.1fM", d.heading / 10.0f);
+        if (d.heading == kHdgInvalid) printf("---"); else printf("%.1f%c", d.heading / 10.0f,
+                                                          d.wireVersion >= 3 ? 'T' : 'M');
         printf("  fix %u time %u rec %u tie %04X\n", !!(d.flags & kFlagGpsFix),
                !!(d.flags & kFlagTime), !!(d.flags & kFlagRecording), d.tie);
     }
@@ -907,7 +908,8 @@ void reportPeers() {
                p.packet.boat, (unsigned)(now - p.atMs), p.rssi, p.snr, p.packet.tie);
         if (p.packet.sog != kSogInvalid) printf("  SOG %.2f", p.packet.sog / 100.0f);
         if (p.packet.cog != kCogInvalid) printf("  COG %.1f", p.packet.cog / 10.0f);
-        if (p.packet.heading != kHdgInvalid) printf("  HDG %.1fM", p.packet.heading / 10.0f);
+        if (p.packet.heading != kHdgInvalid) printf("  HDG %.1f%c", p.packet.heading / 10.0f,
+                                                    p.packet.wireVersion >= 3 ? 'T' : 'M');
         printf("\n");
     }
     if (!n) printf("  없음\n");

@@ -16,7 +16,7 @@ export const CONTROL_UUID   = "b0a70003-0000-4000-8000-000000000001";
 export const FLEET_UUID     = "b0a70004-0000-4000-8000-000000000001";
 export const FLEET_VERSION = 3;
 export const FLEET_LENGTH = 34;
-export const LORA_WIRE_VERSION = 2;
+export const LORA_WIRE_VERSION = 3;
 
 /** 광고 이름 앞에 붙는 것. 이걸로 우리 보드를 골라낸다. */
 export const NAME_PREFIX = "SAIL-";

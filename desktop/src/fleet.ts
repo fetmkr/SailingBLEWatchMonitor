@@ -262,7 +262,7 @@ function markerPoints(now: number): FleetPoint[] {
   return [...tracker.boats.values()].filter((b) => b.lat !== null && b.lon !== null &&
     now - b.receivedAt <= MAP_KEEP_MS && !tracker.conflicted(b.boat, now)).map((b) => ({
     boat: b.boat, lat: b.lat!, lon: b.lon!, sogKn: b.sogKn,
-    cogDeg: b.cogDeg, headingDeg: b.headingDeg,
+    cogDeg: b.cogDeg, headingDeg: b.headingDeg, headingTrue: b.headingTrue,
     select: selected[0] === b.boat ? "a" : selected[1] === b.boat ? "b" : null,
     stale: now - b.receivedAt > 3000,
   }));
@@ -336,7 +336,7 @@ function boatCard(b: FleetBoat, letter: "A" | "B" | null) {
     <div class="fleet-card-head"><span>${letter ?? b.boat}</span><b>${b.boat}번 배</b><small>${ageText(age)} · ${b.rssi} dBm · SNR ${b.snr}${reception}</small></div>
     <div class="fleet-metrics">
       ${metric("SOG", value(b.sogKn, 2, " kn"), b.sogKn === null ? navMissingReason(b) : "")}
-      ${metric("HDG", value(b.headingDeg, 1, "°M"), b.headingDeg === null ? "IMU·자력계 값 없음" : "자북")}
+      ${metric("HDG", value(b.headingDeg, 1, b.headingTrue ? "°T" : "°M"), b.headingDeg === null ? "IMU·자력계 값 없음" : b.headingTrue ? "진북" : "자북")}
       ${metric("COG", value(b.cogDeg, 1, "°T"), b.cogDeg === null ? navMissingReason(b) : "진북")}
       ${metric("HEEL", value(b.heelDeg, 0, "°"))}
       ${metric("PITCH", value(b.pitchDeg, 0, "°"))}
@@ -419,11 +419,14 @@ function renderCharts(now: number) {
   const boats = chosen.slice(0, 2);
   $("fleetChartScope").textContent = `${boats.map((b) => `B${b.boat}`).join(" · ")} · 최근 5분`;
   const samples = boats.flatMap((b) => histories.get(b.boat) ?? []);
+  const headingRefs = new Set(boats.map((b) => b.headingTrue ? "T" : "M"));
+  const headingRef = headingRefs.size === 1 ? [...headingRefs][0] : "T/M";
+  const headingSubtitle = headingRef === "T" ? "0–360° · 진북(T)" : headingRef === "M" ? "0–360° · 자북(M)" : "0–360° · T/M 혼합";
   const sogMax = Math.max(1, Math.ceil(Math.max(0, ...samples.map((s) => s.sogKn ?? 0)) * 1.2 * 2) / 2);
   const attitudeMax = Math.max(10, Math.ceil(Math.max(0, ...samples.flatMap((s) => [Math.abs(s.heelDeg ?? 0), Math.abs(s.pitchDeg ?? 0)])) / 5) * 5);
   body.innerHTML = [
     chart("SOG", `0–${sogMax.toFixed(1)} kn`, boats, now, [0, sogMax], [{ label: "SOG", pick: (s) => s.sogKn, digits: 2, unit: " kn" }]),
-    chart("HDG", "0–360° · 자북(M)", boats, now, [0, 360], [{ label: "HDG", pick: (s) => s.headingDeg, unit: "°M", circular: true }]),
+    chart("HDG", headingSubtitle, boats, now, [0, 360], [{ label: "HDG", pick: (s) => s.headingDeg, unit: `°${headingRef}`, circular: true }]),
     chart("COG", "0–360° · 진북(T)", boats, now, [0, 360], [{ label: "COG", pick: (s) => s.cogDeg, unit: "°T", circular: true }]),
     chart("HEEL", `−${attitudeMax}–+${attitudeMax}°`, boats, now, [-attitudeMax, attitudeMax], [{ label: "HEEL", pick: (s) => s.heelDeg, unit: "°" }]),
     chart("PITCH", `−${attitudeMax}–+${attitudeMax}°`, boats, now, [-attitudeMax, attitudeMax], [{ label: "PITCH", pick: (s) => s.pitchDeg, unit: "°" }]),
@@ -695,7 +698,7 @@ function seedBrowserPreview() {
     [18, 37.4532, 126.5514, 6.12, 48, 16, 3, 67],
   ] as const;
   for (const [boat, lat, lon, sogKn, cogDeg, heelDeg, pitchDeg, batteryPct] of seed) {
-    const sample: FleetBoat = { radioVersion: 2, boat, lat, lon, sogKn, cogDeg, headingDeg: (cogDeg + 352) % 360, heelDeg, pitchDeg, batteryPct,
+    const sample: FleetBoat = { radioVersion: 3, boat, lat, lon, sogKn, cogDeg, headingDeg: (cogDeg + 352) % 360, headingTrue: true, heelDeg, pitchDeg, batteryPct,
       gpsFix: true, recording: true, timeValid: true, changed: false, heard: 0, tie: boat,
       frame: 1042, rssi: -62 - boat, snr: 9, notifySeq: boat, receivedAt: now };
     rememberSample(sample);

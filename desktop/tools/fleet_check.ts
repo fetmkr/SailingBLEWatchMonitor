@@ -11,9 +11,9 @@ function put32(a: number[], at: number, v: number) {
   a[at] = v & 255; a[at + 1] = (v >>> 8) & 255; a[at + 2] = (v >>> 16) & 255; a[at + 3] = (v >>> 24) & 255;
 }
 
-function packet(version = 3, seq = 10) {
+function packet(version = 3, seq = 10, radioVersion = version === 3 ? 3 : 1) {
   const a = Array(version === 3 ? 34 : version === 2 ? 32 : 30).fill(0);
-  a[0] = version; a[1] = (version === 3 ? 0x80 : 0x40) | 7;
+  a[0] = version; a[1] = (radioVersion << 6) | 7;
   put32(a, 2, 375512345); put32(a, 6, 1269887654);
   put16(a, 10, 123); put16(a, 12, 3599);
   a[14] = 0xf4; a[15] = 9; a[16] = 0xcf;
@@ -26,10 +26,10 @@ function packet(version = 3, seq = 10) {
 }
 
 const v3 = decodeFleet(packet(), 1000)!;
-check(!!v3 && v3.radioVersion === 2 && v3.boat === 7 && v3.lat === 37.5512345 && v3.lon === 126.9887654,
+check(!!v3 && v3.radioVersion === 3 && v3.boat === 7 && v3.lat === 37.5512345 && v3.lon === 126.9887654,
       "v3 위치와 무선 버전·배 번호 디코드");
-check(v3.sogKn === 1.23 && v3.cogDeg === 359.9 && v3.headingDeg === 165.4 && v3.heelDeg === -12 && v3.pitchDeg === 9,
-      "v3 항해값·HDG M·자세 부호 디코드");
+check(v3.sogKn === 1.23 && v3.cogDeg === 359.9 && v3.headingDeg === 165.4 && v3.headingTrue && v3.heelDeg === -12 && v3.pitchDeg === 9,
+      "v3 항해값·HDG T·자세 부호 디코드");
 check(v3.notifySeq === 10 && v3.frame === 42 && v3.rssi === -60 && v3.snr === 9,
       "v3 BLE 순번·프레임·신호 품질 디코드");
 check(decodeFleet(packet(2), 1000)?.headingDeg === null, "v2 32바이트도 읽되 HDG는 없음");
@@ -38,9 +38,11 @@ check(decodeFleet(packet(3).slice(0, 32)) === null, "v3를 32바이트로 잘라
 const badBoat = packet(); badBoat[1] = 0;
 check(decodeFleet(badBoat) === null, "송신 배 번호 0은 거절");
 const legacyRadio = packet(); legacyRadio[1] = 7;
-check(decodeFleet(legacyRadio)?.radioVersion === 0, "교체 기간에는 무버전 LoRa 패킷도 읽음");
-const futureRadio = packet(); futureRadio[1] = 0xc0 | 7;
-check(decodeFleet(futureRadio) === null, "모르는 미래 LoRa 버전은 거절");
+check(decodeFleet(legacyRadio)?.radioVersion === 0 && !decodeFleet(legacyRadio)?.headingTrue,
+      "교체 기간에는 무버전 LoRa 패킷도 자북으로 읽음");
+const magneticV2 = packet(3, 10, 2);
+check(decodeFleet(magneticV2)?.radioVersion === 2 && !decodeFleet(magneticV2)?.headingTrue,
+      "교체 기간에는 HDG가 자북이던 LoRa v2도 구분해 읽음");
 const halfPosition = packet(); put32(halfPosition, 2, 0x80000000);
 check(decodeFleet(halfPosition) === null, "위·경도 중 한쪽만 없는 손상 패킷은 거절");
 

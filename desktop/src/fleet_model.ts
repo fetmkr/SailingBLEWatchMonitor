@@ -11,6 +11,7 @@ export interface FleetBoat {
   sogKn: number | null;
   cogDeg: number | null;
   headingDeg: number | null;
+  headingTrue: boolean;
   heelDeg: number | null;
   pitchDeg: number | null;
   batteryPct: number;
@@ -35,7 +36,7 @@ export const MAP_KEEP_MS = 20000;
 
 export function freshMs(b: FleetBoat) { return b.timeValid ? 3000 : 12000; }
 
-/** PROTOCOL.md §10.13. v1/v2도 받아 앱과 수신 보드 교체 중 화면이 비지 않게 한다. */
+/** PROTOCOL.md §10.13. 예전 봉투와 무선 형식도 받아 교체 중 화면이 비지 않게 한다. */
 export function decodeFleet(bytes: number[], now = Date.now()): FleetBoat | null {
   if (bytes.length !== 30 && bytes.length !== 32 && bytes.length !== FLEET_LENGTH) return null;
   const a = Uint8Array.from(bytes);
@@ -47,7 +48,7 @@ export function decodeFleet(bytes: number[], now = Date.now()): FleetBoat | null
   if (envelopeVersion !== 1 && envelopeVersion !== 2 && envelopeVersion !== FLEET_VERSION) return null;
   const radioVersion = a[1] >> 6;
   const boat = a[1] & 0x3f;
-  // LoRa v2는 끝의 HDG 두 바이트가 필수라 34바이트 BLE 봉투에서만 유효하다.
+  // LoRa v2/v3는 끝의 HDG 두 바이트가 필수라 34바이트 BLE 봉투에서만 유효하다.
   if (radioVersion > LORA_WIRE_VERSION || (radioVersion >= 2 && envelopeVersion < 3) || boat < 1 || boat > 32) return null;
   const latRaw = d.getInt32(2, true);
   const lonRaw = d.getInt32(6, true);
@@ -71,6 +72,7 @@ export function decodeFleet(bytes: number[], now = Date.now()): FleetBoat | null
     sogKn: sog === 0xffff ? null : sog / 100,
     cogDeg: cog === 0xffff ? null : cog / 10,
     headingDeg: heading === 0xffff ? null : heading / 10,
+    headingTrue: radioVersion >= 3,
     heelDeg: heel === -128 ? null : heel,
     pitchDeg: pitch === -128 ? null : pitch,
     batteryPct: Math.round(((flags >> 4) & 0x0f) * 100 / 15),

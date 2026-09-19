@@ -1030,7 +1030,7 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .fleet-compare-head { display: flex; justify-content: space-between; margin-bottom: var(--sp3); }
 .fleet-warn { color: #f59e0b; margin-top: var(--sp3); font-size: var(--fs-sm); }
 
-/* MapLibre HTML marker. 길쭉한 선체의 뾰족한 끝이 HDG(M), 중심 숫자가 배 번호다. */
+/* MapLibre HTML marker. 길쭉한 선체의 뾰족한 끝이 지도 기준 HDG(T), 중심 숫자가 배 번호다. */
 .fleet-marker {
   width: 56px; height: 56px; padding: 0; border: 0; border-radius: 0;
   background: transparent; color: #fff; box-shadow: none; font-weight: 800;
