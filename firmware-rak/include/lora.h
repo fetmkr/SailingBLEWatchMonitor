@@ -116,6 +116,11 @@ void reportPeers();
 bool setLiveEnabled(bool enabled);
 bool liveEnabled();
 
+/// 실내·근거리 무선 경로 시험용 송신률. 1 Hz가 제품 기본이며 5 Hz는 한 송신기만
+/// 켜는 60초 시험이다. 5 Hz는 재부팅 뒤 남지 않고 자동으로 1 Hz로 돌아간다.
+bool setLiveRateHz(uint8_t hz);
+uint8_t liveRateHz();
+
 /// 최근 GPS PPS가 있어 충돌 없는 자기 슬롯 송신이 가능한가.
 bool ppsReady();
 

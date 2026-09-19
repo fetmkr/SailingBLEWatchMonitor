@@ -110,6 +110,18 @@ export interface FleetPoint {
   stale: boolean;
 }
 
+/** 함대 라이브에서 사용자가 녹화를 켠 뒤 받은 위치. gapBefore면 직전 점까지 LoRa 공백이었다. */
+export interface FleetTrailPoint {
+  lat: number;
+  lon: number;
+  gapBefore: boolean;
+}
+
+export interface FleetTrail {
+  boat: number;
+  points: FleetTrailPoint[];
+}
+
 interface Base {
   id: string;
   label: string;
@@ -185,6 +197,7 @@ export class TrackMap {
   private ready = false;
   private pending: (() => void)[] = [];
   private fleet: FleetPoint[] = [];
+  private fleetTrails: FleetTrail[] = [];
   private fleetMarkers = new Map<number, Marker>();
 
   /** 지도 위에서 어느 시각을 가리키고 있나. 타임라인이 따라오게 하려고 알린다. */
@@ -327,6 +340,7 @@ export class TrackMap {
       m.addSource("track", { type: "geojson", data: EMPTY_LINE, lineMetrics: true });
       m.addSource("hit",   { type: "geojson", data: EMPTY_LINE });
       m.addSource("boat",  { type: "geojson", data: EMPTY_LINE });
+      m.addSource("fleetTrails", { type: "geojson", data: EMPTY_LINE });
     }
     // 밑에 굵고 어두운 줄을 하나 깔면 어떤 바탕 위에서도 항적이 보인다
     m.addLayer({
@@ -351,7 +365,27 @@ export class TrackMap {
         "circle-stroke-color": "#0f172a", "circle-stroke-width": 3,
       },
     });
+    // 함대 실시간 궤적. 정상 구간은 배 색 실선, 패킷 공백을 건넌 구간은
+    // 위치를 지어내지 않고 두 실측점을 주황 점선으로 곧게 잇는다.
+    m.addLayer({
+      id: "fleetTrailHalo", type: "line", source: "fleetTrails",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#000", "line-opacity": 0.48, "line-width": 7 },
+    });
+    m.addLayer({
+      id: "fleetTrailNormal", type: "line", source: "fleetTrails",
+      filter: ["==", ["get", "gap"], false],
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": ["get", "color"], "line-width": 4 },
+    });
+    m.addLayer({
+      id: "fleetTrailGap", type: "line", source: "fleetTrails",
+      filter: ["==", ["get", "gap"], true],
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#f59e0b", "line-width": 4, "line-dasharray": [1.5, 1.5] },
+    });
     this.paintTrack();
+    this.paintFleetTrails();
   }
 
   setBase(id: string) {
@@ -474,6 +508,30 @@ export class TrackMap {
   setFleet(points: FleetPoint[]) {
     this.fleet = points;
     this.paintFleet();
+  }
+
+  setFleetTrails(trails: FleetTrail[]) {
+    this.fleetTrails = trails;
+    this.paintFleetTrails();
+  }
+
+  private paintFleetTrails() {
+    const m = this.map;
+    if (!m || !m.getSource("fleetTrails")) return;
+    const colors = ["#38bdf8", "#fb923c", "#34d399", "#c084fc", "#f472b6", "#facc15"];
+    const features: any[] = [];
+    for (const trail of this.fleetTrails) {
+      const color = colors[(trail.boat - 1) % colors.length];
+      for (let i = 1; i < trail.points.length; i++) {
+        const a = trail.points[i - 1], b = trail.points[i];
+        features.push({
+          type: "Feature",
+          geometry: { type: "LineString", coordinates: [[a.lon, a.lat], [b.lon, b.lat]] },
+          properties: { boat: trail.boat, color, gap: b.gapBefore },
+        });
+      }
+    }
+    (m.getSource("fleetTrails") as any).setData({ type: "FeatureCollection", features });
   }
 
   private paintFleet() {

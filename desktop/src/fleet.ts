@@ -2,7 +2,7 @@
 // 화면 규칙은 단순하다: 0척은 전체, 1척은 상세, 2척은 비교. 세 번째를 고르면 B가 바뀐다.
 
 import * as ble from "./ble";
-import { TrackMap, type FleetPoint } from "./map";
+import { TrackMap, type FleetPoint, type FleetTrail, type FleetTrailPoint } from "./map";
 import { decodeFleet, FleetTracker, FleetTransportCounter, freshMs, MAP_KEEP_MS, type FleetBoat } from "./fleet_model";
 
 const $ = (id: string) => document.getElementById(id)!;
@@ -65,7 +65,8 @@ let receiverNotifyFailed = 0;
 const RECEIVER_KEY = "fleetReceiver.v1";
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const HISTORY_MS = 5 * 60 * 1000;
-const HISTORY_MAX = 420;
+const HISTORY_MAX = 1800; // 5 Hz 시험에서도 최근 5분을 유지한다.
+const TRAIL_MAX_POINTS = 30000;
 
 interface FleetSample {
   at: number;
@@ -79,6 +80,21 @@ interface FleetSample {
 }
 
 const histories = new Map<number, FleetSample[]>();
+
+interface TrailState {
+  recording: boolean;
+  points: FleetTrailPoint[];
+  lastPacketAt: number | null;
+  expectedMs: number;
+  cadenceSamples: number;
+  lastFrame: number | null;
+  tie: number | null;
+  pendingGap: boolean;
+}
+
+const trails = new Map<number, TrailState>();
+let renderTimer: number | null = null;
+let lastRenderAt = 0;
 
 interface SavedReceiver { address: string; name: string }
 
@@ -101,6 +117,7 @@ function clearReconnectTimer() {
 function resetLiveData() {
   tracker.reset();
   histories.clear();
+  trails.clear();
   selected = [];
   firstPosition = true;
   transport.reset();
@@ -109,6 +126,86 @@ function resetLiveData() {
   receiverNotifyFailed = 0;
   if (firstFitTimer !== null) window.clearTimeout(firstFitTimer);
   firstFitTimer = null;
+}
+
+// BLE 이벤트에서는 자료만 짧게 받아 둔다. 지도·목록·6개 SVG를 매 알림마다
+// 다시 만들면 iPad WebView가 다음 알림을 늦게 받아 순번 공백이 커질 수 있다.
+function scheduleRender() {
+  if (renderTimer !== null) return;
+  const delay = Math.max(0, 250 - (performance.now() - lastRenderAt));
+  renderTimer = window.setTimeout(() => {
+    renderTimer = null;
+    requestAnimationFrame(() => {
+      lastRenderAt = performance.now();
+      render();
+    });
+  }, delay);
+}
+
+function newTrail(): TrailState {
+  return { recording: true, points: [], lastPacketAt: null, expectedMs: 1000,
+    cadenceSamples: 0, lastFrame: null, tie: null, pendingGap: false };
+}
+
+function observeTrailPacket(b: FleetBoat) {
+  const s = trails.get(b.boat);
+  if (!s?.recording) return;
+
+  let gap = false;
+  if (s.tie !== null && s.tie !== b.tie) gap = true;
+  if (s.lastFrame !== null && b.timeValid && b.frame !== 0) {
+    const step = (b.frame - s.lastFrame) >>> 0;
+    if (step > 1 && step <= 120) gap = true;
+  }
+  if (s.lastPacketAt !== null) {
+    const delta = b.receivedAt - s.lastPacketAt;
+    if (delta > Math.max(350, s.expectedMs * 1.7)) {
+      gap = true;
+    } else if (delta >= 80 && delta <= 1500) {
+      s.expectedMs = s.cadenceSamples === 0 ? delta : s.expectedMs * 0.7 + delta * 0.3;
+      s.cadenceSamples++;
+    }
+  }
+  if (gap) s.pendingGap = true;
+  s.lastPacketAt = b.receivedAt;
+  s.lastFrame = b.timeValid && b.frame !== 0 ? b.frame : null;
+  s.tie = b.tie;
+
+  if (b.lat === null || b.lon === null) return;
+  const previous = s.points[s.points.length - 1];
+  if (previous && previous.lat === b.lat && previous.lon === b.lon) return;
+  s.points.push({ lat: b.lat, lon: b.lon, gapBefore: !!previous && s.pendingGap });
+  s.pendingGap = false;
+  if (s.points.length > TRAIL_MAX_POINTS) {
+    s.points.splice(0, s.points.length - TRAIL_MAX_POINTS);
+    if (s.points.length) s.points[0].gapBefore = false;
+  }
+}
+
+function toggleTrail(boat: number) {
+  const old = trails.get(boat);
+  if (old?.recording) {
+    old.recording = false;
+  } else {
+    // 다시 누르면 앞 시험과 섞지 않고 새 궤적을 시작한다.
+    const fresh = newTrail();
+    const b = tracker.boats.get(boat);
+    if (b) observeTrailPacketInto(fresh, b);
+    trails.set(boat, fresh);
+  }
+  render();
+}
+
+function observeTrailPacketInto(s: TrailState, b: FleetBoat) {
+  s.lastPacketAt = b.receivedAt;
+  s.lastFrame = b.timeValid && b.frame !== 0 ? b.frame : null;
+  s.tie = b.tie;
+  if (b.lat !== null && b.lon !== null) s.points.push({ lat: b.lat, lon: b.lon, gapBefore: false });
+}
+
+function mapTrails(): FleetTrail[] {
+  return [...trails.entries()].filter(([, s]) => s.points.length > 0)
+    .map(([boat, s]) => ({ boat, points: s.points }));
 }
 
 function readReceiverCounters(line: string | null) {
@@ -134,7 +231,7 @@ function setState(text: string, kind: "" | "good" | "bad" = "") {
 }
 
 function mapUp() {
-  if (map) { map.resize(); return map; }
+  if (map) return map;
   map = new TrackMap($("fleetMap"));
   map.onFleetPick = choose;
   map.start();
@@ -200,14 +297,24 @@ function renderList(now: number) {
     const nav = conflict ? "서로 다른 보드가 같은 번호를 사용 중" : b.timeValid
       ? `${value(b.sogKn, 2, " kn")} · ${value(b.cogDeg, 1, "°T")}`
       : "보드 켜짐 · GPS 시각 대기";
-    return `<button class="fleet-boat ${conflict ? "conflict" : ""} ${pick ? `pick-${pick}` : ""}" data-boat="${b.boat}">
-      <span class="fleet-id">${pick ? pick.toUpperCase() : b.boat}</span>
-      <span class="fleet-main"><b>${b.boat}번 배</b><small>${nav}</small></span>
-      <span class="fleet-health ${health}"><i></i>${healthText}</span>
-    </button>`;
+    const trail = trails.get(b.boat);
+    const trailOn = !!trail?.recording;
+    return `<div class="fleet-boat-row">
+      <button class="fleet-boat ${conflict ? "conflict" : ""} ${pick ? `pick-${pick}` : ""}" data-boat="${b.boat}">
+        <span class="fleet-id">${pick ? pick.toUpperCase() : b.boat}</span>
+        <span class="fleet-main"><b>${b.boat}번 배</b><small>${nav}</small></span>
+        <span class="fleet-health ${health}"><i></i>${healthText}</span>
+      </button>
+      <button class="fleet-trail-toggle${trailOn ? " on" : ""}" data-trail="${b.boat}" aria-pressed="${trailOn}">
+        ${trailOn ? "● 녹화" : trail?.points.length ? "새로" : "궤적"}
+      </button>
+    </div>`;
   }).join("");
   box.querySelectorAll<HTMLElement>("[data-boat]").forEach((el) => {
     el.onclick = () => choose(Number(el.dataset.boat));
+  });
+  box.querySelectorAll<HTMLElement>("[data-trail]").forEach((el) => {
+    el.onclick = () => toggleTrail(Number(el.dataset.trail));
   });
 }
 
@@ -258,7 +365,9 @@ type NumberAt = (s: FleetSample) => number | null;
 
 function graphPath(samples: FleetSample[], pick: NumberAt, min: number, max: number, now: number, circular = false) {
   let out = "", drawing = false, previous: number | null = null, points = 0;
-  for (const sample of samples) {
+  const step = Math.max(1, Math.floor(samples.length / 600));
+  for (let i = 0; i < samples.length; i += step) {
+    const sample = samples[i];
     const v = pick(sample);
     if (v === null || !Number.isFinite(v) || sample.at < now - HISTORY_MS) {
       drawing = false; previous = null; continue;
@@ -362,7 +471,10 @@ function render() {
   renderCharts(now);
   const points = markerPoints(now);
   if (document.body.dataset.mode === "fleet" || map) {
-    mapUp().setFleet(points);
+    const liveMap = mapUp();
+    liveMap.setFleet(points);
+    liveMap.setFleetTrails(mapTrails());
+    $("fleetTrailLegend").toggleAttribute("hidden", trails.size === 0);
     if (firstPosition && points.length && firstFitTimer === null) {
       // 첫 배 한 척에 즉시 화면을 끌려가지 않고 2초 동안 같이 들어오는 배를 모은다.
       firstFitTimer = window.setTimeout(() => {
@@ -383,10 +495,10 @@ function render() {
     return;
   }
   const transportText = !transport.ready
-    ? transport.legacySeen ? "구형 수신 보드 · BLE 누락 측정 불가" : "BLE 알림 순번 대기"
-    : `BLE 전달 ${transport.percent.toFixed(1)}% · ${transport.missed}개 누락`;
+    ? transport.legacySeen ? "구형 수신 보드 · BLE 누락 측정 불가" : "보드→앱 BLE 순번 대기"
+    : `보드→앱 BLE ${transport.percent.toFixed(1)}% · 앱 미수신 ${transport.missed}개`;
   const boardDrops = receiverRingDropped + receiverAppDropped + receiverNotifyFailed;
-  $("fleetTransport").textContent = `${transportText} · 보드 버림 ${receiverRingDropped + receiverAppDropped} · 알림 실패 ${receiverNotifyFailed}`;
+  $("fleetTransport").textContent = `${transportText} · 보드 내부 버림 ${receiverRingDropped + receiverAppDropped} · BLE 송신 실패 ${receiverNotifyFailed}`;
   $("fleetTransport").className = transport.missed || boardDrops ? "bad" : "dim";
 }
 
@@ -461,8 +573,9 @@ async function connectBoard(board: ble.Board, automatic = false) {
       transport.ingest(b.notifySeq);
       rememberSample(b);
       tracker.ingest(b);
+      observeTrailPacket(b);
       if (tracker.conflicted(b.boat)) selected = selected.filter((n) => n !== b.boat);
-      render();
+      scheduleRender();
     });
     // 수신 보드는 사람이 미리 0번으로 정한 보드만 받는다. 앱이 여기서 번호를
     // 몰래 0으로 바꾸면 선수가 쓰던 송신 보드를 잘못 골랐을 때 함대에서 사라진다.
@@ -588,6 +701,26 @@ function seedBrowserPreview() {
     rememberSample(sample);
     tracker.ingest(sample);
   }
+  // 브라우저 미리보기에서도 녹화·5 Hz 그래프·공백 점선을 실제 흐름으로 확인한다.
+  let tick = 0;
+  window.setInterval(() => {
+    tick++;
+    const at = Date.now();
+    for (const old of [...tracker.boats.values()]) {
+      if (old.boat === 7 && tick % 40 >= 22 && tick % 40 <= 25) continue; // 수신 공백 예시
+      const meters = (old.sogKn ?? 0) * 0.514444 * 0.2;
+      const rad = (old.cogDeg ?? 0) * Math.PI / 180;
+      const lat = old.lat === null ? null : old.lat + Math.cos(rad) * meters / 111320;
+      const lon = old.lon === null || old.lat === null ? null : old.lon + Math.sin(rad) * meters /
+        (111320 * Math.cos(old.lat * Math.PI / 180));
+      const sample: FleetBoat = { ...old, lat, lon, frame: 1042 + Math.floor(tick / 5),
+        notifySeq: (old.notifySeq ?? 0) + 1, receivedAt: at };
+      rememberSample(sample);
+      tracker.ingest(sample);
+      observeTrailPacket(sample);
+    }
+    scheduleRender();
+  }, 200);
 }
 
 export function initFleetUI() {

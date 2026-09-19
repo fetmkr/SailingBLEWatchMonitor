@@ -17,6 +17,9 @@ constexpr uint16_t kHdgInvalid       = 0xFFFF;
 constexpr int8_t   kAttitudeInvalid  = -128;
 constexpr uint32_t kFrameUs          = 1000000;
 constexpr uint32_t kSlotUs           = kFrameUs / 32;
+constexpr uint8_t  kNormalRateHz     = 1;
+constexpr uint8_t  kBenchRateHz      = 5;
+constexpr uint32_t kBenchPeriodUs    = kFrameUs / kBenchRateHz;
 constexpr uint32_t kPpsHoldoverMs    = 20u * 60u * 1000u;
 constexpr uint32_t kHeardFreshMs     = 3000;
 constexpr uint8_t  kWireVersion      = 2;
@@ -168,6 +171,19 @@ inline bool decode(const uint8_t in[kPayloadLen], Decoded* out) {
 
 inline uint32_t slotOffsetUs(uint8_t boat) {
     return (boat >= 1 && boat <= 32) ? (uint32_t)(boat - 1) * kSlotUs : 0;
+}
+
+inline bool validLiveRateHz(uint8_t hz) {
+    return hz == kNormalRateHz || hz == kBenchRateHz;
+}
+
+// 5 Hz는 송신기 한 대의 무선 경로를 보는 짧은 시험이라 TDMA 슬롯을 쓰지 않는다.
+// 제품 모드 1 Hz에서만 32척 슬롯을 적용한다.
+inline uint32_t liveTargetOffsetUs(uint32_t ageUs, uint8_t boat, uint8_t hz) {
+    if (hz == kBenchRateHz) {
+        return ((ageUs % kFrameUs) / kBenchPeriodUs) * kBenchPeriodUs;
+    }
+    return slotOffsetUs(boat);
 }
 
 // 32-bit micros()는 약 71분에 한 바퀴 돈다. 부호 없는 뺄셈은 한 번의

@@ -1183,6 +1183,7 @@ static void printHelp() {
     printf("  lora watch    받을 때마다 한 줄씩 뱉기 (두 대로 시험할 때)\n");
     printf("  lora peers    최근 3초에 받은 배 목록\n");
     printf("  lora live on|off  장거리 송수신 시작/종료. off면 SX1262 sleep\n");
+    printf("  lora rate 1|5    송신률. 5 Hz는 한 송신기 60초 시험 뒤 자동 1 Hz\n");
     printf("  info          현재 설정 출력\n");
     printf("\n");
     printf("  ── 보드 진단 ──\n");
@@ -1353,11 +1354,25 @@ static void controlLine(const char* raw) {
     }
     if (!strcmp(line, "lora live")) {
         snprintf(out, sizeof out,
-                 "lora live %s boat %u pps %s rx %u ringdrop %u appdrop %u notifyfail %u",
+                 "lora live %s boat %u pps %s rate %uHz rx %u ringdrop %u appdrop %u notifyfail %u",
                  lora::liveEnabled() ? "on" : "off", gBoatId,
-                 lora::ppsReady() ? "ready" : "wait", (unsigned)lora::received(),
+                 lora::ppsReady() ? "ready" : "wait", (unsigned)lora::liveRateHz(),
+                 (unsigned)lora::received(),
                  (unsigned)lora::dropped(), (unsigned)lora::fleetDropped(),
                  (unsigned)ble::fleetNotifyFailed());
+        ble::controlSay(out);
+        return;
+    }
+    unsigned loraRate = 0;
+    char loraRateExtra = 0;
+    if (sscanf(line, "lora rate %u %c", &loraRate, &loraRateExtra) == 1) {
+        const bool ok = loraRate <= 255 && lora::setLiveRateHz((uint8_t)loraRate);
+        if (ok) {
+            const unsigned applied = lora::liveRateHz();
+            snprintf(out, sizeof out, "ok lora rate %uHz%s", applied, applied == 5 ? " 60s" : "");
+        } else {
+            snprintf(out, sizeof out, "err lora rate 1|5");
+        }
         ble::controlSay(out);
         return;
     }
@@ -1474,7 +1489,7 @@ static void controlLine(const char* raw) {
         return;
     }
     if (!strcmp(line, "help")) {
-        ble::controlSay("cmds: rec on|off | boat 0..32 | lora live on|off | wifi ... | magcal ...");
+        ble::controlSay("cmds: rec on|off | boat 0..32 | lora live on|off | lora rate 1|5 | wifi ... | magcal ...");
         return;
     }
     snprintf(out, sizeof out, "err unknown %s", line);
@@ -2307,9 +2322,15 @@ static void handleLine(char* line) {
     if (!strcmp(line, "lora watch")) { lora::watchToggle(); return; }
     if (!strcmp(line, "lora peers")) { lora::reportPeers(); return; }
     if (!strcmp(line, "lora live")) {
-        printf("[LORA] 장거리 송수신 %s · 배 %u · PPS %s\n",
+        printf("[LORA] 장거리 송수신 %s · 배 %u · PPS %s · %u Hz\n",
                lora::liveEnabled() ? "켬" : "끔", gBoatId,
-               lora::ppsReady() ? "준비" : "대기");
+               lora::ppsReady() ? "준비" : "대기", (unsigned)lora::liveRateHz());
+        return;
+    }
+    unsigned loraRate = 0;
+    char loraRateExtra = 0;
+    if (sscanf(line, "lora rate %u %c", &loraRate, &loraRateExtra) == 1) {
+        lora::setLiveRateHz(loraRate <= 255 ? (uint8_t)loraRate : 0);
         return;
     }
     if (!strcmp(line, "lora live on"))  { lora::setLiveEnabled(true);  return; }

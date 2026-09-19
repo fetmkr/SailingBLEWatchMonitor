@@ -934,10 +934,20 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 }
 #fleetReceivers small { color: var(--dim); }
 #fleetBoats { display: flex; flex-direction: column; gap: 5px; }
+.fleet-boat-row { display: flex; align-items: stretch; gap: 5px; min-width: 0; }
+.fleet-boat-row > .fleet-boat { min-width: 0; flex: 1; }
 .fleet-boat {
   width: 100%; min-height: 58px; display: grid; grid-template-columns: 34px 1fr auto;
   align-items: center; gap: var(--sp2); text-align: left; padding: 7px 8px;
   background: transparent; border-color: transparent;
+}
+.fleet-trail-toggle {
+  min-width: 58px; min-height: var(--tap); padding: 5px 7px; border-color: var(--line);
+  color: var(--dim); font-size: var(--fs-xs); line-height: 1.2;
+}
+.fleet-trail-toggle.on {
+  color: #fff; border-color: #ef4444; background: #b91c1c;
+  box-shadow: 0 0 0 3px #ef444424;
 }
 .fleet-boat:hover { background: var(--hover); border-color: var(--line); }
 .fleet-boat.pick-a { background: color-mix(in srgb, #3b82f6 18%, var(--panel)); border-color: #3b82f6; }
@@ -951,7 +961,8 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .pick-a .fleet-id { background: #2563eb; }
 .pick-b .fleet-id { background: #ea580c; }
 .fleet-main { display: flex; flex-direction: column; min-width: 0; }
-.fleet-main small { color: var(--dim); white-space: nowrap; }
+.fleet-main b, .fleet-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fleet-main small { color: var(--dim); }
 .fleet-health { display: flex; flex-direction: column; align-items: flex-end; color: var(--dim); font-size: var(--fs-xs); }
 .fleet-health i { width: 8px; height: 8px; border-radius: 50%; margin-bottom: 3px; }
 .fleet-health.live i { background: #22c55e; }
@@ -970,6 +981,9 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 }
 .fleet-map-bar select { width: 140px; }
 .fleet-map-bar > .dim { margin-left: auto; font-size: var(--fs-xs); }
+.fleet-trail-legend { display: inline-flex; align-items: center; gap: 6px; color: #f59e0b; font-size: var(--fs-xs); }
+.fleet-trail-legend[hidden] { display: none; }
+.fleet-trail-legend i { width: 24px; border-top: 3px dashed #f59e0b; }
 #fleetCharts {
   grid-column: 1 / -1; grid-row: 2; height: clamp(260px, 38vh, 410px);
   min-width: 0; min-height: 0; overflow: auto;
@@ -1038,6 +1052,8 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 @media (max-width: 1020px) {
   body[data-mode="fleet"] #fleetShell { grid-template-columns: 210px minmax(300px, 1fr) 300px; }
   .fleet-map-bar > .dim { display: none; }
+  .fleet-health { font-size: 0; }
+  .fleet-health i { margin-bottom: 0; }
   .mode-seg { width: 218px; }
 }
 

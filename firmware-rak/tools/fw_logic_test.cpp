@@ -191,6 +191,13 @@ static void testLoraPacket() {
     check(!lora::decode(b, &d), "모르는 미래 무선 버전은 조용히 거절");
     check(lora::slotOffsetUs(1) == 0 && lora::slotOffsetUs(7) == 187500 &&
           lora::slotOffsetUs(32) == 968750, "1초를 32개 31.25ms 차례로 나눈다");
+    check(lora::validLiveRateHz(1) && lora::validLiveRateHz(5) &&
+          !lora::validLiveRateHz(2), "장거리 송신률은 제품 1Hz와 짧은 시험 5Hz만 받는다");
+    check(lora::liveTargetOffsetUs(0, 7, 1) == 187500 &&
+          lora::liveTargetOffsetUs(199999, 7, 5) == 0 &&
+          lora::liveTargetOffsetUs(200000, 7, 5) == 200000 &&
+          lora::liveTargetOffsetUs(999999, 7, 5) == 800000,
+          "5Hz 시험은 PPS 초 안에서 200ms마다 보내고 1Hz는 배 슬롯을 지킨다");
     check(!lora::ppsWithinHoldover(false, 1000, 500, lora::kPpsHoldoverMs),
           "한 번도 못 본 PPS는 무효");
     check(lora::ppsWithinHoldover(true, 1200000000u, 0, lora::kPpsHoldoverMs),

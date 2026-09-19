@@ -249,6 +249,8 @@ TaskHandle_t gTxTask = nullptr;
 volatile bool gTransmitting = false;
 volatile bool gRadioAwake = false;
 volatile bool gLiveEnabled = false; // 장거리 송수신은 `lora live on` 뒤에만. 재부팅하면 꺼진다.
+volatile uint8_t gLiveRateHz = kNormalRateHz;
+volatile uint32_t gBenchRateUntilMs = 0;
 volatile uint32_t gTxOk = 0, gTxFailed = 0, gTxLate = 0;
 volatile uint32_t gPresenceOk = 0, gPresenceFailed = 0, gPresenceBusy = 0;
 volatile uint32_t gPresenceAtMs = 0;
@@ -292,6 +294,16 @@ PpsState ppsState() {
     s.valid = gPpsEver;
     portEXIT_CRITICAL(&gPpsMux);
     return s;
+}
+
+uint8_t currentLiveRateHz() {
+    if (gLiveRateHz == kBenchRateHz &&
+        (int32_t)(millis32() - gBenchRateUntilMs) >= 0) {
+        gLiveRateHz = kNormalRateHz;
+        gBenchRateUntilMs = 0;
+        printf("[LORA] 5 Hz 시험 60초 끝 — 제품 기본 1 Hz로 돌아갑니다\n");
+    }
+    return gLiveRateHz;
 }
 
 uint32_t heardMask(uint32_t now) {
@@ -398,7 +410,8 @@ bool transmitLive(Live live, bool timeValid, int16_t* status) {
 }
 
 void txWorker(void*) {
-    uint32_t lastFrameStart = UINT32_MAX;
+    uint32_t lastTargetUs = UINT32_MAX;
+    uint32_t lastBenchPresenceAtMs = 0;
     for (;;) {
         const PpsState pps = ppsState();
         const uint32_t ppsAt = pps.atUs;
@@ -419,9 +432,32 @@ void txWorker(void*) {
 
         const uint32_t nowUs = micros32();
         const uint32_t ageUs = nowUs - ppsAt;
+        const uint8_t rateHz = currentLiveRateHz();
 
         if (!ever) {
             const uint32_t nowMs = millis32();
+            // 안테나·무선 경로만 보는 5 Hz 시험은 GPS PPS가 없어도 동작한다.
+            // 위치·SOG·COG·GPS 시각은 makePresence()가 비워서 항해값인 척하지 않는다.
+            if (rateHz == kBenchRateHz) {
+                if (lastBenchPresenceAtMs && nowMs - lastBenchPresenceAtMs < 1000u / kBenchRateHz) {
+                    vTaskDelay(pdMS_TO_TICKS(5));
+                    continue;
+                }
+                lastBenchPresenceAtMs = nowMs;
+                portENTER_CRITICAL(&gLiveMux);
+                live = gLive;
+                portEXIT_CRITICAL(&gLiveMux);
+                if (live.boat < 1 || live.boat > 32) continue;
+                int16_t st = 0;
+                if (!transmitLive(live, false, &st)) {
+                    gPresenceBusy = gPresenceBusy + 1;
+                } else if (st == RADIOLIB_ERR_NONE) {
+                    gPresenceOk = gPresenceOk + 1;
+                } else {
+                    gPresenceFailed = gPresenceFailed + 1;
+                }
+                continue;
+            }
             if ((int32_t)(nowMs - gPresenceAtMs) < 0) {
                 vTaskDelay(pdMS_TO_TICKS(20));
                 continue;
@@ -445,12 +481,11 @@ void txWorker(void*) {
         }
         const uint32_t after = ageUs / kFrameUs;
         const uint32_t frameStart = ppsAt + after * kFrameUs;
-        if (frameStart == lastFrameStart) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
-
-        const uint32_t target = frameStart + slotOffsetUs(live.boat);
+        const uint32_t target = frameStart + liveTargetOffsetUs(ageUs, live.boat, rateHz);
+        if (target == lastTargetUs) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
         int32_t until = (int32_t)(target - nowUs);
-        if (until < -5000) { // 제 차례를 5ms 넘게 놓쳤으면 다음 초까지 기다린다
-            lastFrameStart = frameStart;
+        if (until < -5000) { // 목표 시각을 5ms 넘게 놓쳤으면 다음 차례까지 기다린다
+            lastTargetUs = target;
             gTxLate = gTxLate + 1;
             continue;
         }
@@ -464,8 +499,8 @@ void txWorker(void*) {
         portENTER_CRITICAL(&gLiveMux);
         live = gLive;
         portEXIT_CRITICAL(&gLiveMux);
-        if (live.boat < 1 || live.boat > 32) { lastFrameStart = frameStart; continue; }
-        lastFrameStart = frameStart; // 실패해도 같은 차례에 두 번 쏘지 않는다
+        if (live.boat < 1 || live.boat > 32) { lastTargetUs = target; continue; }
+        lastTargetUs = target; // 실패해도 같은 차례에 두 번 쏘지 않는다
         int16_t st = 0;
         if (!transmitLive(live, true, &st)) { gTxLate = gTxLate + 1; continue; }
         if (st == RADIOLIB_ERR_NONE) gTxOk = gTxOk + 1;
@@ -610,8 +645,9 @@ void report() {
     portENTER_CRITICAL(&gLiveMux);
     live = gLive;
     portEXIT_CRITICAL(&gLiveMux);
-    printf("  장거리     %s · 무전기 %s · 배 %u · 송신 %u 성공 / %u 실패 / %u 차례 놓침\n",
+    printf("  장거리     %s · 무전기 %s · 배 %u · %u Hz · 송신 %u 성공 / %u 실패 / %u 차례 놓침\n",
            gLiveEnabled ? "송수신" : "끔", gRadioAwake ? "깨어 있음" : "sleep", live.boat,
+           (unsigned)currentLiveRateHz(),
            (unsigned)gTxOk, (unsigned)gTxFailed, (unsigned)gTxLate);
     printf("  PPS 전     확인 신호 %u 성공 / %u 실패 / %u 무전기 바쁨 · 5~8초 무작위 간격\n",
            (unsigned)gPresenceOk, (unsigned)gPresenceFailed, (unsigned)gPresenceBusy);
@@ -831,6 +867,24 @@ bool setLiveEnabled(bool enabled) {
 }
 
 bool liveEnabled() { return gLiveEnabled; }
+
+bool setLiveRateHz(uint8_t hz) {
+    if (!validLiveRateHz(hz)) {
+        printf("[LORA] 송신률은 1 또는 5만 됩니다\n");
+        return false;
+    }
+    gLiveRateHz = hz;
+    if (hz == kBenchRateHz) {
+        gBenchRateUntilMs = millis32() + 60000u;
+        printf("[LORA] 5 Hz 시험 시작 — 송신기 한 대만, 60초 뒤 자동 1 Hz\n");
+    } else {
+        gBenchRateUntilMs = 0;
+        printf("[LORA] 제품 기본 1 Hz\n");
+    }
+    return true;
+}
+
+uint8_t liveRateHz() { return currentLiveRateHz(); }
 
 bool ppsReady() {
     return ppsState().valid;
