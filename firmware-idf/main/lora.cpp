@@ -182,7 +182,7 @@ constexpr int8_t  kTxDbm     = 8;
 
 // PPS 전에는 TDMA 차례를 모르므로 같은 속도로 보내면 함대를 망친다. 대신
 // 5~8초에 한 번만, 무작위 간격으로 항해값을 비운 확인 신호를 보낸다.
-// 한 대의 점유율은 15.42ms / 5~8s = 0.19~0.31%다.
+// 한 대의 점유율은 14.144ms / 5~8s = 0.18~0.28%다.
 constexpr uint32_t kPresenceMinMs    = 5000;
 constexpr uint32_t kPresenceJitterMs = 3001;
 
