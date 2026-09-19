@@ -322,6 +322,7 @@ input[type="checkbox"], input[type="radio"] {
 body[data-mode="fleet"] #fleetShell {
   flex: 1; min-height: 0; min-width: 0;
   display: grid; grid-template-columns: minmax(220px, 260px) minmax(320px, 1fr) minmax(300px, 360px);
+  grid-template-rows: minmax(300px, 1fr) auto;
   background: var(--bg);
 }
 
@@ -902,8 +903,9 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
   min-width: 0; min-height: 0; overflow: auto; background: var(--panel);
   padding: var(--sp4);
 }
-#fleetListPane { border-right: 1px solid var(--line); }
-#fleetDetailPane { border-left: 1px solid var(--line); }
+#fleetListPane { grid-column: 1; grid-row: 1; border-right: 1px solid var(--line); }
+#fleetMapPane { grid-column: 2; grid-row: 1; }
+#fleetDetailPane { grid-column: 3; grid-row: 1; border-left: 1px solid var(--line); }
 .fleet-board-block {
   margin: calc(-1 * var(--sp4)) calc(-1 * var(--sp4)) var(--sp4);
   padding: var(--sp4); border-bottom: 1px solid var(--line); background: var(--bg);
@@ -968,20 +970,30 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 }
 .fleet-map-bar select { width: 140px; }
 .fleet-map-bar > .dim { margin-left: auto; font-size: var(--fs-xs); }
-#fleetCharts { flex: 0 0 250px; min-height: 0; overflow: auto; padding: var(--sp2) var(--sp3) var(--sp3); border-top: 1px solid var(--line); background: var(--panel); }
+#fleetCharts {
+  grid-column: 1 / -1; grid-row: 2; height: clamp(260px, 38vh, 410px);
+  min-width: 0; min-height: 0; overflow: auto;
+  padding: var(--sp2) var(--sp3) var(--sp3);
+  border-top: 1px solid var(--line); background: var(--panel);
+}
+#fleetCharts[hidden] { display: none; }
 .fleet-charts-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp2); margin-bottom: 7px; }
 .fleet-charts-head b { font-size: var(--fs-sm); }
 .fleet-charts-head span { color: var(--dim); font-size: var(--fs-xs); }
-#fleetChartsBody { display: grid; grid-template-columns: repeat(2, minmax(250px, 1fr)); gap: 7px; }
-.fleet-chart { min-width: 0; height: 101px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px 8px; background: var(--bg); display: grid; grid-template-rows: auto auto 1fr; }
+#fleetChartsBody { display: flex; flex-direction: column; gap: 7px; }
+.fleet-chart {
+  min-width: 0; height: 92px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 7px 9px; background: var(--bg); display: grid;
+  grid-template-columns: minmax(180px, 250px) minmax(0, 1fr); grid-template-rows: auto 1fr;
+  column-gap: var(--sp3);
+}
 .fleet-chart-title { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp2); }
-.fleet-chart-title b { font-size: var(--fs-xs); }
+.fleet-chart-title b { font-size: var(--fs-sm); }
 .fleet-chart-title small { color: var(--dim); font-size: 10px; white-space: nowrap; }
-.fleet-chart-legend { min-height: 15px; display: flex; flex-wrap: wrap; gap: 3px 9px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.fleet-chart-legend { min-height: 15px; display: flex; flex-direction: column; justify-content: center; gap: 3px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .fleet-chart-legend span { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
 .fleet-chart-legend i { display: inline-block; width: 12px; border-top: 2px solid currentColor; }
-.fleet-chart-legend i.dash { border-top-style: dashed; }
-.fleet-chart svg { width: 100%; height: 100%; overflow: visible; }
+.fleet-chart svg { grid-column: 2; grid-row: 1 / 3; width: 100%; height: 100%; overflow: visible; }
 .fleet-chart svg path:not(.grid) { fill: none; stroke-width: 2.2; vector-effect: non-scaling-stroke; }
 .fleet-chart svg .grid { fill: none; stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .fleet-chart-empty { grid-column: 1 / -1; min-height: 185px; display: grid; place-items: center; color: var(--dim); text-align: center; }
@@ -1046,18 +1058,17 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
     box-shadow: -12px 0 28px #0008;
   }
 
-  /* 세 칸을 억지로 나란히 두지 않는다. 목록은 왼쪽, 지도와 비교는 오른쪽 위아래다. */
+  /* 위에는 목록·지도·상세, 선택한 배의 실시간 그래프는 전체 폭 아래에 둔다. */
   body[data-mode="fleet"] #fleetShell {
-    grid-template-columns: clamp(205px, 30vw, 260px) minmax(280px, 1fr);
-    grid-template-rows: minmax(300px, 1fr) minmax(220px, 38%);
+    grid-template-columns: clamp(190px, 27vw, 230px) minmax(280px, 1fr) minmax(235px, 31vw);
+    grid-template-rows: minmax(300px, 1fr) auto;
   }
-  #fleetListPane { grid-column: 1; grid-row: 1 / 3; }
+  #fleetListPane { grid-column: 1; grid-row: 1; }
   #fleetMapPane { grid-column: 2; grid-row: 1; }
-  #fleetDetailPane { grid-column: 2; grid-row: 2; border-left: none; border-top: 1px solid var(--line); }
+  #fleetDetailPane { grid-column: 3; grid-row: 1; border-left: 1px solid var(--line); border-top: none; }
   .fleet-empty.large { min-height: 150px; }
-  #fleetCharts { flex-basis: 222px; }
-  #fleetChartsBody { grid-template-columns: repeat(2, minmax(210px, 1fr)); }
-  .fleet-chart { height: 88px; }
+  #fleetCharts { grid-column: 1 / -1; grid-row: 2; height: clamp(250px, 38vh, 350px); }
+  .fleet-chart { height: 84px; grid-template-columns: minmax(155px, 205px) minmax(0, 1fr); }
 }
 
 /* 켜져 있는 위 띠 단추 (센서 원본) */

@@ -274,7 +274,7 @@ function graphPath(samples: FleetSample[], pick: NumberAt, min: number, max: num
 }
 
 function chart(title: string, subtitle: string, boats: FleetBoat[], now: number,
-               range: [number, number], lines: { label: string; pick: NumberAt; show?: NumberAt; dash?: string; circular?: boolean }[]) {
+               range: [number, number], lines: { label: string; pick: NumberAt; digits?: number; unit?: string; circular?: boolean }[]) {
   const colors = ["#38bdf8", "#fb923c"];
   const paths: string[] = [];
   const legend: string[] = [];
@@ -282,9 +282,10 @@ function chart(title: string, subtitle: string, boats: FleetBoat[], now: number,
     const samples = histories.get(boat.boat) ?? [];
     lines.forEach((line) => {
       const path = graphPath(samples, line.pick, range[0], range[1], now, !!line.circular);
-      if (path) paths.push(`<path d="${path}" stroke="${colors[bi]}" ${line.dash ? `stroke-dasharray="${line.dash}"` : ""}/>`);
-      const current = samples.length ? (line.show ?? line.pick)(samples[samples.length - 1]) : null;
-      legend.push(`<span style="color:${colors[bi]}"><i class="${line.dash ? "dash" : ""}"></i>B${boat.boat} ${line.label} ${current === null ? "—" : current.toFixed(line.label === "SOG" ? 2 : 1)}</span>`);
+      if (path) paths.push(`<path d="${path}" stroke="${colors[bi]}"/>`);
+      const current = samples.length ? line.pick(samples[samples.length - 1]) : null;
+      const shown = current === null ? "—" : `${current.toFixed(line.digits ?? 1)}${line.unit ?? ""}`;
+      legend.push(`<span style="color:${colors[bi]}"><i></i>B${boat.boat} ${line.label} ${shown}</span>`);
     });
   });
   return `<section class="fleet-chart">
@@ -297,31 +298,27 @@ function chart(title: string, subtitle: string, boats: FleetBoat[], now: number,
 }
 
 function renderCharts(now: number) {
+  const panel = $("fleetCharts");
   const body = $("fleetChartsBody");
   const chosen = selected.map((n) => tracker.boats.get(n)).filter((b): b is FleetBoat => !!b && !tracker.conflicted(b.boat));
-  const boats = (chosen.length ? chosen : [...tracker.boats.values()].sort((a, b) => b.receivedAt - a.receivedAt)).slice(0, 2);
-  $("fleetChartScope").textContent = boats.length ? `${boats.map((b) => `B${b.boat}`).join(" · ")} · 최근 5분` : "배를 기다리는 중";
-  if (!boats.length) {
-    body.innerHTML = `<div class="fleet-chart-empty">LoRa 데이터가 들어오면 SOG·HDG·COG·자세·신호 추이를 여기에 쌓습니다.</div>`;
+  panel.hidden = chosen.length === 0;
+  if (!chosen.length) {
+    $("fleetChartScope").textContent = "배를 선택하세요";
+    body.innerHTML = "";
     return;
   }
+  const boats = chosen.slice(0, 2);
+  $("fleetChartScope").textContent = `${boats.map((b) => `B${b.boat}`).join(" · ")} · 최근 5분`;
   const samples = boats.flatMap((b) => histories.get(b.boat) ?? []);
   const sogMax = Math.max(1, Math.ceil(Math.max(0, ...samples.map((s) => s.sogKn ?? 0)) * 1.2 * 2) / 2);
   const attitudeMax = Math.max(10, Math.ceil(Math.max(0, ...samples.flatMap((s) => [Math.abs(s.heelDeg ?? 0), Math.abs(s.pitchDeg ?? 0)])) / 5) * 5);
   body.innerHTML = [
-    chart("SOG", `0–${sogMax.toFixed(1)} kn`, boats, now, [0, sogMax], [{ label: "SOG", pick: (s) => s.sogKn }]),
-    chart("HDG M / COG T", "0–360° · 점선은 COG", boats, now, [0, 360], [
-      { label: "HDG", pick: (s) => s.headingDeg, circular: true },
-      { label: "COG", pick: (s) => s.cogDeg, dash: "7 5", circular: true },
-    ]),
-    chart("HEEL / PITCH", `−${attitudeMax}–+${attitudeMax}° · 점선은 PITCH`, boats, now, [-attitudeMax, attitudeMax], [
-      { label: "HEEL", pick: (s) => s.heelDeg },
-      { label: "PITCH", pick: (s) => s.pitchDeg, dash: "7 5" },
-    ]),
-    chart("LoRa RSSI / SNR", "RSSI −130…−20 dBm · 점선 SNR −20…20 dB", boats, now, [-130, -20], [
-      { label: "RSSI", pick: (s) => s.rssi },
-      { label: "SNR", pick: (s) => -130 + (s.snr + 20) / 40 * 110, show: (s) => s.snr, dash: "7 5" },
-    ]),
+    chart("SOG", `0–${sogMax.toFixed(1)} kn`, boats, now, [0, sogMax], [{ label: "SOG", pick: (s) => s.sogKn, digits: 2, unit: " kn" }]),
+    chart("HDG", "0–360° · 자북(M)", boats, now, [0, 360], [{ label: "HDG", pick: (s) => s.headingDeg, unit: "°M", circular: true }]),
+    chart("COG", "0–360° · 진북(T)", boats, now, [0, 360], [{ label: "COG", pick: (s) => s.cogDeg, unit: "°T", circular: true }]),
+    chart("HEEL", `−${attitudeMax}–+${attitudeMax}°`, boats, now, [-attitudeMax, attitudeMax], [{ label: "HEEL", pick: (s) => s.heelDeg, unit: "°" }]),
+    chart("PITCH", `−${attitudeMax}–+${attitudeMax}°`, boats, now, [-attitudeMax, attitudeMax], [{ label: "PITCH", pick: (s) => s.pitchDeg, unit: "°" }]),
+    chart("RSSI", "LoRa 수신 세기 · −130…−20 dBm", boats, now, [-130, -20], [{ label: "RSSI", pick: (s) => s.rssi, digits: 0, unit: " dBm" }]),
   ].join("");
 }
 
