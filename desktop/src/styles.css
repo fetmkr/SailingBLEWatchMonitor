@@ -1030,19 +1030,37 @@ button.ghost:hover { color: var(--ink); background: var(--hover); }
 .fleet-compare-head { display: flex; justify-content: space-between; margin-bottom: var(--sp3); }
 .fleet-warn { color: #f59e0b; margin-top: var(--sp3); font-size: var(--fs-sm); }
 
-/* MapLibre HTML marker. 숫자는 배 번호, 화살표는 COG(T)다. */
+/* MapLibre HTML marker. 길쭉한 선체의 뾰족한 끝이 HDG(M), 중심 숫자가 배 번호다. */
 .fleet-marker {
-  width: 42px; height: 42px; padding: 0; border-radius: 50%; border: 3px solid #f8fafc;
-  background: #53606f; color: #fff; box-shadow: 0 2px 8px #0008; font-weight: 800;
-  display: grid; place-items: center; position: relative;
+  width: 56px; height: 56px; padding: 0; border: 0; border-radius: 0;
+  background: transparent; color: #fff; box-shadow: none; font-weight: 800;
+  display: grid; place-items: center; position: relative; overflow: visible;
 }
 .fleet-marker::after { display: none; }
-.fleet-marker.pick-a { background: #2563eb; transform: scale(1.12); }
-.fleet-marker.pick-b { background: #ea580c; transform: scale(1.12); }
 .fleet-marker.stale { opacity: .45; }
-.fleet-arrow { position: absolute; left: 14px; top: -20px; width: 12px; transform-origin: 6px 27px; color: #111827; text-shadow: 0 0 2px white, 0 0 3px white; }
+.fleet-hull {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  transform-origin: 50% 50%; pointer-events: none;
+}
+.fleet-hull svg {
+  width: 30px; height: 56px; overflow: visible; transition: transform .15s ease;
+  filter: drop-shadow(0 2px 4px #000a);
+}
+.fleet-hull path { fill: #53606f; stroke: #f8fafc; stroke-width: 2.5; stroke-linejoin: round; }
+.fleet-marker.pick-a .fleet-hull path { fill: #2563eb; }
+.fleet-marker.pick-b .fleet-hull path { fill: #ea580c; }
+.fleet-marker.pick-a .fleet-hull svg, .fleet-marker.pick-b .fleet-hull svg { transform: scale(1.12); }
+.fleet-marker > b { position: relative; z-index: 1; color: #fff; text-shadow: 0 1px 2px #000c; pointer-events: none; }
+.fleet-no-heading {
+  display: none; position: absolute; width: 40px; height: 40px; border-radius: 50%;
+  border: 3px solid #f8fafc; background: #53606f; box-shadow: 0 2px 8px #0008;
+}
+.fleet-marker.no-heading .fleet-hull { display: none; }
+.fleet-marker.no-heading .fleet-no-heading { display: block; }
+.fleet-marker.no-heading.pick-a .fleet-no-heading { background: #2563eb; }
+.fleet-marker.no-heading.pick-b .fleet-no-heading { background: #ea580c; }
 .fleet-marker-data {
-  position: absolute; left: 50%; top: 45px; transform: translateX(-50%); width: max-content;
+  position: absolute; left: 50%; top: 60px; transform: translateX(-50%); width: max-content;
   padding: 3px 6px; border: 1px solid #ffffff55; border-radius: 6px;
   background: #111827e8; color: #fff; box-shadow: 0 2px 7px #0008;
   font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre;

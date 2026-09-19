@@ -546,7 +546,7 @@ export class TrackMap {
         const el = document.createElement("button");
         el.type = "button";
         el.className = "fleet-marker";
-        el.innerHTML = `<span class="fleet-arrow">▲</span><b>${p.boat}</b><span class="fleet-marker-data"></span>`;
+        el.innerHTML = `<span class="fleet-hull" aria-hidden="true"><svg viewBox="0 0 30 56"><path d="M15 2 28 48Q15 56 2 48Z"/></svg></span><span class="fleet-no-heading" aria-hidden="true"></span><b>${p.boat}</b><span class="fleet-marker-data"></span>`;
         el.title = `${p.boat}번 배 선택`;
         el.onclick = () => this.onFleetPick?.(p.boat);
         marker = new Marker({ element: el, anchor: "center" }).setLngLat([p.lon, p.lat]).addTo(this.map);
@@ -554,11 +554,12 @@ export class TrackMap {
       }
       marker.setLngLat([p.lon, p.lat]);
       const el = marker.getElement();
-      el.className = `fleet-marker${p.select ? ` pick-${p.select}` : ""}${p.stale ? " stale" : ""}`;
-      const arrow = el.querySelector<HTMLElement>(".fleet-arrow");
-      if (arrow) {
-        arrow.hidden = p.cogDeg === null;
-        arrow.style.transform = `rotate(${p.cogDeg ?? 0}deg)`;
+      el.className = `fleet-marker${p.select ? ` pick-${p.select}` : ""}${p.stale ? " stale" : ""}${p.headingDeg === null ? " no-heading" : ""}`;
+      const hull = el.querySelector<HTMLElement>(".fleet-hull");
+      if (hull && p.headingDeg !== null) {
+        // SVG의 뾰족한 끝은 0°(지도 위쪽)다. HDG M만큼 시계 방향으로 돌린다.
+        // COG로 돌리면 요트의 리웨이가 지도에서 사라지므로 쓰지 않는다.
+        hull.style.transform = `rotate(${p.headingDeg}deg)`;
       }
       const data = el.querySelector<HTMLElement>(".fleet-marker-data");
       if (data) {
@@ -566,7 +567,7 @@ export class TrackMap {
         const hdg = p.headingDeg === null ? "HDG —" : `HDG ${Math.round(p.headingDeg).toString().padStart(3, "0")}°M`;
         data.textContent = `${sog}  ${hdg}`;
       }
-      el.title = `${p.boat}번 배 · ${data?.textContent ?? ""} · 화살표 COG(T)`;
+      el.title = `${p.boat}번 배 · ${data?.textContent ?? ""} · 선수 방향 HDG(M)`;
     }
   }
 
